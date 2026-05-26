@@ -45,6 +45,7 @@ render_mode cull_disabled, shadows_disabled, depth_draw_always;
 // resulting triangle still produces a valid horizon silhouette instead of
 // diverging to NaN / infinity.
 const float PROJECTED_GRID_FAR_HORIZON = 20000.0;
+const float PROJECTED_GRID_FADE_START = 12000.0;
 
 // Overscan factor — how far BEYOND the standard [-1,1] NDC range the grid
 // extends. At 1.0 the grid exactly covers the screen (and single-pixel gaps
@@ -103,6 +104,7 @@ void vertex() {
 	// looking DOWN at the water) for a valid hit; fall back to a distant
 	// horizon clamp for any upward / parallel / behind-camera case.
 	vec3 world_pos;
+	float projected_coverage = 1.0;
 	if (ray_d.y > -1e-4) {
 		vec2 horiz_dir = length(ray_d.xz) > 1e-5 ? normalize(ray_d.xz) : vec2(0.0, 1.0);
 		world_pos = vec3(
@@ -110,6 +112,7 @@ void vertex() {
 			sea_level,
 			ray_o.z + horiz_dir.y * PROJECTED_GRID_FAR_HORIZON
 		);
+		projected_coverage = 0.0;
 	} else {
 		float t = (sea_level - ray_o.y) / ray_d.y;
 		if (t < 0.0) {
@@ -119,6 +122,7 @@ void vertex() {
 				sea_level,
 				ray_o.z + horiz_dir.y * PROJECTED_GRID_FAR_HORIZON
 			);
+			projected_coverage = 0.0;
 		} else {
 			world_pos = ray_o + ray_d * t;
 			// Distance clamp: keep FFT sampling bounded.
@@ -130,6 +134,9 @@ void vertex() {
 					sea_level,
 					ray_o.z + horiz_dir.y * PROJECTED_GRID_FAR_HORIZON
 				);
+				projected_coverage = 0.0;
+			} else {
+				projected_coverage = 1.0 - smoothstep(PROJECTED_GRID_FADE_START, PROJECTED_GRID_FAR_HORIZON, dist_xz);
 			}
 		}
 	}
@@ -149,7 +156,7 @@ void vertex() {
 	vec4 shore_data = water_surface_shore_sample(shore_uv, true);
 	float shore = shore_data.r;
 
-	world_pos += displacement * wave_scale * shore;
+	world_pos += displacement * wave_scale * shore * projected_coverage;
 
 	// Shore waves — analytical swash oriented perpendicular to coastline.
 	vec4 shore_offset = water_surface_shore_offset(world_pos.xz, shore_uv, in_mask, shore_data);
@@ -159,9 +166,10 @@ void vertex() {
 	v_shore_slope = shore_slope;
 	v_shore_choppiness = shore_offset.w;
 
-	wave_height = displacement.y * shore + shore_offset.z;
+	wave_height = displacement.y * shore * projected_coverage + shore_offset.z;
 	v_world_pos = world_pos;
-	v_choppiness = chop_accum * wave_scale * shore;
+	v_choppiness = chop_accum * wave_scale * shore * projected_coverage;
+	v_projected_coverage = projected_coverage;
 
 	// Write POSITION directly — bypasses the default `PROJECTION_MATRIX *
 	// MODELVIEW_MATRIX * vec4(VERTEX, 1.0)` Godot applies. The MeshInstance3D

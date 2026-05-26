@@ -83,6 +83,7 @@ var _weather_last_wind: float = -1.0
 var _weather_last_storm_dir: Vector3 = Vector3.ZERO
 var _weather_last_wind_t: float = 0.0
 var _weather_last_wind_dir_xz: Vector2 = Vector2(1.0, 1.0).normalized()
+var _current_ocean_wind_speed_mps: float = 2.0
 
 # Internal state
 var _ocean_mesh: OceanMesh = null
@@ -96,6 +97,7 @@ var _time: float = 0.0
 var _auto_find_camera: bool = true
 var _current_map_scales: PackedVector4Array = PackedVector4Array()
 var _active_shore_mask_texture: Texture2D = null
+var _active_shore_mask_rd: RID = RID()
 var _active_shore_mask_image: Image = null
 var _active_shore_mask_bounds: Rect2 = Rect2(-8000.0, -8000.0, 16000.0, 16000.0)
 var _active_shore_fade_distance: float = 50.0
@@ -103,6 +105,7 @@ var _current_shore_wave_amplitude: float = 0.18
 var _current_shore_wave_frequency: float = SHORE_WAVE_SPATIAL_FREQUENCY
 var _current_shore_wave_speed: float = 0.4
 var _current_shore_wave_steepness: float = 0.58
+var _surface_shader_mode: int = OceanMesh.SurfaceShaderMode.DEFAULT
 
 # FFT pipeline
 var _wave_generator: WaveGenerator = null
@@ -232,6 +235,7 @@ func _deferred_init() -> void:
 	_find_terrain()
 
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
+	_ocean_mesh.set_surface_shader_mode(_surface_shader_mode)
 	_update_shader_parameters()
 	_setup_spray_layer()
 	_setup_underwater_particulates_layer()
@@ -255,12 +259,16 @@ func _deferred_init() -> void:
 
 func _set_active_shore_mask(texture: Texture2D, bounds: Rect2, fade_distance: float, image: Image = null) -> void:
 	_active_shore_mask_texture = texture
+	_active_shore_mask_rd = RID()
 	_active_shore_mask_image = image
 	_active_shore_mask_bounds = bounds
 	_active_shore_fade_distance = fade_distance
 
 	if texture == null:
 		return
+	var texture_rid := texture.get_rid()
+	if texture_rid.is_valid():
+		_active_shore_mask_rd = RenderingServer.texture_get_rd_texture(texture_rid)
 	if _ocean_mesh:
 		_ocean_mesh.set_shore_mask(texture, bounds, fade_distance)
 	if _ocean_spray:
@@ -395,6 +403,7 @@ func _update_shader_parameters() -> void:
 	var mat: ShaderMaterial = _ocean_mesh.get_material()
 	if mat:
 		mat.set_shader_parameter(&"sea_level", sea_level)
+		_push_surface_motion_uniforms(mat)
 
 
 # ============================================================================
@@ -555,6 +564,22 @@ func _push_ocean_time_uniform() -> void:
 	mat.set_shader_parameter("ocean_time", _time)
 	if _ocean_spray:
 		_ocean_spray.set_ocean_time(_time)
+
+
+func _push_surface_motion_uniforms(mat: ShaderMaterial = null) -> void:
+	if mat == null:
+		if not _ocean_mesh:
+			return
+		mat = _ocean_mesh.get_material()
+	if mat == null:
+		return
+	var wind_dir := _weather_last_wind_dir_xz
+	if wind_dir.length_squared() < 0.0001:
+		wind_dir = Vector2(1.0, 1.0).normalized()
+	else:
+		wind_dir = wind_dir.normalized()
+	mat.set_shader_parameter("wind_dir_xz", wind_dir)
+	mat.set_shader_parameter("wind_speed_mps", _current_ocean_wind_speed_mps)
 
 
 func _setup_underwater_particulates_layer() -> void:
@@ -1029,6 +1054,9 @@ func set_sea_level(level: float) -> void:
 			shore_fade_distance,
 			_shore_mask.get_shore_mask_image()
 		)
+	_update_shader_parameters()
+	if _ocean_spray:
+		_ocean_spray.set_sea_level(sea_level)
 
 
 func get_sea_level() -> float:
@@ -1238,6 +1266,7 @@ func get_water_surface_state() -> WaterSurfaceState:
 		state.render_mesh_mode = int(_ocean_mesh.get_mesh_mode())
 		state.render_mesh_origin = _ocean_mesh.get_clipmap_origin()
 		state.render_clipmap_base_quad_size = _ocean_mesh.get_clipmap_base_quad_size()
+		state.render_clipmap_inner_quad_size = _ocean_mesh.get_clipmap_inner_quad_size()
 		state.render_clipmap_ring_vertex_count = _ocean_mesh.get_clipmap_ring_vertex_count()
 		state.render_clipmap_ring_count = _ocean_mesh.get_clipmap_ring_count()
 		state.render_projected_grid_dim = _ocean_mesh.get_projected_grid_dim()
@@ -1250,10 +1279,7 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.signed_shore_distance_query = Callable(self, "get_signed_shore_distance")
 	state.shore_side_query = Callable(self, "get_shore_side")
 	state.water_body_id_query = Callable(self, "get_water_body_id_at")
-	if _active_shore_mask_texture != null:
-		var texture_rid := _active_shore_mask_texture.get_rid()
-		if texture_rid.is_valid():
-			state.shore_mask_rd = RenderingServer.texture_get_rd_texture(texture_rid)
+	state.shore_mask_rd = _active_shore_mask_rd
 	return state
 
 
@@ -1573,6 +1599,7 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 	_ocean_mesh.name = "OceanMesh"
 	add_child(_ocean_mesh)
 	_ocean_mesh.initialize(ocean_radius, water_quality, water_mesh_mode)
+	_ocean_mesh.set_surface_shader_mode(_surface_shader_mode)
 	water_mesh_mode = _ocean_mesh.get_mesh_mode()
 
 	# Re-push shader parameters, shore mask, and FFT cascade state to the
@@ -1595,6 +1622,43 @@ func get_mesh_mode() -> int:
 	if _ocean_mesh:
 		return _ocean_mesh.get_mesh_mode()
 	return water_mesh_mode
+
+
+func get_surface_shader_mode() -> int:
+	if _ocean_mesh:
+		return _ocean_mesh.get_surface_shader_mode()
+	return _surface_shader_mode
+
+
+func get_surface_shader_mode_name() -> String:
+	if _ocean_mesh:
+		return _ocean_mesh.get_surface_shader_mode_name()
+	return "Boujie High" if _surface_shader_mode == OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL else "Default"
+
+
+func set_surface_shader_mode(mode: int) -> void:
+	_surface_shader_mode = clampi(
+		mode,
+		OceanMesh.SurfaceShaderMode.DEFAULT,
+		OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL
+	)
+	if not _system_enabled or not _ocean_mesh:
+		return
+	var changed := _ocean_mesh.set_surface_shader_mode(_surface_shader_mode)
+	if not changed:
+		return
+	_update_shader_parameters()
+	if _active_shore_mask_texture != null:
+		_ocean_mesh.set_shore_mask(_active_shore_mask_texture, _active_shore_mask_bounds, _active_shore_fade_distance)
+	else:
+		_load_shore_mask()
+	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH and _wave_generator:
+		_update_cascade_scales()
+	_push_current_absorption_to_material()
+	_push_surface_ssr_to_material()
+	_push_surface_motion_uniforms()
+	_push_ocean_time_uniform()
+	_update_sun_uniform()
 
 
 func set_water_quality(quality: int) -> void:
@@ -1678,6 +1742,7 @@ func set_wind_strength(value: float) -> void:
 	var v: float = clampf(value, 0.0, 1.0)
 	var ocean_wind: float = lerpf(2.0, 30.0, v)
 	var disp_scale: float = lerpf(0.1, 1.0, v)
+	_current_ocean_wind_speed_mps = ocean_wind
 	for cascade: WaveCascadeParameters in _cascade_parameters:
 		cascade.wind_speed = ocean_wind
 		cascade.displacement_scale = disp_scale
@@ -1687,6 +1752,7 @@ func set_wind_strength(value: float) -> void:
 	if _physics_evaluator:
 		_physics_evaluator.init_from_cascades(_cascade_parameters, fft_map_size)
 	_weather_last_wind_t = v
+	_push_surface_motion_uniforms()
 	_update_spray_weather(_weather_last_wind_t, _weather_last_wind_dir_xz)
 
 
@@ -1702,6 +1768,7 @@ func apply_weather(result: WeatherTypes.WeatherResult) -> void:
 	wind_dir_xz = wind_dir_xz.normalized()
 	_weather_last_wind_t = wind_t
 	_weather_last_wind_dir_xz = wind_dir_xz
+	_current_ocean_wind_speed_mps = lerpf(2.0, 30.0, wind_t)
 
 	# FFT mode — update cascade parameters (only when wind actually changes)
 	if _cascade_parameters.size() > 0:
@@ -1746,6 +1813,7 @@ func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> vo
 		cascade.whitecap = whitecap_val
 		cascade.spread = spread_val
 		cascade.swell = swell_val
+	_current_ocean_wind_speed_mps = ocean_wind
 
 	# CRITICAL — push the new per-cascade `displacement_scale` into the
 	# shader's `map_scales[i].z` uniform. Without this the shader keeps
@@ -1802,6 +1870,7 @@ func _apply_weather_shader(result: WeatherTypes.WeatherResult, wind_t: float) ->
 	mat.set_shader_parameter("color_shallow", Vector3(shallow_col.r, shallow_col.g, shallow_col.b))
 	mat.set_shader_parameter("color_deep", _current_absorption_tint)
 	_push_surface_optical_uniforms(mat)
+	_push_surface_motion_uniforms(mat)
 
 	# Shore foam — minimal in calm, wide in storms
 	mat.set_shader_parameter("foam_edge_width", lerpf(0.1, 1.5, wind_t))
@@ -1962,6 +2031,8 @@ func reset_weather() -> void:
 
 	_weather_last_wind_t = 0.0
 	_weather_last_wind_dir_xz = Vector2(1.0, 1.0).normalized()
+	_current_ocean_wind_speed_mps = 2.0
+	_push_surface_motion_uniforms(mat)
 	_update_spray_weather(_weather_last_wind_t, _weather_last_wind_dir_xz)
 
 	Log.info("water", "Ocean weather reset to calm defaults")

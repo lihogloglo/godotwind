@@ -32,4 +32,5 @@ void vertex() {
 	wave_height = displacement.y * shore + shore_offset.z;
 	v_world_pos = VERTEX;
 	v_choppiness = chop_accum * wave_scale * shore;
+	v_projected_coverage = 1.0;
 }

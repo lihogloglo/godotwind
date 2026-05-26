@@ -9,8 +9,13 @@ extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/underwater.glsl"
 const SCENE_COPY_SHADER_PATH := "res://src/core/shaders/compute/screen_color_copy.glsl"
+const CAUSTICS_NOISE_PATH := "res://assets/water/caustics_noise.png"
 const MAX_REASONABLE_TIMESTAMP_MS := 100.0
 const MAX_CASCADES := 8
+const FEATURE_ABSORPTION_FOG := 1
+const FEATURE_SNELL := 2
+const FEATURE_WOBBLE := 8
+const FEATURE_CAUSTICS := 64
 const QUALITY_LOW := 0
 const QUALITY_MEDIUM := 1
 const QUALITY_HIGH := 2
@@ -28,6 +33,7 @@ var _displacement_rid: RID
 var _shore_mask_rid: RID
 var _fallback_shore_rid: RID
 var _dummy_displacement_rid: RID
+var _caustics_noise_rid: RID
 
 var _sea_level: float = 0.0
 var _camera_water_level: float = 0.0
@@ -48,6 +54,12 @@ var _debug_mode: int = 0
 var _quality_tier: int = QUALITY_MEDIUM
 var _absorption_enabled: bool = true
 var _wobble_enabled: bool = true
+var _snell_enabled: bool = false
+var _caustics_enabled: bool = false
+var _caustics_strength: float = 1.0
+var _sun_direction: Vector3 = Vector3(0.25, 0.85, 0.45).normalized()
+var _sun_visibility: float = 1.0
+var _caustics_valid: bool = false
 var _last_copy_active: bool = false
 var _last_perf_frame: int = -1
 var _last_perf_snapshot: Dictionary = {
@@ -58,6 +70,8 @@ var _last_perf_snapshot: Dictionary = {
 	"timing_valid": false,
 	"quality_tier": QUALITY_MEDIUM,
 	"scene_copy_active": false,
+	"feature_flags": FEATURE_ABSORPTION_FOG | FEATURE_WOBBLE,
+	"caustics_valid": false,
 }
 var _render_logged: bool = false
 var _dispatch_logged: bool = false
@@ -99,6 +113,7 @@ func on_effect_removed() -> void:
 			_state_buffer,
 			_fallback_shore_rid,
 			_dummy_displacement_rid,
+			_caustics_noise_rid,
 		]:
 			if rid.is_valid():
 				rd.free_rid(rid)
@@ -113,8 +128,10 @@ func on_effect_removed() -> void:
 		_shore_mask_rid = RID()
 		_fallback_shore_rid = RID()
 		_dummy_displacement_rid = RID()
+		_caustics_noise_rid = RID()
 	_source_copy_size = Vector2i.ZERO
 	_state_buffer_size = 0
+	_caustics_valid = false
 	super.on_effect_removed()
 
 
@@ -139,6 +156,7 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 		_shore_mask_rid = _fallback_shore_rid
 	_medium_color = state.optical_profile.get_medium_color()
 	_absorption_sigma = state.optical_profile.get_extinction_sigma()
+	_caustics_strength = state.underwater_caustics_strength
 
 
 func sync_from_ocean(ocean_manager: Node, _ocean_material: ShaderMaterial) -> void:
@@ -164,8 +182,26 @@ func set_underwater_feature_enabled(feature_name: StringName, enabled: bool) -> 
 			_absorption_enabled = enabled
 		&"wobble":
 			_wobble_enabled = enabled
-		&"snell", &"particles", &"caustics":
+		&"snell":
+			_snell_enabled = enabled
+		&"caustics":
+			_caustics_enabled = enabled
+		&"particles":
 			pass
+
+
+func is_underwater_feature_enabled(feature_name: StringName) -> bool:
+	match feature_name:
+		&"absorption_fog":
+			return _absorption_enabled
+		&"snell":
+			return _snell_enabled
+		&"wobble":
+			return _wobble_enabled
+		&"caustics":
+			return _caustics_enabled
+		_:
+			return false
 
 
 func set_underwater_particle_params(_noise_scale: float, _density: float, _near_gate_m: float, _far_gate_m: float) -> void:
@@ -176,17 +212,29 @@ func set_receiver_source_mode(_mode: int) -> void:
 	pass
 
 
-func set_sun_direction(_value: Vector3, _visibility: float = 1.0) -> void:
-	pass
+func set_sun_direction(value: Vector3, visibility: float = 1.0) -> void:
+	if value.length_squared() <= 0.0001:
+		return
+	_sun_direction = value.normalized()
+	_sun_visibility = clampf(visibility, 0.0, 1.0)
 
 
-func set_sun_visibility(_value: float) -> void:
-	pass
+func set_sun_visibility(value: float) -> void:
+	_sun_visibility = clampf(value, 0.0, 1.0)
 
 
 func get_underwater_perf_snapshot() -> Dictionary:
 	_refresh_timestamp_snapshot()
 	return _last_perf_snapshot.duplicate()
+
+
+func _feature_flags_value() -> int:
+	return (
+		(FEATURE_ABSORPTION_FOG if _absorption_enabled else 0)
+		| (FEATURE_SNELL if _snell_enabled else 0)
+		| (FEATURE_WOBBLE if _wobble_enabled else 0)
+		| (FEATURE_CAUSTICS if _caustics_enabled else 0)
+	)
 
 
 func _load_scene_copy_shader() -> bool:
@@ -235,6 +283,7 @@ func _create_samplers() -> void:
 	_linear_repeat_sampler = rd.sampler_create(repeat_state)
 
 	_create_fallback_textures()
+	_load_caustics_texture()
 
 
 func _create_fallback_textures() -> void:
@@ -244,6 +293,23 @@ func _create_fallback_textures() -> void:
 	_shore_mask_rid = _fallback_shore_rid
 	_create_dummy_displacement_texture()
 	_displacement_rid = _dummy_displacement_rid
+
+
+func _load_caustics_texture() -> void:
+	var caustics_texture := load(CAUSTICS_NOISE_PATH) as Texture2D
+	var caustics_image := caustics_texture.get_image() if caustics_texture != null else null
+	_caustics_valid = caustics_image != null
+	if caustics_image == null:
+		Log.warn("water", "UnderwaterCompositorEffect: missing caustics noise texture, caustics disabled")
+		caustics_image = _make_solid_image(Color.BLACK)
+	_caustics_noise_rid = _create_rd_rgba8_texture(caustics_image)
+	_caustics_valid = _caustics_valid and _caustics_noise_rid.is_valid()
+
+
+func _make_solid_image(color: Color) -> Image:
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, color)
+	return img
 
 
 func _create_rd_rgba8_texture(image: Image) -> RID:
@@ -306,12 +372,6 @@ func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> v
 	if size.x <= 0 or size.y <= 0:
 		return
 
-	var camera_pos := scene_data.get_cam_transform().origin
-	var activation_water_level := _camera_water_level
-	if camera_pos.y > activation_water_level + 0.05 and _debug_mode == 0:
-		_last_copy_active = false
-		return
-
 	var view_count: int = buffers.get_view_count()
 	for view: int in view_count:
 		_render_view(view, size, buffers, scene_data)
@@ -324,7 +384,10 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 		return
 
 	var source_color_rid := RID()
-	var needs_source_copy := (_wobble_enabled or _debug_mode >= 4) and _wobble_strength > 0.0001
+	var needs_source_copy := (
+		(_wobble_enabled and _wobble_strength > 0.0001)
+		or _debug_mode >= 4
+	)
 	var source_valid := false
 	if needs_source_copy:
 		source_valid = _copy_scene_color(color_image, size)
@@ -352,11 +415,15 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(1.0 if _absorption_enabled else 0.0)
 	pc.append(1.0 if _wobble_enabled else 0.0)
 	pc.append(1.0 if source_valid else 0.0)
-	pc.append(0.0)
+	pc.append(1.0 if _snell_enabled else 0.0)
 	pc.append(_wave_scale)
 	pc.append(float(mini(_map_scales.size(), MAX_CASCADES)))
 	pc.append(1.0 if _displacement_rid.is_valid() and _displacement_rid != _dummy_displacement_rid else 0.0)
-	pc.append(0.0)
+	pc.append(1.0 if _caustics_enabled and _caustics_valid else 0.0)
+	pc.append(_sun_direction.x)
+	pc.append(_sun_direction.y)
+	pc.append(_sun_direction.z)
+	pc.append(_sun_visibility)
 	var pc_bytes := pc.to_byte_array()
 
 	var uniforms: Array[RDUniform] = []
@@ -377,7 +444,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_source.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
 	u_source.binding = 2
 	u_source.add_id(_linear_sampler)
-	u_source.add_id(source_color_rid if source_valid else color_image)
+	u_source.add_id(source_color_rid if source_valid else _fallback_shore_rid)
 	uniforms.append(u_source)
 
 	var u_state := RDUniform.new()
@@ -399,6 +466,13 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_shore.add_id(_linear_sampler)
 	u_shore.add_id(_shore_mask_rid)
 	uniforms.append(u_shore)
+
+	var u_caustics := RDUniform.new()
+	u_caustics.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_caustics.binding = 6
+	u_caustics.add_id(_linear_repeat_sampler)
+	u_caustics.add_id(_caustics_noise_rid if _caustics_noise_rid.is_valid() else _fallback_shore_rid)
+	uniforms.append(u_caustics)
 
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
@@ -551,7 +625,7 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_medium_color.x)
 	data.append(_medium_color.y)
 	data.append(_medium_color.z)
-	data.append(0.0)
+	data.append(_caustics_strength)
 	return data
 
 
@@ -582,7 +656,10 @@ func _refresh_timestamp_snapshot() -> void:
 		"timing_valid": timing_valid,
 		"quality_tier": _quality_tier,
 		"scene_copy_active": _last_copy_active,
-		"feature_flags": (1 if _absorption_enabled else 0) | (8 if _wobble_enabled else 0),
+		"feature_flags": _feature_flags_value(),
+		"caustics_valid": _caustics_valid,
+		"caustics_enabled": _caustics_enabled,
+		"snell_enabled": _snell_enabled,
 	}
 
 

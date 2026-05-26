@@ -6,6 +6,7 @@ const MIN_VISIBILITY_M: float = 0.5
 const MAX_VISIBILITY_M: float = 500.0
 const DEFAULT_VISIBILITY_M: float = 57.5646
 const DEFAULT_EXTINCTION_BIAS := Vector3(1.0, 0.25, 0.15)
+const MAX_TURBIDITY_EXTINCTION_MULTIPLIER: float = 2.0
 
 @export_range(MIN_VISIBILITY_M, MAX_VISIBILITY_M, 0.1) var visibility_distance_m: float = DEFAULT_VISIBILITY_M
 @export var extinction_color_bias: Vector3 = DEFAULT_EXTINCTION_BIAS
@@ -31,7 +32,8 @@ func set_medium_color(color: Color) -> void:
 
 func get_extinction_sigma() -> Vector3:
 	var visibility := clampf(visibility_distance_m, MIN_VISIBILITY_M, MAX_VISIBILITY_M)
-	var scalar := -log(TARGET_TRANSMITTANCE) / visibility
+	var turbidity := clampf(scattering_strength, 0.0, 1.0)
+	var scalar := (-log(TARGET_TRANSMITTANCE) / visibility) * lerpf(1.0, MAX_TURBIDITY_EXTINCTION_MULTIPLIER, turbidity)
 	return Vector3(
 		maxf(extinction_color_bias.x, 0.0),
 		maxf(extinction_color_bias.y, 0.0),

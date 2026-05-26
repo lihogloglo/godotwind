@@ -31,7 +31,11 @@ object-first integration path:
   and applies a conservative Lagarde-style post-lit response.
 - **Retained memory:** `object_wet.gdshader` uses `wet_line_y` pushed by
   `WetnessManager` for carry objects/characters that stay wet after leaving
-  water.
+  water. When the live compositor is enabled, the material treats this as
+  drying memory only and suppresses its shader-side live-contact fallback.
+- **Retained terrain memory:** not accepted yet. The production version should
+  be a GPU render-target or compute accumulation mask, not a CPU-side image
+  sweep from gameplay script.
 
 Rain exposure, puddles, splashes, and long-term ground saturation remain future
 work. Do not add those by extending the terrain shore/runup model.
@@ -49,11 +53,16 @@ work. Do not add those by extending the terrain shore/runup model.
 - Pulls `OceanManager.get_water_surface_state()` on the main thread and pushes
   render-thread-safe values into registered compositor effects.
 - Updates retained-memory holders from current world-space object bounds, using
-  CPU water samples at center and XZ offsets.
+  CPU water samples at center and XZ offsets. A rising contact line wets
+  immediately; a falling contact line dries down at `wet_dry_rate` until it
+  reaches the current water contact instead of staying pinned to the old
+  high-water mark.
 - `set_enabled()` controls retained object wetness. It does not imply the
   fullscreen live compositor.
 - `set_live_compositor_enabled()` controls the terrain/world live-contact
-  compositor and defaults off for the object-first pass.
+  compositor and tells registered wet materials not to double-apply their
+  shader-side dynamic contact fallback. It defaults off for the object-first
+  pass.
 
 Public API:
 
@@ -130,6 +139,9 @@ The compositor must not become a terrain-only shore/runup model. It never uses
 
 - Live contact no longer happens inside the object shader by default.
 - Retained wetness applies Lagarde-style material response from `wet_line_y`.
+- `wet_line_y` is a drying front, not an object-wide wet latch. While an object
+  still touches water, old wet regions above the current contact line continue
+  drying down toward that contact line.
 - The old dynamic water shader path is a fallback for explicit non-compositor
   uses only.
 - `WettableObject` is the preferred opt-in component for movable objects. It

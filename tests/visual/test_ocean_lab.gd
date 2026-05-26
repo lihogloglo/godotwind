@@ -16,6 +16,7 @@ const WetCompositorScript := preload("res://src/core/shaders/effects/wet_composi
 const UnderwaterCompositorScript := preload("res://src/core/shaders/effects/underwater_compositor_effect.gd")
 const WaterlineStackScript := preload("res://src/core/water/waterline_stack.gd")
 const SurfaceRefractionLayerScript := preload("res://src/core/water/surface_refraction_layer.gd")
+const ControlledRefractionSourceScript := preload("res://src/core/water/controlled_refraction_source.gd")
 const WeatherTypesScript := preload("res://src/core/weather/weather_types.gd")
 const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manager.gd")
 const WettableObjectScript := preload("res://src/core/water/wettable_object.gd")
@@ -25,6 +26,7 @@ const CS := preload("res://src/core/coordinate_system.gd")
 const SEA_LEVEL_DEFAULT: float = 0.0
 const WATER_RENDER_LAYER_MASK: int = 1 << 19
 const WATERLINE_RECEIVER_LAYER_MASK: int = 1 << 18
+const CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK: int = 1 << 17
 const BUOY_DEBUG_GRID: int = 40
 const BUOY_DEBUG_SPACING: float = 1.0
 const SHORE_SCAN_GRID: int = 6
@@ -99,6 +101,7 @@ const SURFACE_REFRACTION_DEBUG_MODE_NAMES: Array[String] = [
 	"Reject Reason",
 	"Pre Absorb",
 	"Post Absorb",
+	"Ownership RGB",
 ]
 const WEATHER_PRESETS: Array[Dictionary] = [
 	{"name": "Calm", "wind": 0.1, "cloud": 0.1},
@@ -124,6 +127,7 @@ var _wet_effect: PostProcessEffect = null
 var _underwater_effect: PostProcessEffect = null
 var _waterline_stack: WaterlineStack = null
 var _surface_refraction_layer: Node = null
+var _controlled_refraction_source: ControlledRefractionSource = null
 var _debug_mmi: MultiMeshInstance3D = null
 var _hud_label: RichTextLabel = null
 var _button_grid: GridContainer = null
@@ -137,6 +141,8 @@ var _wet_debug_button: Button = null
 var _quality_button: Button = null
 var _spray_button: Button = null
 var _spray_quality_button: Button = null
+var _surface_shader_button: Button = null
+var _boujie_full_button: Button = null
 var _ocean_surface_button: Button = null
 var _surface_ssr_button: Button = null
 var _surface_refraction_button: Button = null
@@ -186,6 +192,12 @@ var _buoy_grid_visible: bool = false
 var _debug_mode: int = 0
 var _spray_enabled: bool = true
 var _spray_quality: int = 2
+var _experimental_surface_shader_enabled: bool = false
+var _saved_surface_refraction_enabled: bool = false
+var _saved_surface_refraction_debug_mode: int = 0
+var _saved_surface_edge_guard_enabled: bool = false
+var _boujie_full_restore_state: Dictionary = {}
+var _boujie_full_restore_valid: bool = false
 var _ocean_surface_visible: bool = true
 var _surface_ssr_enabled: bool = false
 var _surface_refraction_enabled: bool = false
@@ -273,6 +285,9 @@ func _exit_tree() -> void:
 	if _surface_refraction_layer != null:
 		_surface_refraction_layer.call("shutdown")
 		_surface_refraction_layer = null
+	if _controlled_refraction_source != null:
+		_controlled_refraction_source.shutdown()
+		_controlled_refraction_source = null
 	if _world_env != null:
 		_world_env.compositor = null
 	_water_compositor = null
@@ -347,6 +362,8 @@ func _place_camera_at_playground() -> void:
 func _setup_terrain() -> void:
 	_terrain = Terrain3D.new()
 	_terrain.name = "OceanLabTerrain3D"
+	if "render_layers" in _terrain:
+		_terrain.set("render_layers", int(_terrain.get("render_layers")) | CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK)
 	add_child(_terrain)
 	_terrain.set_physics_process(false)
 	if _terrain.has_method("set_camera"):
@@ -468,6 +485,7 @@ func _setup_ocean() -> void:
 		_uw_particles_quality = OceanManager.get_underwater_particles_quality()
 	_sync_ocean_optics_from_manager()
 	_setup_surface_refraction_layer()
+	_push_surface_shader_mode()
 	_push_surface_refraction_control()
 
 
@@ -541,10 +559,24 @@ func _push_surface_ssr_control() -> void:
 	_refresh_control_labels()
 
 
+func _push_surface_shader_mode() -> void:
+	if not OceanManager or not OceanManager.is_initialized():
+		return
+	var mode := OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL if _experimental_surface_shader_enabled else OceanMesh.SurfaceShaderMode.DEFAULT
+	if OceanManager.has_method("set_surface_shader_mode"):
+		OceanManager.set_surface_shader_mode(mode)
+	_ocean = OceanManager.get_ocean_mesh()
+	if _ocean != null:
+		_ocean.layers = WATER_RENDER_LAYER_MASK
+	if OceanManager.has_method("set_debug_mode"):
+		OceanManager.set_debug_mode(_debug_mode)
+	_refresh_control_labels()
+
+
 func _push_surface_refraction_control() -> void:
 	if _surface_refraction_layer != null:
 		var debug_active := _surface_refraction_debug_mode != 0
-		var active := _surface_refraction_enabled or debug_active
+		var active := (_surface_refraction_enabled or debug_active) and not _experimental_surface_shader_enabled
 		_surface_refraction_layer.set("refraction_strength", 0.45 if active else 0.0)
 		_surface_refraction_layer.set("edge_guard_strength", 1.0 if _surface_edge_guard_enabled else 0.0)
 		if _surface_refraction_layer.has_method("set_debug_mode"):
@@ -554,16 +586,31 @@ func _push_surface_refraction_control() -> void:
 
 
 func _setup_surface_refraction_layer() -> void:
+	_setup_controlled_refraction_source()
 	if _surface_refraction_layer == null:
 		_surface_refraction_layer = SurfaceRefractionLayerScript.new()
 		_surface_refraction_layer.name = "SurfaceRefractionLayer"
 		add_child(_surface_refraction_layer)
+	if _surface_refraction_layer.has_method("set_controlled_source"):
+		_surface_refraction_layer.call("set_controlled_source", _controlled_refraction_source)
 	_surface_refraction_layer.call(
 		"configure",
 		_camera,
 		_world_env,
 		_ocean,
 		WATER_RENDER_LAYER_MASK
+	)
+
+
+func _setup_controlled_refraction_source() -> void:
+	if _controlled_refraction_source == null:
+		_controlled_refraction_source = ControlledRefractionSourceScript.new()
+		_controlled_refraction_source.name = "ControlledRefractionSource"
+		add_child(_controlled_refraction_source)
+	_controlled_refraction_source.configure(
+		_camera,
+		_world_env,
+		CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK
 	)
 
 
@@ -637,14 +684,16 @@ func _setup_reflection_canaries() -> void:
 	seabed_mat.uv1_scale = Vector3(10.0, 10.0, 1.0)
 	seabed_mat.roughness = 0.85
 
-	_add_box("DeepSeabed", Vector3(160.0, 2.0, 160.0), _lab_pos(Vector3(0.0, -16.0, 0.0)), seabed_mat)
-	_add_box("ShallowShelf", Vector3(35.0, 6.0, 35.0), _lab_pos(Vector3(22.0, -4.0, 18.0)), seabed_mat)
-	_add_box("SubmergedRock", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-8.0, -3.0, 8.0)), _standard_mat(Color(0.50, 0.45, 0.35), 0.65), true)
+	_add_box("DeepSeabed", Vector3(160.0, 2.0, 160.0), _lab_pos(Vector3(0.0, -16.0, 0.0)), seabed_mat, false, true)
+	_add_box("ShallowShelf", Vector3(35.0, 6.0, 35.0), _lab_pos(Vector3(22.0, -4.0, 18.0)), seabed_mat, false, true)
+	_add_box("SubmergedRock", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-8.0, -3.0, 8.0)), _standard_mat(Color(0.50, 0.45, 0.35), 0.65), true, true)
 	_add_box("HalfSubmergedMonolith", Vector3(3.0, 10.0, 3.0), _lab_pos(Vector3(8.0, 0.0, 9.0)), _standard_mat(Color(0.85, 0.85, 0.90), 0.7), true)
 	_add_box("MetalReflectionTarget", Vector3(4.0, 4.0, 4.0), _lab_pos(Vector3(-14.0, 5.0, -12.0)), _metal_mat())
-	_add_box("OpticsDepth1m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(-6.0, -1.5, -10.0)), _standard_mat(Color(1.0, 0.82, 0.18), 0.45), true)
-	_add_box("OpticsDepth10m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(0.0, -10.5, -10.0)), _standard_mat(Color(1.0, 0.22, 0.18), 0.45), true)
-	_add_box("OpticsDepth50m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(6.0, -50.5, -10.0)), _standard_mat(Color(0.20, 0.55, 1.0), 0.45), true)
+	_add_box("OpticsDepth1m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(-6.0, -1.5, -10.0)), _standard_mat(Color(1.0, 0.82, 0.18), 0.45), true, true)
+	_add_box("OpticsDepth10m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(0.0, -10.5, -10.0)), _standard_mat(Color(1.0, 0.22, 0.18), 0.45), true, true)
+	_add_box("OpticsDepth50m", Vector3(2.0, 1.0, 2.0), _lab_pos(Vector3(6.0, -50.5, -10.0)), _standard_mat(Color(0.20, 0.55, 1.0), 0.45), true, true)
+	_add_box("ControlledRefractionReceiver", Vector3(3.0, 2.0, 3.0), _lab_pos(Vector3(14.0, -5.0, 5.0)), _standard_mat(Color(0.1, 0.9, 0.45), 0.35), false, true)
+	_add_box("ForegroundLeakageCanary", Vector3(5.0, 5.0, 1.0), _lab_pos(Vector3(2.0, 5.5, 4.0)), _standard_mat(Color(1.0, 0.05, 0.05), 0.45), false, false)
 	_add_emissive_marker(_lab_pos(Vector3(12.0, 4.0, -12.0)), Color(1.0, 0.45, 0.12))
 	_add_emissive_marker(_lab_pos(Vector3(0.0, 2.5, -20.0)), Color(0.15, 0.65, 1.0))
 
@@ -696,25 +745,17 @@ func _spawn_wet_test_objects() -> void:
 		var mi := MeshInstance3D.new()
 		mi.name = spec["name"]
 		mi.mesh = spec["mesh"]
-		var mat := ShaderMaterial.new()
-		mat.shader = OBJECT_WET_SHADER
-		mat.set_shader_parameter("albedo_color", spec["color"])
-		mat.set_shader_parameter("roughness", 0.7)
-		mat.set_shader_parameter("wet_line_y", -1000.0)
-		mat.set_shader_parameter("wet_margin", _wet_margin)
-		mat.set_shader_parameter("wet_albedo_darken", _wet_albedo_darken)
-		mat.set_shader_parameter("wet_roughness_target", _wet_roughness_target)
-		mat.set_shader_parameter("retained_wetness_strength", _retained_wetness_strength)
-		mat.set_shader_parameter("live_contact_from_compositor", true)
+		var mat := StandardMaterial3D.new()
+		mat.albedo_color = spec["color"]
+		mat.roughness = 0.7
 		mi.material_override = mat
 		add_child(mi)
 		mi.global_position = _lab_pos(spec["offset"])
+		var wettable: Node = WettableObjectScript.new()
+		wettable.name = "WettableObject"
+		mi.add_child(wettable)
 		_test_objects.append({
 			"node": mi,
-			"wet_line_local": -float(spec["half_h"]) - 1.0,
-			"mat_rid": mat.get_rid(),
-			"mesh_bottom": -float(spec["half_h"]),
-			"wet_sample_radius": float(spec["half_h"]) * 1.4,
 		})
 
 	var managed := MeshInstance3D.new()
@@ -784,6 +825,8 @@ func _build_ui() -> void:
 	)
 	_quality_button = _add_button(_button_grid, "", Callable(self, "_cycle_quality"))
 	_mesh_button = _add_button(_button_grid, "", Callable(self, "_toggle_mesh_mode"))
+	_surface_shader_button = _add_button(_button_grid, "", Callable(self, "_toggle_experimental_surface_shader"))
+	_boujie_full_button = _add_button(_button_grid, "Boujie Full", Callable(self, "_toggle_boujie_full_preset"))
 	_ocean_surface_button = _add_button(_button_grid, "", Callable(self, "_toggle_ocean_surface_visible"))
 	_surface_ssr_button = _add_button(_button_grid, "", Callable(self, "_toggle_surface_ssr"))
 	_surface_refraction_button = _add_button(_button_grid, "", Callable(self, "_toggle_surface_refraction"))
@@ -799,7 +842,7 @@ func _build_ui() -> void:
 	var visibility_changed := func(val: float) -> void:
 		_visibility_distance_m = val
 		_push_visibility_distance_control()
-	_add_slider(ocean_tab, "visibility m", 1.0, 120.0, _visibility_distance_m, visibility_changed, 0.5)
+	_add_slider(ocean_tab, "base visibility m", 1.0, 120.0, _visibility_distance_m, visibility_changed, 0.5)
 	var scatter_changed := func(val: float) -> void:
 		_scattering_strength = val
 		_push_scattering_strength_control()
@@ -827,17 +870,14 @@ func _build_ui() -> void:
 	_add_slider(wetness_tab, "margin", 0.0, 5.0, _wet_margin, func(val: float) -> void:
 		_wet_margin = val
 		_push_wet_uniforms()
-		_push_object_wet_params()
 	)
 	_add_slider(wetness_tab, "darken", 0.0, 1.0, _wet_albedo_darken, func(val: float) -> void:
 		_wet_albedo_darken = val
 		_push_wet_uniforms()
-		_push_object_wet_params()
 	)
 	_add_slider(wetness_tab, "rough", 0.0, 0.5, _wet_roughness_target, func(val: float) -> void:
 		_wet_roughness_target = val
 		_push_wet_uniforms()
-		_push_object_wet_params()
 	)
 
 	_build_underwater_tabs(tabs)
@@ -880,26 +920,23 @@ func _build_underwater_tabs(tabs: TabContainer) -> void:
 		_push_underwater_effect_controls()
 	)
 	_uw_snell_check = _add_check(toggles, "Snell window", _uw_snell_enabled, func(value: bool) -> void:
-		_uw_snell_enabled = false
+		_uw_snell_enabled = value
 		_push_underwater_effect_controls()
 	)
-	_uw_snell_check.disabled = true
 	_uw_wobble_check = _add_check(toggles, "Wobble", _uw_wobble_effect_enabled, func(value: bool) -> void:
 		_uw_wobble_effect_enabled = value
 		_push_underwater_effect_controls()
 	)
 	_uw_particles_check = _add_check(toggles, "Particles", _uw_particles_enabled, func(value: bool) -> void:
-		_uw_particles_enabled = false
+		_uw_particles_enabled = value
 		_push_underwater_effect_controls()
 		_refresh_control_labels()
 	)
-	_uw_particles_check.disabled = true
 	_uw_caustics_check = _add_check(toggles, "Caustics", _uw_caustics_enabled, func(value: bool) -> void:
-		_uw_caustics_enabled = false
+		_uw_caustics_enabled = value
 		_push_underwater_effect_controls()
 		_refresh_control_labels()
 	)
-	_uw_caustics_check.disabled = true
 	_uw_effect_check = _add_check(toggles, "Underwater medium", _underwater_effect_enabled, func(value: bool) -> void:
 		_underwater_effect_enabled = value
 		_refresh_control_labels()
@@ -1050,15 +1087,27 @@ func _refresh_control_labels() -> void:
 	if _spray_quality_button:
 		var quality_name := OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown"
 		_spray_quality_button.text = "Spray Q: %s" % quality_name
+	if _surface_shader_button:
+		var shader_label := "Boujie High" if _experimental_surface_shader_enabled else "Default"
+		if OceanManager and OceanManager.has_method("get_surface_shader_mode_name"):
+			shader_label = OceanManager.get_surface_shader_mode_name()
+		_surface_shader_button.text = "Shader: %s" % shader_label
+	if _boujie_full_button:
+		_boujie_full_button.text = "Boujie Full: %s" % ("Disable" if _is_boujie_full_preset_active() else "Enable")
 	if _ocean_surface_button:
 		_ocean_surface_button.text = "Ocean Mesh: %s" % ("On" if _ocean_surface_visible else "Off")
 	if _surface_ssr_button:
 		_surface_ssr_button.text = "Surface SSR: %s" % ("On" if _surface_ssr_enabled else "Off")
 	if _surface_refraction_button:
-		_surface_refraction_button.text = "Refraction: %s" % ("On" if _surface_refraction_enabled else "Off")
+		_surface_refraction_button.disabled = _experimental_surface_shader_enabled
+		_surface_refraction_button.text = "Refraction: %s" % (
+			"Shader" if _experimental_surface_shader_enabled else ("On" if _surface_refraction_enabled else "Off")
+		)
 	if _surface_refraction_debug_button:
+		_surface_refraction_debug_button.disabled = _experimental_surface_shader_enabled
 		_surface_refraction_debug_button.text = "Refract Debug: %s" % SURFACE_REFRACTION_DEBUG_MODE_NAMES[_surface_refraction_debug_mode]
 	if _surface_edge_guard_button:
+		_surface_edge_guard_button.disabled = _experimental_surface_shader_enabled
 		_surface_edge_guard_button.text = "Refract Guard: %s" % ("On" if _surface_edge_guard_enabled else "Off")
 	if _waterline_button:
 		_waterline_button.text = "Receiver WL: %s" % ("On" if _waterline_enabled else "Off")
@@ -1097,8 +1146,6 @@ func _refresh_control_labels() -> void:
 func _process(delta: float) -> void:
 	_update_average_frame_time(delta)
 	_update_buoyancy_debug_grid()
-	_push_object_water_state()
-	_update_object_wetness(delta)
 	_update_held_object()
 	_apply_ocean_surface_visibility()
 	_update_surface_refraction_layer()
@@ -1143,66 +1190,6 @@ func _update_buoyancy_debug_grid() -> void:
 			idx += 1
 
 
-func _update_object_wetness(delta: float) -> void:
-	for obj: Dictionary in _test_objects:
-		var node: MeshInstance3D = obj["node"]
-		var wet_local: float = obj["wet_line_local"]
-		var obj_y: float = node.global_position.y
-		var obj_bottom_world: float = obj_y + float(obj["mesh_bottom"])
-		var contact_water_y := _sample_object_contact_water_y(node.global_position, float(obj["wet_sample_radius"]))
-		if obj_bottom_world < contact_water_y:
-			wet_local = maxf(wet_local, contact_water_y - obj_y)
-		else:
-			wet_local -= _wet_dry_rate * delta
-		obj["wet_line_local"] = wet_local
-		var mat_rid: RID = obj["mat_rid"]
-		if mat_rid.is_valid():
-			RenderingServer.material_set_param(mat_rid, "wet_line_y", obj_y + wet_local)
-
-
-func _push_object_water_state() -> void:
-	var state := _get_water_state()
-	var dynamic_enabled := state != null
-	for obj: Dictionary in _test_objects:
-		var mat_rid: RID = obj["mat_rid"]
-		if not mat_rid.is_valid():
-			continue
-		RenderingServer.material_set_param(mat_rid, "dynamic_water_enabled", dynamic_enabled)
-		if not dynamic_enabled:
-			continue
-		if _camera != null:
-			RenderingServer.material_set_param(mat_rid, "camera_world_position", _camera.global_position)
-		RenderingServer.material_set_param(mat_rid, "sea_level", state.sea_level)
-		RenderingServer.material_set_param(mat_rid, "wave_scale", state.wave_scale)
-		RenderingServer.material_set_param(mat_rid, "ocean_time", state.ocean_time)
-		RenderingServer.material_set_param(mat_rid, "map_scales", state.map_scales)
-		RenderingServer.material_set_param(mat_rid, "shore_mask_bounds", state.shore_mask_bounds)
-		RenderingServer.material_set_param(mat_rid, "shore_fade_distance", state.shore_fade_distance)
-		RenderingServer.material_set_param(mat_rid, "shore_wave_amplitude", state.shore_wave_amplitude)
-		RenderingServer.material_set_param(mat_rid, "shore_wave_frequency", state.shore_wave_frequency)
-		RenderingServer.material_set_param(mat_rid, "shore_wave_speed", state.shore_wave_speed)
-		RenderingServer.material_set_param(mat_rid, "shore_wave_steepness", state.shore_wave_steepness)
-		RenderingServer.material_set_param(mat_rid, "dynamic_water_has_shore_mask", state.shore_mask_texture != null)
-		if state.shore_mask_texture != null:
-			RenderingServer.material_set_param(mat_rid, "shore_mask", state.shore_mask_texture.get_rid())
-
-
-func _sample_object_contact_water_y(center: Vector3, radius: float) -> float:
-	var state := _get_water_state()
-	if state == null or not state.can_sample_height():
-		return _sea_level
-	var max_y := -1.0e6
-	for offset in [
-		Vector3.ZERO,
-		Vector3(radius, 0.0, 0.0),
-		Vector3(-radius, 0.0, 0.0),
-		Vector3(0.0, 0.0, radius),
-		Vector3(0.0, 0.0, -radius),
-	]:
-		max_y = maxf(max_y, state.sample_height(center + offset, _sea_level))
-	return max_y
-
-
 func _update_held_object() -> void:
 	if _held_object.is_empty() or _camera == null:
 		return
@@ -1227,6 +1214,9 @@ func _update_underwater_compositor() -> void:
 
 func _update_surface_refraction_layer() -> void:
 	if _surface_refraction_layer == null:
+		return
+	if _experimental_surface_shader_enabled:
+		_surface_refraction_layer.call("set_enabled", false)
 		return
 	if _ocean != null:
 		_surface_refraction_layer.call(
@@ -1268,6 +1258,13 @@ func _update_wet_compositor() -> void:
 	)
 	_wet_effect.effect_enabled = active
 	_wet_effect.blend_factor = 1.0 if active else 0.0
+	if (
+		WetnessManager
+		and WetnessManager.has_method("set_live_compositor_enabled")
+		and WetnessManager.has_method("is_live_compositor_enabled")
+		and bool(WetnessManager.is_live_compositor_enabled()) != active
+	):
+		WetnessManager.set_live_compositor_enabled(active)
 	if _wet_effect.has_method("set_wet_params"):
 		_wet_effect.call(
 			"set_wet_params",
@@ -1307,9 +1304,9 @@ func _push_waterline_effect_controls() -> void:
 	if effect.has_method("set_receiver_refraction_enabled"):
 		effect.call("set_receiver_refraction_enabled", false)
 	if effect.has_method("set_receiver_medium_enabled"):
-		effect.call("set_receiver_medium_enabled", true)
+		effect.call("set_receiver_medium_enabled", false)
 	if effect.has_method("set_receiver_surface_film_enabled"):
-		effect.call("set_receiver_surface_film_enabled", true)
+		effect.call("set_receiver_surface_film_enabled", false)
 	if effect.has_method("set_underwater_feature_enabled"):
 		effect.call("set_underwater_feature_enabled", &"absorption_fog", false)
 		effect.call("set_underwater_feature_enabled", &"snell", false)
@@ -1322,16 +1319,17 @@ func _push_waterline_effect_controls() -> void:
 func _push_underwater_effect_controls() -> void:
 	if _underwater_effect == null:
 		return
+	_push_underwater_sun_direction()
 	if _underwater_effect.has_method("set_quality_tier"):
 		_underwater_effect.call("set_quality_tier", _underwater_quality_tier)
 	if _underwater_effect.has_method("set_underwater_feature_enabled"):
 		_underwater_effect.call("set_underwater_feature_enabled", &"absorption_fog", _uw_absorption_enabled)
-		_underwater_effect.call("set_underwater_feature_enabled", &"snell", false)
+		_underwater_effect.call("set_underwater_feature_enabled", &"snell", _uw_snell_enabled)
 		_underwater_effect.call("set_underwater_feature_enabled", &"wobble", _uw_wobble_effect_enabled)
-		_underwater_effect.call("set_underwater_feature_enabled", &"particles", false)
-		_underwater_effect.call("set_underwater_feature_enabled", &"caustics", false)
+		_underwater_effect.call("set_underwater_feature_enabled", &"particles", _uw_particles_enabled)
+		_underwater_effect.call("set_underwater_feature_enabled", &"caustics", _uw_caustics_enabled)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_enabled"):
-		OceanManager.set_underwater_particles_enabled(false)
+		OceanManager.set_underwater_particles_enabled(_uw_particles_enabled)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
 		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
 	if OceanManager and OceanManager.has_method("set_underwater_particles_count"):
@@ -1349,6 +1347,17 @@ func _push_underwater_effect_controls() -> void:
 			_uw_particle_density,
 			_uw_particle_near_gate_m,
 			_uw_particle_far_gate_m
+		)
+
+
+func _push_underwater_sun_direction() -> void:
+	if _underwater_effect == null or _sun == null:
+		return
+	if _underwater_effect.has_method("set_sun_direction"):
+		_underwater_effect.call(
+			"set_sun_direction",
+			_sun.global_basis.z.normalized(),
+			clampf(_sun.light_energy, 0.0, 1.0)
 		)
 
 
@@ -1461,8 +1470,9 @@ func _update_underwater_perf_label() -> void:
 		lines.append("timestamp sample invalid")
 	lines.append("quality: %s  scene copy: %s" % [quality_name, "active" if scene_copy_active else "skipped"])
 	lines.append("")
-	lines.append("flags: fog=%s wobble=%s particles=%s caustics=%s" % [
+	lines.append("flags: fog=%s snell=%s wobble=%s particles=%s caustics=%s" % [
 		"on" if _uw_absorption_enabled else "off",
+		"on" if _uw_snell_enabled else "off",
 		"on" if _uw_wobble_effect_enabled else "off",
 		"on" if _uw_particles_enabled else "off",
 		"on" if _uw_caustics_enabled else "off",
@@ -1495,7 +1505,7 @@ func _apply_ocean_surface_visibility() -> void:
 		ocean_mesh.layers = WATER_RENDER_LAYER_MASK
 		ocean_mesh.visible = _ocean_surface_visible
 	if _surface_refraction_layer != null:
-		_surface_refraction_layer.set("visible", _ocean_surface_visible)
+		_surface_refraction_layer.set("visible", _ocean_surface_visible and not _experimental_surface_shader_enabled)
 
 
 func _unhandled_input(event: InputEvent) -> void:
@@ -1550,6 +1560,13 @@ func _update_hud() -> void:
 	var lines: Array[String] = []
 	lines.append("[b]Ocean Lab[/b]  FPS %d  avg %.2f ms" % [fps, _avg_frame_ms])
 	lines.append("quality=%s  mesh=%s  sea=%.2f" % [quality, mesh_mode, _sea_level])
+	var surface_shader_label := "Boujie High" if _experimental_surface_shader_enabled else "Default"
+	if OceanManager and OceanManager.has_method("get_surface_shader_mode_name"):
+		surface_shader_label = OceanManager.get_surface_shader_mode_name()
+	lines.append("surface_shader=%s  boujie_full=%s" % [
+		surface_shader_label,
+		"on" if _is_boujie_full_preset_active() else "off",
+	])
 	lines.append("fft=%dx%d  cascades=%d  wave_query=%s %d KB/frame" % [
 		fft_size,
 		fft_size,
@@ -1595,6 +1612,14 @@ func _update_hud() -> void:
 		float(particle_status.get("speed_scale", _uw_particle_speed_scale)),
 		_uw_particle_density,
 	])
+	lines.append("uw_features fog=%s snell=%s wobble=%s caustics=%s  particle_layer=%s/%s" % [
+		"on" if _uw_absorption_enabled else "off",
+		"on" if _uw_snell_enabled else "off",
+		"on" if _uw_wobble_effect_enabled else "off",
+		"on" if _uw_caustics_enabled else "off",
+		"enabled" if bool(particle_status.get("enabled", _uw_particles_enabled)) else "off",
+		str(particle_status.get("quality_name", _get_underwater_particles_quality_name())),
+	])
 	lines.append("ocean_mesh=%s  wireframe=%s  underwater=%s/%s" % [
 		"on" if _ocean_surface_visible else "off",
 		"on" if _wireframe_enabled else "off",
@@ -1617,11 +1642,58 @@ func _update_hud() -> void:
 			str(surf_refract.get("capture_frame_age", -1)),
 			str(surf_refract.get("source_frame_tolerance", -1)),
 		])
+		lines.append("surface_refract_source_mode=%s layer=0x%X" % [
+			str(surf_refract.get("source_mode", "unknown")),
+			CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK,
+		])
 		lines.append("surface_refract_mask_mode=%s reject=%s overlay=%s dispatch=%s" % [
 			str(surf_refract.get("mask_mode", "off")),
 			str(surf_refract.get("reject_reason", "none")),
 			str(surf_refract.get("overlay_active", false)),
 			str(surf_refract.get("dispatch_size", Vector2i.ZERO)),
+		])
+		var source_render_label := "--"
+		if bool(surf_refract.get("controlled_source_render_timing_valid", false)):
+			source_render_label = "%.3f" % float(surf_refract.get("controlled_source_render_ms", 0.0))
+		var surface_ms_label := "--"
+		if bool(surf_refract.get("surface_refraction_timing_valid", false)):
+			surface_ms_label = "%.3f" % float(surf_refract.get("surface_refraction_ms", 0.0))
+		var copy_ms_label := "--"
+		if bool(surf_refract.get("controlled_source_copy_timing_valid", false)):
+			copy_ms_label = "%.3f" % float(surf_refract.get("controlled_source_copy_ms", 0.0))
+		var measured_ms_label := "--"
+		if bool(surf_refract.get("controlled_copy_surface_timing_valid", false)):
+			measured_ms_label = "%.3f" % float(surf_refract.get("controlled_copy_surface_ms", 0.0))
+		var total_ms_label := "unavailable"
+		if bool(surf_refract.get("controlled_total_refraction_timing_valid", false)):
+			total_ms_label = "%.3f" % float(surf_refract.get("controlled_total_refraction_ms", 0.0))
+		lines.append("surface_refract_ms=%s copy=%s measured=%s total=%s src_render=%s" % [
+			surface_ms_label,
+			copy_ms_label,
+			measured_ms_label,
+			total_ms_label,
+			source_render_label,
+		])
+		lines.append("surface_refract_timing avail src/copy/final/total=%s/%s/%s/%s valid=%s/%s/%s/%s" % [
+			str(surf_refract.get("controlled_source_render_timing_available", false)),
+			str(surf_refract.get("controlled_source_copy_timing_available", false)),
+			str(surf_refract.get("surface_refraction_timing_available", false)),
+			str(surf_refract.get("controlled_total_refraction_timing_available", false)),
+			str(surf_refract.get("controlled_source_render_timing_valid", false)),
+			str(surf_refract.get("controlled_source_copy_timing_valid", false)),
+			str(surf_refract.get("surface_refraction_timing_valid", false)),
+			str(surf_refract.get("controlled_total_refraction_timing_valid", false)),
+		])
+		lines.append("surface_refract_frames src/copy/final=%s/%s/%s same=%s reason=%s" % [
+			str(surf_refract.get("controlled_source_render_frame", -1)),
+			str(surf_refract.get("controlled_source_copy_frame", -1)),
+			str(surf_refract.get("surface_refraction_frame", -1)),
+			str(surf_refract.get("controlled_total_same_timing_frame", false)),
+			str(surf_refract.get("controlled_total_refraction_unavailable_reason", "unknown")),
+		])
+		lines.append("surface_refract_marker_scope src=%s copy=%s" % [
+			str(surf_refract.get("controlled_source_render_timing_marker_scope", "")),
+			str(surf_refract.get("controlled_source_copy_timing_marker_scope", "")),
 		])
 	lines.append("receiver_waterline=%s  wl_debug=%d %s" % [
 		"on" if _waterline_enabled else "off",
@@ -1689,6 +1761,8 @@ func _update_hud() -> void:
 		lines.append("LClick picks/drops wet test objects.")
 		if _surface_refraction_debug_mode != 0:
 			lines.append("Surface compositor debug: %s." % SURFACE_REFRACTION_DEBUG_MODE_NAMES[_surface_refraction_debug_mode])
+			if _surface_refraction_debug_mode == 7:
+				lines.append("Ownership RGB: red=original water-owned, green=shifted water-owned, blue=unshifted source submerged.")
 		if _debug_mode == 6:
 			lines.append("Ocean shader legacy refraction view: green=accepted, red=rejected, blue=UV offset.")
 		elif _debug_mode == 7:
@@ -1837,6 +1911,7 @@ func _toggle_mesh_mode() -> void:
 	OceanManager.rebuild_mesh_with_mode(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
+	_push_surface_shader_mode()
 	if _surface_refraction_layer != null:
 		_surface_refraction_layer.call(
 			"configure",
@@ -1867,6 +1942,7 @@ func _toggle_sun_angle() -> void:
 		_sun.rotation = Vector3(-PI / 4.0, PI / 4.0, 0.0)
 		_sun.light_energy = 1.2
 		_sun.light_color = Color.WHITE
+	_push_underwater_sun_direction()
 	_refresh_control_labels()
 
 
@@ -1877,10 +1953,8 @@ func _toggle_wet_debug() -> void:
 		_horizon_mgr._set_param("wet_debug", object_debug)
 	if _wet_effect and _wet_effect.has_method("set_debug_mode"):
 		_wet_effect.call("set_debug_mode", _wet_debug_mode)
-	for obj: Dictionary in _test_objects:
-		var mat_rid: RID = obj["mat_rid"]
-		if mat_rid.is_valid():
-			RenderingServer.material_set_param(mat_rid, "wet_debug", object_debug)
+	if WetnessManager and WetnessManager.has_method("set_debug_mask"):
+		WetnessManager.set_debug_mask(object_debug)
 	_refresh_control_labels()
 	_log_refraction_baseline_state("wet_debug")
 
@@ -1889,17 +1963,6 @@ func _toggle_wet_compositor() -> void:
 	_wet_compositor_enabled = not _wet_compositor_enabled
 	_refresh_control_labels()
 	_log_refraction_baseline_state("wetness")
-
-
-func _push_object_wet_params() -> void:
-	for obj: Dictionary in _test_objects:
-		var mat_rid: RID = obj["mat_rid"]
-		if mat_rid.is_valid():
-			RenderingServer.material_set_param(mat_rid, "wet_margin", _wet_margin)
-			RenderingServer.material_set_param(mat_rid, "wet_albedo_darken", _wet_albedo_darken)
-			RenderingServer.material_set_param(mat_rid, "wet_roughness_target", _wet_roughness_target)
-			RenderingServer.material_set_param(mat_rid, "retained_wetness_strength", _retained_wetness_strength)
-			RenderingServer.material_set_param(mat_rid, "live_contact_from_compositor", true)
 
 
 func _teleport_to_shore_probe() -> void:
@@ -1953,6 +2016,7 @@ func _cycle_quality() -> void:
 	OceanManager.set_water_quality(next)
 	OceanManager.set_camera(_camera)
 	_ocean = OceanManager.get_ocean_mesh()
+	_push_surface_shader_mode()
 	if OceanManager.has_method("set_sea_spray_render_layers"):
 		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
 	if OceanManager.has_method("set_underwater_particles_render_layers"):
@@ -1968,6 +2032,220 @@ func _toggle_spray() -> void:
 	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
 		OceanManager.set_sea_spray_enabled(_spray_enabled)
 	_refresh_control_labels()
+
+
+func _toggle_experimental_surface_shader() -> void:
+	_set_experimental_surface_shader_enabled(not _experimental_surface_shader_enabled)
+	_log_refraction_baseline_state("surface_shader")
+
+
+func _set_experimental_surface_shader_enabled(enabled: bool) -> void:
+	if _experimental_surface_shader_enabled == enabled:
+		_push_surface_shader_mode()
+		_push_surface_refraction_control()
+		return
+	_experimental_surface_shader_enabled = enabled
+	if enabled:
+		_saved_surface_refraction_enabled = _surface_refraction_enabled
+		_saved_surface_refraction_debug_mode = _surface_refraction_debug_mode
+		_saved_surface_edge_guard_enabled = _surface_edge_guard_enabled
+		_surface_refraction_enabled = false
+		_surface_refraction_debug_mode = 0
+		_surface_edge_guard_enabled = false
+	else:
+		_surface_refraction_enabled = _saved_surface_refraction_enabled
+		_surface_refraction_debug_mode = _saved_surface_refraction_debug_mode
+		_surface_edge_guard_enabled = _saved_surface_edge_guard_enabled
+
+	_push_surface_shader_mode()
+	_apply_weather_preset(_current_weather)
+	_apply_optical_preset(_current_optical_preset)
+	_push_surface_ssr_control()
+	_push_surface_refraction_control()
+
+
+func _toggle_boujie_full_preset() -> void:
+	if _is_boujie_full_preset_active():
+		_restore_boujie_full_previous_state()
+		return
+	_capture_boujie_full_previous_state()
+	_apply_boujie_full_preset()
+
+
+func _capture_boujie_full_previous_state() -> void:
+	_boujie_full_restore_state = {
+		"water_quality": OceanManager.get_water_quality() if OceanManager and OceanManager.is_initialized() else -1,
+		"experimental_surface_shader_enabled": _experimental_surface_shader_enabled,
+		"surface_refraction_enabled": _surface_refraction_enabled,
+		"surface_refraction_debug_mode": _surface_refraction_debug_mode,
+		"surface_edge_guard_enabled": _surface_edge_guard_enabled,
+		"waterline_enabled": _waterline_enabled,
+		"waterline_debug_mode": _waterline_debug_mode,
+		"waterline_inspection_active": _waterline_inspection_active,
+		"waterline_inspection_frames": _waterline_inspection_frames,
+		"wet_compositor_enabled": _wet_compositor_enabled,
+		"ocean_surface_visible": _ocean_surface_visible,
+		"surface_ssr_enabled": _surface_ssr_enabled,
+		"environment_ssr_enabled": _environment_ssr_enabled,
+		"spray_enabled": _spray_enabled,
+		"spray_quality": _spray_quality,
+		"underwater_effect_enabled": _underwater_effect_enabled,
+		"underwater_debug_mode": _underwater_debug_mode,
+		"underwater_quality_tier": _underwater_quality_tier,
+		"uw_absorption_enabled": _uw_absorption_enabled,
+		"uw_snell_enabled": _uw_snell_enabled,
+		"uw_wobble_effect_enabled": _uw_wobble_effect_enabled,
+		"uw_particles_enabled": _uw_particles_enabled,
+		"uw_caustics_enabled": _uw_caustics_enabled,
+		"uw_particles_quality": _uw_particles_quality,
+		"uw_particle_count": _uw_particle_count,
+		"uw_particle_size_scale": _uw_particle_size_scale,
+		"uw_particle_speed_scale": _uw_particle_speed_scale,
+		"uw_particle_density": _uw_particle_density,
+	}
+	_boujie_full_restore_valid = true
+
+
+func _restore_boujie_full_previous_state() -> void:
+	if not _boujie_full_restore_valid:
+		_set_experimental_surface_shader_enabled(false)
+		_underwater_effect_enabled = false
+		_uw_particles_enabled = false
+		_uw_snell_enabled = false
+		_uw_caustics_enabled = false
+		_refresh_control_labels()
+		_log_refraction_baseline_state("boujie_full_disable")
+		return
+
+	var state := _boujie_full_restore_state
+	var saved_quality := int(state.get("water_quality", -1))
+	if saved_quality >= 0 and OceanManager and OceanManager.is_initialized():
+		OceanManager.set_water_quality(saved_quality)
+		OceanManager.set_camera(_camera)
+		_ocean = OceanManager.get_ocean_mesh()
+		if _ocean != null:
+			_ocean.layers = WATER_RENDER_LAYER_MASK
+
+	_experimental_surface_shader_enabled = bool(state.get("experimental_surface_shader_enabled", false))
+	_surface_refraction_enabled = bool(state.get("surface_refraction_enabled", false))
+	_surface_refraction_debug_mode = int(state.get("surface_refraction_debug_mode", 0))
+	_surface_edge_guard_enabled = bool(state.get("surface_edge_guard_enabled", false))
+	_waterline_enabled = bool(state.get("waterline_enabled", false))
+	_waterline_debug_mode = int(state.get("waterline_debug_mode", 0))
+	_waterline_inspection_active = bool(state.get("waterline_inspection_active", false))
+	_waterline_inspection_frames = int(state.get("waterline_inspection_frames", 0))
+	_wet_compositor_enabled = bool(state.get("wet_compositor_enabled", false))
+	_ocean_surface_visible = bool(state.get("ocean_surface_visible", true))
+	_surface_ssr_enabled = bool(state.get("surface_ssr_enabled", false))
+	_environment_ssr_enabled = bool(state.get("environment_ssr_enabled", true))
+	_spray_enabled = bool(state.get("spray_enabled", true))
+	_spray_quality = int(state.get("spray_quality", 2))
+	_underwater_effect_enabled = bool(state.get("underwater_effect_enabled", false))
+	_underwater_debug_mode = int(state.get("underwater_debug_mode", 0))
+	_underwater_quality_tier = int(state.get("underwater_quality_tier", 1))
+	_uw_absorption_enabled = bool(state.get("uw_absorption_enabled", true))
+	_uw_snell_enabled = bool(state.get("uw_snell_enabled", false))
+	_uw_wobble_effect_enabled = bool(state.get("uw_wobble_effect_enabled", true))
+	_uw_particles_enabled = bool(state.get("uw_particles_enabled", false))
+	_uw_caustics_enabled = bool(state.get("uw_caustics_enabled", false))
+	_uw_particles_quality = int(state.get("uw_particles_quality", 2))
+	_uw_particle_count = int(state.get("uw_particle_count", 4096))
+	_uw_particle_size_scale = float(state.get("uw_particle_size_scale", 4.0))
+	_uw_particle_speed_scale = float(state.get("uw_particle_speed_scale", 1.5))
+	_uw_particle_density = float(state.get("uw_particle_density", 1.0))
+
+	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
+		OceanManager.set_sea_spray_enabled(_spray_enabled)
+	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
+		OceanManager.set_sea_spray_quality(_spray_quality)
+	_push_surface_shader_mode()
+	_apply_weather_preset(_current_weather)
+	_apply_optical_preset(_current_optical_preset)
+	_apply_ocean_surface_visibility()
+	_apply_environment_ssr_enabled()
+	_push_surface_ssr_control()
+	_push_surface_refraction_control()
+	_push_waterline_effect_controls()
+	_push_underwater_effect_controls()
+	_boujie_full_restore_state.clear()
+	_boujie_full_restore_valid = false
+	_refresh_control_labels()
+	_log_refraction_baseline_state("boujie_full_disable")
+
+
+func _apply_boujie_full_preset() -> void:
+	if OceanManager and OceanManager.is_initialized():
+		if OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
+			OceanManager.set_water_quality(OceanMesh.QualityMode.HIGH)
+			OceanManager.set_camera(_camera)
+			_ocean = OceanManager.get_ocean_mesh()
+			if _ocean != null:
+				_ocean.layers = WATER_RENDER_LAYER_MASK
+	_set_experimental_surface_shader_enabled(true)
+	_surface_refraction_enabled = false
+	_surface_refraction_debug_mode = 0
+	_surface_edge_guard_enabled = false
+	_waterline_enabled = false
+	_waterline_debug_mode = 0
+	_waterline_inspection_active = false
+	_waterline_inspection_frames = 0
+	_wet_compositor_enabled = true
+	_ocean_surface_visible = true
+	_surface_ssr_enabled = true
+	_environment_ssr_enabled = true
+	_spray_enabled = true
+	_spray_quality = 3
+	_underwater_effect_enabled = true
+	_underwater_debug_mode = 0
+	_underwater_quality_tier = UW_QUALITY_NAMES.size() - 1
+	_uw_absorption_enabled = true
+	_uw_snell_enabled = true
+	_uw_wobble_effect_enabled = true
+	_uw_particles_enabled = true
+	_uw_caustics_enabled = true
+	_uw_particles_quality = 3
+	_uw_particle_count = 4096
+	_uw_particle_size_scale = 4.0
+	_uw_particle_speed_scale = 1.5
+	_uw_particle_density = 1.0
+	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
+		OceanManager.set_sea_spray_enabled(_spray_enabled)
+	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
+		OceanManager.set_sea_spray_quality(_spray_quality)
+	_apply_ocean_surface_visibility()
+	_apply_environment_ssr_enabled()
+	_push_surface_refraction_control()
+	_push_waterline_effect_controls()
+	_push_surface_ssr_control()
+	_push_underwater_effect_controls()
+	_refresh_control_labels()
+	_log_refraction_baseline_state("boujie_full")
+
+
+func _is_boujie_full_preset_active() -> bool:
+	return (
+		_experimental_surface_shader_enabled
+		and not _surface_refraction_enabled
+		and _surface_refraction_debug_mode == 0
+		and not _surface_edge_guard_enabled
+		and not _waterline_enabled
+		and _waterline_debug_mode == 0
+		and _wet_compositor_enabled
+		and _ocean_surface_visible
+		and _surface_ssr_enabled
+		and _environment_ssr_enabled
+		and _spray_enabled
+		and _spray_quality == 3
+		and _underwater_effect_enabled
+		and _underwater_debug_mode == 0
+		and _underwater_quality_tier == UW_QUALITY_NAMES.size() - 1
+		and _uw_absorption_enabled
+		and _uw_snell_enabled
+		and _uw_wobble_effect_enabled
+		and _uw_particles_enabled
+		and _uw_caustics_enabled
+		and _uw_particles_quality == 3
+	)
 
 
 func _cycle_spray_quality() -> void:
@@ -1990,12 +2268,16 @@ func _toggle_surface_ssr() -> void:
 
 
 func _toggle_surface_refraction() -> void:
+	if _experimental_surface_shader_enabled:
+		return
 	_surface_refraction_enabled = not _surface_refraction_enabled
 	_push_surface_refraction_control()
 	_log_refraction_baseline_state("surface_refraction")
 
 
 func _cycle_surface_refraction_debug_mode() -> void:
+	if _experimental_surface_shader_enabled:
+		return
 	_surface_refraction_debug_mode = (_surface_refraction_debug_mode + 1) % SURFACE_REFRACTION_DEBUG_MODE_NAMES.size()
 	if _surface_refraction_layer != null and _surface_refraction_layer.has_method("set_debug_mode"):
 		_surface_refraction_layer.call("set_debug_mode", _surface_refraction_debug_mode)
@@ -2005,6 +2287,8 @@ func _cycle_surface_refraction_debug_mode() -> void:
 
 
 func _toggle_surface_edge_guard() -> void:
+	if _experimental_surface_shader_enabled:
+		return
 	_surface_edge_guard_enabled = not _surface_edge_guard_enabled
 	_push_surface_refraction_control()
 	_log_refraction_baseline_state("surface_edge_guard")
@@ -2018,10 +2302,14 @@ func _toggle_waterline_receiver() -> void:
 
 func _toggle_environment_ssr() -> void:
 	_environment_ssr_enabled = not _environment_ssr_enabled
-	if _world_env != null and _world_env.environment != null:
-		_world_env.environment.ssr_enabled = _environment_ssr_enabled
+	_apply_environment_ssr_enabled()
 	_refresh_control_labels()
 	_log_refraction_baseline_state("environment_ssr")
+
+
+func _apply_environment_ssr_enabled() -> void:
+	if _world_env != null and _world_env.environment != null:
+		_world_env.environment.ssr_enabled = _environment_ssr_enabled
 
 
 func _toggle_underwater_compositor() -> void:
@@ -2154,6 +2442,10 @@ func _log_refraction_baseline_state(reason: String) -> void:
 	var mesh_mode := "Unknown"
 	if OceanManager and OceanManager.is_initialized() and OceanManager.has_method("get_mesh_mode"):
 		mesh_mode = "Projected" if OceanManager.get_mesh_mode() == 1 else "Clipmap"
+	var surface_shader_label := "Boujie High" if _experimental_surface_shader_enabled else "Default"
+	if OceanManager and OceanManager.has_method("get_surface_shader_mode_name"):
+		surface_shader_label = OceanManager.get_surface_shader_mode_name()
+	var particle_status := _get_underwater_particles_status()
 	var wl_perf := _get_waterline_perf_snapshot()
 	var wl_capture := _get_waterline_capture_snapshot()
 	var lines: Array[String] = [
@@ -2164,8 +2456,23 @@ func _log_refraction_baseline_state(reason: String) -> void:
 		"| receiver_waterline | %s |" % ("on" if _waterline_enabled else "off"),
 		"| waterline_debug | %d %s |" % [_waterline_debug_mode, WATERLINE_DEBUG_MODE_NAMES[_waterline_debug_mode]],
 		"| surface_ssr | %s |" % ("on" if _surface_ssr_enabled else "off"),
+		"| surface_shader | %s |" % surface_shader_label,
+		"| boujie_full | %s |" % ("on" if _is_boujie_full_preset_active() else "off"),
 		"| env_ssr | %s |" % ("on" if _environment_ssr_enabled else "off"),
 		"| underwater_effect | %s |" % ("on" if _underwater_effect_enabled else "off"),
+		"| underwater_features | fog=%s snell=%s wobble=%s particles=%s caustics=%s |" % [
+			"on" if _uw_absorption_enabled else "off",
+			"on" if _uw_snell_enabled else "off",
+			"on" if _uw_wobble_effect_enabled else "off",
+			"on" if _uw_particles_enabled else "off",
+			"on" if _uw_caustics_enabled else "off",
+		],
+		"| underwater_particles | enabled=%s emitting=%s quality=%s count=%d |" % [
+			str(particle_status.get("enabled", _uw_particles_enabled)),
+			str(particle_status.get("emitting", false)),
+			str(particle_status.get("quality_name", _get_underwater_particles_quality_name())),
+			int(particle_status.get("particle_count", _uw_particle_count)),
+		],
 		"| wetness | %s |" % ("on" if _wet_compositor_enabled else "off"),
 		"| debug_mode | %d %s |" % [_debug_mode, DEBUG_MODE_NAMES[_debug_mode]],
 		"| underwater_debug | %d %s |" % [_underwater_debug_mode, UW_DEBUG_MODE_NAMES[_underwater_debug_mode]],
@@ -2195,9 +2502,55 @@ func _log_refraction_baseline_state(reason: String) -> void:
 		lines.append("| surface_refract_source_scale | %.2f |" % float(surf_snapshot.get("source_resolution_scale", 0.0)))
 		lines.append("| surface_refract_frame_age | %s |" % str(surf_snapshot.get("capture_frame_age", -1)))
 		lines.append("| surface_refract_frame_tolerance | %s |" % str(surf_snapshot.get("source_frame_tolerance", -1)))
+		lines.append("| surface_refract_source_mode | %s |" % str(surf_snapshot.get("source_mode", "unknown")))
+		lines.append("| surface_refract_controlled_layer | 0x%X |" % CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK)
 		lines.append("| surface_refract_compositor_enabled | %s |" % str(surf_snapshot.get("compositor_enabled", false)))
 		lines.append("| surface_refract_overlay_active | %s |" % str(surf_snapshot.get("overlay_active", false)))
 		lines.append("| surface_refract_dispatch_size | %s |" % str(surf_snapshot.get("dispatch_size", Vector2i.ZERO)))
+		lines.append("| surface_refract_frame_source_render | %s |" % str(surf_snapshot.get("controlled_source_render_frame", -1)))
+		lines.append("| surface_refract_frame_source_copy | %s |" % str(surf_snapshot.get("controlled_source_copy_frame", -1)))
+		lines.append("| surface_refract_frame_final | %s |" % str(surf_snapshot.get("surface_refraction_frame", -1)))
+		lines.append("| surface_refract_timing_same_frame | %s |" % str(surf_snapshot.get("controlled_total_same_timing_frame", false)))
+		lines.append("| surface_refract_source_render_scope | %s |" % str(surf_snapshot.get("controlled_source_render_timing_scope", "unavailable")))
+		lines.append("| surface_refract_source_render_marker_scope | %s |" % str(surf_snapshot.get("controlled_source_render_timing_marker_scope", "")))
+		lines.append("| surface_refract_source_render_marker_begin | %s |" % str(surf_snapshot.get("controlled_source_render_timing_marker_begin", "")))
+		lines.append("| surface_refract_source_render_marker_end | %s |" % str(surf_snapshot.get("controlled_source_render_timing_marker_end", "")))
+		lines.append("| surface_refract_source_copy_marker_scope | %s |" % str(surf_snapshot.get("controlled_source_copy_timing_marker_scope", "")))
+		lines.append("| surface_refract_source_copy_marker_begin | %s |" % str(surf_snapshot.get("controlled_source_copy_timing_marker_begin", "")))
+		lines.append("| surface_refract_source_copy_marker_end | %s |" % str(surf_snapshot.get("controlled_source_copy_timing_marker_end", "")))
+		lines.append("| surface_refract_source_render_available | %s |" % str(surf_snapshot.get("controlled_source_render_timing_available", false)))
+		lines.append("| surface_refract_source_render_valid | %s |" % str(surf_snapshot.get("controlled_source_render_timing_valid", false)))
+		lines.append("| surface_refract_source_copy_available | %s |" % str(surf_snapshot.get("controlled_source_copy_timing_available", false)))
+		lines.append("| surface_refract_source_copy_valid | %s |" % str(surf_snapshot.get("controlled_source_copy_timing_valid", false)))
+		lines.append("| surface_refract_final_available | %s |" % str(surf_snapshot.get("surface_refraction_timing_available", false)))
+		lines.append("| surface_refract_final_valid | %s |" % str(surf_snapshot.get("surface_refraction_timing_valid", false)))
+		lines.append("| surface_refract_total_available | %s |" % str(surf_snapshot.get("controlled_total_refraction_timing_available", false)))
+		lines.append("| surface_refract_total_valid | %s |" % str(surf_snapshot.get("controlled_total_refraction_timing_valid", false)))
+		lines.append("| surface_refract_total_reason | %s |" % str(surf_snapshot.get("controlled_total_refraction_unavailable_reason", "unknown")))
+		lines.append("| surface_refract_ms | %s |" % (
+			"%.3f" % float(surf_snapshot.get("surface_refraction_ms", 0.0))
+			if bool(surf_snapshot.get("surface_refraction_timing_valid", false))
+			else "invalid"
+		))
+		lines.append("| surface_refract_source_copy_ms | %s |" % (
+			"%.3f" % float(surf_snapshot.get("controlled_source_copy_ms", 0.0))
+			if bool(surf_snapshot.get("controlled_source_copy_timing_valid", false))
+			else "invalid"
+		))
+		lines.append("| surface_refract_copy_surface_ms | %s |" % (
+			"%.3f" % float(surf_snapshot.get("controlled_copy_surface_ms", 0.0))
+			if bool(surf_snapshot.get("controlled_copy_surface_timing_valid", false))
+			else "invalid"
+		))
+		lines.append("| surface_refract_total_ms | %s |" % (
+			"%.3f" % float(surf_snapshot.get("controlled_total_refraction_ms", 0.0))
+			if bool(surf_snapshot.get("controlled_total_refraction_timing_valid", false))
+			else str(surf_snapshot.get("controlled_total_refraction_unavailable_reason", "unavailable"))
+		))
+		var source_render_label := "unavailable"
+		if bool(surf_snapshot.get("controlled_source_render_timing_valid", false)):
+			source_render_label = "%.3f" % float(surf_snapshot.get("controlled_source_render_ms", 0.0))
+		lines.append("| surface_refract_source_render_ms | %s |" % source_render_label)
 		lines.append("| surface_refract_mask_mode | %s |" % str(surf_snapshot.get("mask_mode", "off")))
 		lines.append("| surface_refract_reject_reason | %s |" % str(surf_snapshot.get("reject_reason", "none")))
 		lines.append("| surface_refract_debug | %d %s |" % [_surface_refraction_debug_mode, SURFACE_REFRACTION_DEBUG_MODE_NAMES[_surface_refraction_debug_mode]])
@@ -2221,6 +2574,8 @@ func _get_surface_baseline_issues() -> Array[String]:
 		issues.append("surface_refraction_debug")
 	if _surface_ssr_enabled:
 		issues.append("surface_ssr_on")
+	if _experimental_surface_shader_enabled:
+		issues.append("experimental_surface_shader_on")
 	if _underwater_effect_enabled or _underwater_debug_mode != 0:
 		issues.append("underwater_on")
 	if _waterline_enabled or _waterline_debug_mode != 0:
@@ -2300,7 +2655,14 @@ func _make_checker_texture(size_px: int, cell_px: int, a: Color, b: Color) -> Im
 	return ImageTexture.create_from_image(img)
 
 
-func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material, waterline_receiver: bool = false) -> MeshInstance3D:
+func _add_box(
+		node_name: String,
+		size: Vector3,
+		pos: Vector3,
+		mat: Material,
+		waterline_receiver: bool = false,
+		refraction_receiver: bool = false
+) -> MeshInstance3D:
 	var inst := MeshInstance3D.new()
 	inst.name = node_name
 	var mesh := BoxMesh.new()
@@ -2309,6 +2671,8 @@ func _add_box(node_name: String, size: Vector3, pos: Vector3, mat: Material, wat
 	inst.material_override = mat
 	if waterline_receiver:
 		inst.layers = inst.layers | WATERLINE_RECEIVER_LAYER_MASK
+	if refraction_receiver:
+		inst.layers = inst.layers | CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK
 	add_child(inst)
 	inst.global_position = pos
 	return inst

@@ -14,15 +14,21 @@ class_name PrewaterCaptureRenderer
 extends Node
 
 const PrewaterCaptureScript := preload("res://src/core/shaders/effects/prewater_capture_effect.gd")
+const PrewaterRenderTimingScript := preload("res://src/core/shaders/effects/prewater_render_timing_effect.gd")
 
 const MIN_RESOLUTION_SCALE := 0.25
 const MAX_RESOLUTION_SCALE := 1.0
 const DEFAULT_FALLBACK_SIZE := Vector2i(1280, 720)
 const DEFAULT_CAPTURE_FADE_START_M := 80.0
 const DEFAULT_CAPTURE_FADE_END_M := 140.0
+const SOURCE_RENDER_BEGIN_MARKER_PREFIX := "godotwind_prewater_source_render_begin"
+const SOURCE_RENDER_END_MARKER_PREFIX := "godotwind_prewater_source_render_end"
+const COPY_BEGIN_MARKER_PREFIX := "godotwind_prewater_copy_begin"
+const COPY_END_MARKER_PREFIX := "godotwind_prewater_copy_end"
 
 var receiver_layer_mask: int = 1
 var occlusion_exclusion_layer_mask: int = 0
+var occlusion_capture_enabled: bool = true
 var near_water_capture_distance_m: float = DEFAULT_CAPTURE_FADE_END_M
 var near_water_capture_fade_start_m: float = DEFAULT_CAPTURE_FADE_START_M
 
@@ -36,12 +42,21 @@ var _compositor: Compositor = null
 var _occlusion_compositor: Compositor = null
 var _capture_effect: PrewaterCaptureEffect = null
 var _occlusion_effect: PrewaterCaptureEffect = null
+var _source_render_begin_effect: PrewaterRenderTimingEffect = null
+var _source_render_end_effect: PrewaterRenderTimingEffect = null
 var _resolution_scale: float = 0.5
 var _capture_enabled: bool = false
 var _blend_factor: float = 0.0
 var _camera_water_level: float = 0.0
 var _capture_active: bool = false
 var _activation_fade: float = 0.0
+var _timing_marker_scope: String = ""
+var _source_render_begin_marker: String = ""
+var _source_render_end_marker: String = ""
+var _copy_begin_marker: String = ""
+var _copy_end_marker: String = ""
+var _occlusion_copy_begin_marker: String = ""
+var _occlusion_copy_end_marker: String = ""
 
 
 func _ready() -> void:
@@ -73,6 +88,10 @@ func shutdown() -> void:
 		_capture_effect.on_effect_removed()
 	if _occlusion_effect != null:
 		_occlusion_effect.on_effect_removed()
+	if _source_render_begin_effect != null:
+		_source_render_begin_effect.on_effect_removed()
+	if _source_render_end_effect != null:
+		_source_render_end_effect.on_effect_removed()
 	if _viewport != null:
 		_viewport.queue_free()
 	if _occlusion_viewport != null:
@@ -83,6 +102,8 @@ func shutdown() -> void:
 	_occlusion_viewport = null
 	_capture_effect = null
 	_occlusion_effect = null
+	_source_render_begin_effect = null
+	_source_render_end_effect = null
 	_compositor = null
 	_occlusion_compositor = null
 
@@ -148,7 +169,12 @@ func has_capture() -> bool:
 
 
 func has_occlusion_capture() -> bool:
-	return _capture_active and _occlusion_effect != null and _occlusion_effect.has_capture()
+	return (
+		_capture_active
+		and occlusion_capture_enabled
+		and _occlusion_effect != null
+		and _occlusion_effect.has_capture()
+	)
 
 
 func get_source_color_rid() -> RID:
@@ -181,6 +207,50 @@ func get_capture_process_frame() -> int:
 	return int(_capture_effect.call("get_capture_process_frame"))
 
 
+func has_capture_renderer_matrices() -> bool:
+	if _capture_effect == null or not _capture_effect.has_method("has_capture_renderer_matrices"):
+		return false
+	return bool(_capture_effect.call("has_capture_renderer_matrices"))
+
+
+func get_capture_renderer_projection() -> Projection:
+	if _capture_effect != null and _capture_effect.has_method("get_capture_renderer_projection"):
+		var result: Variant = _capture_effect.call("get_capture_renderer_projection")
+		if result is Projection:
+			return result
+	return Projection()
+
+
+func get_capture_renderer_camera_transform() -> Transform3D:
+	if _capture_effect != null and _capture_effect.has_method("get_capture_renderer_camera_transform"):
+		var result: Variant = _capture_effect.call("get_capture_renderer_camera_transform")
+		if result is Transform3D:
+			return result
+	return Transform3D.IDENTITY
+
+
+func get_capture_renderer_matrix_frame() -> int:
+	if _capture_effect == null or not _capture_effect.has_method("get_capture_renderer_matrix_frame"):
+		return -1
+	return int(_capture_effect.call("get_capture_renderer_matrix_frame"))
+
+
+func get_capture_camera_projection() -> Projection:
+	if _capture_camera != null and is_instance_valid(_capture_camera):
+		return _capture_camera.get_camera_projection()
+	if _source_camera != null and is_instance_valid(_source_camera):
+		return _source_camera.get_camera_projection()
+	return Projection()
+
+
+func get_capture_camera_transform() -> Transform3D:
+	if _capture_camera != null and is_instance_valid(_capture_camera):
+		return _capture_camera.get_camera_transform()
+	if _source_camera != null and is_instance_valid(_source_camera):
+		return _source_camera.get_camera_transform()
+	return Transform3D.IDENTITY
+
+
 func get_occlusion_depth_rid() -> RID:
 	if _occlusion_effect == null:
 		return RID()
@@ -205,16 +275,49 @@ func get_perf_snapshot() -> Dictionary:
 	var snapshot: Variant = _capture_effect.call("get_capture_perf_snapshot")
 	if snapshot is Dictionary:
 		var result := (snapshot as Dictionary).duplicate()
+		var render_snapshot := get_source_render_perf_snapshot()
 		result["capture_active"] = _capture_active
 		result["resolution_scale"] = _resolution_scale
 		result["activation_fade"] = _activation_fade
 		result["current_process_frame"] = Engine.get_process_frames()
 		result["capture_frame_age"] = Engine.get_process_frames() - get_capture_process_frame() if get_capture_process_frame() >= 0 else -1
+		result["source_render_ms"] = float(render_snapshot.get("source_render_ms", -1.0))
+		result["source_render_frame"] = int(render_snapshot.get("frame", -1))
+		result["source_render_timing_valid"] = bool(render_snapshot.get("timing_valid", false))
+		result["source_render_timing_available"] = bool(render_snapshot.get("timing_available", false))
+		result["source_render_timing_scope"] = str(render_snapshot.get("timing_scope", "unavailable"))
+		result["source_render_timing_marker_scope"] = str(render_snapshot.get("timing_marker_scope", _timing_marker_scope))
+		result["source_render_timing_marker_begin"] = str(render_snapshot.get("timing_marker_begin", _source_render_begin_marker))
+		result["source_render_timing_marker_end"] = str(render_snapshot.get("timing_marker_end", _source_render_end_marker))
+		result["prewater_copy_timing_marker_scope"] = str(result.get("timing_marker_scope", _timing_marker_scope))
+		result["prewater_copy_timing_marker_begin"] = str(result.get("timing_marker_begin", _copy_begin_marker))
+		result["prewater_copy_timing_marker_end"] = str(result.get("timing_marker_end", _copy_end_marker))
+		result["capture_has_renderer_matrices"] = has_capture_renderer_matrices()
+		result["capture_renderer_matrix_frame"] = get_capture_renderer_matrix_frame()
+		result["capture_renderer_matrix_age"] = Engine.get_process_frames() - get_capture_renderer_matrix_frame() if get_capture_renderer_matrix_frame() >= 0 else -1
 		result["has_occlusion_capture"] = has_occlusion_capture()
 		result["occlusion_size"] = get_occlusion_size()
 		result["occlusion_process_frame"] = get_occlusion_process_frame()
 		result["occlusion_frame_age"] = Engine.get_process_frames() - get_occlusion_process_frame() if get_occlusion_process_frame() >= 0 else -1
 		return result
+	return {}
+
+
+func get_source_render_perf_snapshot() -> Dictionary:
+	if _source_render_end_effect == null or not _source_render_end_effect.has_method("get_render_timing_snapshot"):
+		return {
+			"source_render_ms": -1.0,
+			"frame": -1,
+			"timing_valid": false,
+			"timing_available": false,
+			"timing_scope": "unavailable",
+			"timing_marker_scope": _timing_marker_scope,
+			"timing_marker_begin": _source_render_begin_marker,
+			"timing_marker_end": _source_render_end_marker,
+		}
+	var snapshot: Variant = _source_render_end_effect.call("get_render_timing_snapshot")
+	if snapshot is Dictionary:
+		return (snapshot as Dictionary).duplicate()
 	return {}
 
 
@@ -249,6 +352,7 @@ func push_to_waterline_effect(effect: Object) -> bool:
 
 
 func _ensure_nodes() -> void:
+	_ensure_timing_marker_names()
 	if _viewport == null:
 		_viewport = SubViewport.new()
 		_viewport.name = "PrewaterCaptureViewport"
@@ -277,17 +381,49 @@ func _ensure_nodes() -> void:
 		_capture_effect = PrewaterCaptureScript.new()
 		_capture_effect.effect_enabled = false
 		_capture_effect.blend_factor = 0.0
+		if _capture_effect.has_method("configure_copy_timing_markers"):
+			_capture_effect.configure_copy_timing_markers(_copy_begin_marker, _copy_end_marker, _timing_marker_scope)
 		_capture_effect.on_effect_added()
 
 	if _occlusion_effect == null:
 		_occlusion_effect = PrewaterCaptureScript.new()
 		_occlusion_effect.effect_enabled = false
 		_occlusion_effect.blend_factor = 0.0
+		if _occlusion_effect.has_method("configure_copy_timing_markers"):
+			_occlusion_effect.configure_copy_timing_markers(_occlusion_copy_begin_marker, _occlusion_copy_end_marker, _timing_marker_scope + "_occlusion")
 		_occlusion_effect.on_effect_added()
+
+	if _source_render_begin_effect == null:
+		_source_render_begin_effect = PrewaterRenderTimingScript.new()
+		_source_render_begin_effect.effect_enabled = false
+		_source_render_begin_effect.configure(
+			_source_render_begin_marker,
+			CompositorEffect.EFFECT_CALLBACK_TYPE_PRE_OPAQUE,
+			_source_render_begin_marker,
+			_source_render_end_marker,
+			_timing_marker_scope
+		)
+		_source_render_begin_effect.on_effect_added()
+
+	if _source_render_end_effect == null:
+		_source_render_end_effect = PrewaterRenderTimingScript.new()
+		_source_render_end_effect.effect_enabled = false
+		_source_render_end_effect.configure(
+			_source_render_end_marker,
+			CompositorEffect.EFFECT_CALLBACK_TYPE_POST_TRANSPARENT,
+			_source_render_begin_marker,
+			_source_render_end_marker,
+			_timing_marker_scope
+		)
+		_source_render_end_effect.on_effect_added()
 
 	if _compositor == null:
 		_compositor = Compositor.new()
-		_compositor.compositor_effects = [_capture_effect]
+		_compositor.compositor_effects = [
+			_source_render_begin_effect,
+			_source_render_end_effect,
+			_capture_effect,
+		]
 
 	if _occlusion_compositor == null:
 		_occlusion_compositor = Compositor.new()
@@ -312,6 +448,18 @@ func _ensure_nodes() -> void:
 	_apply_active_state()
 
 
+func _ensure_timing_marker_names() -> void:
+	if not _timing_marker_scope.is_empty():
+		return
+	_timing_marker_scope = "%s_%d" % [str(name).to_snake_case(), get_instance_id()]
+	_source_render_begin_marker = "%s_%s" % [SOURCE_RENDER_BEGIN_MARKER_PREFIX, _timing_marker_scope]
+	_source_render_end_marker = "%s_%s" % [SOURCE_RENDER_END_MARKER_PREFIX, _timing_marker_scope]
+	_copy_begin_marker = "%s_%s" % [COPY_BEGIN_MARKER_PREFIX, _timing_marker_scope]
+	_copy_end_marker = "%s_%s" % [COPY_END_MARKER_PREFIX, _timing_marker_scope]
+	_occlusion_copy_begin_marker = "%s_%s_occlusion" % [COPY_BEGIN_MARKER_PREFIX, _timing_marker_scope]
+	_occlusion_copy_end_marker = "%s_%s_occlusion" % [COPY_END_MARKER_PREFIX, _timing_marker_scope]
+
+
 func _update_active_state() -> void:
 	var near_water_fade := 1.0
 	if _source_camera != null and is_instance_valid(_source_camera):
@@ -326,13 +474,18 @@ func _apply_active_state() -> void:
 	if _capture_effect != null:
 		_capture_effect.effect_enabled = _capture_active
 		_capture_effect.blend_factor = _blend_factor * _activation_fade if _capture_active else 0.0
+	if _source_render_begin_effect != null:
+		_source_render_begin_effect.effect_enabled = _capture_active
+	if _source_render_end_effect != null:
+		_source_render_end_effect.effect_enabled = _capture_active
+	var occlusion_active := _capture_active and occlusion_capture_enabled
 	if _occlusion_effect != null:
-		_occlusion_effect.effect_enabled = _capture_active
-		_occlusion_effect.blend_factor = _blend_factor * _activation_fade if _capture_active else 0.0
+		_occlusion_effect.effect_enabled = occlusion_active
+		_occlusion_effect.blend_factor = _blend_factor * _activation_fade if occlusion_active else 0.0
 	if _viewport != null:
 		_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _capture_active else SubViewport.UPDATE_DISABLED
 	if _occlusion_viewport != null:
-		_occlusion_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if _capture_active else SubViewport.UPDATE_DISABLED
+		_occlusion_viewport.render_target_update_mode = SubViewport.UPDATE_ALWAYS if occlusion_active else SubViewport.UPDATE_DISABLED
 
 
 func _compute_near_water_fade(camera_delta: float) -> float:

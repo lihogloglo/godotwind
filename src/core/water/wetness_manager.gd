@@ -288,7 +288,14 @@ func _update_memory_holders(delta: float, state: WaterSurfaceState) -> void:
 		var bottom_world: float = holder.get_bottom_world_y()
 		var water_y: float = _sample_contact_water_y(state, holder.root, bottom_world, holder.sample_radius)
 		if water_y > -INF:
-			holder.wet_height_above_bottom = maxf(holder.wet_height_above_bottom, water_y - bottom_world)
+			var contact_height_above_bottom := water_y - bottom_world
+			if contact_height_above_bottom >= holder.wet_height_above_bottom:
+				holder.wet_height_above_bottom = contact_height_above_bottom
+			else:
+				holder.wet_height_above_bottom = maxf(
+					contact_height_above_bottom,
+					holder.wet_height_above_bottom - wet_dry_rate * delta
+				)
 		else:
 			holder.wet_height_above_bottom -= wet_dry_rate * delta
 			holder.wet_height_above_bottom = maxf(holder.wet_height_above_bottom, -1.0)
@@ -310,7 +317,7 @@ func _push_material_params(mat_rid: RID, wet_line_world: float, state: WaterSurf
 	RenderingServer.material_set_param(mat_rid, &"wet_roughness_target", wet_roughness_target)
 	RenderingServer.material_set_param(mat_rid, &"retained_wetness_strength", retained_wetness_strength)
 	RenderingServer.material_set_param(mat_rid, &"wet_debug", _debug_mask)
-	RenderingServer.material_set_param(mat_rid, &"live_contact_from_compositor", false)
+	RenderingServer.material_set_param(mat_rid, &"live_contact_from_compositor", _live_compositor_enabled)
 
 	var active_water := _is_active_water_state(state)
 	RenderingServer.material_set_param(mat_rid, &"dynamic_water_enabled", active_water)

@@ -200,6 +200,7 @@ varying float v_choppiness;
 // without adding per-fragment shore-mask reads.
 varying vec2 v_shore_slope;
 varying float v_shore_choppiness;
+varying float v_projected_coverage;
 
 // Shore mask sampled in vertex() of each .gdshader — not here in fragment.
 
@@ -368,6 +369,10 @@ float ggx_distribution(in float cos_theta, in float alpha) {
 // depth-driven shore foam + Fresnel + SSS.
 // ============================================================================
 void fragment() {
+	if (v_projected_coverage <= 0.001) {
+		discard;
+	}
+
 	float map_size = float(textureSize(normals, 0).x);
 	float dist = v_vertex_dist;
 

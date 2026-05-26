@@ -3,6 +3,7 @@ render_mode blend_mix, depth_draw_never, cull_disabled, shadows_disabled;
 
 const int MAX_CASCADES = 4;
 const float PROJECTED_GRID_FAR_HORIZON = 20000.0;
+const float PROJECTED_GRID_FADE_START = 12000.0;
 
 global uniform uint num_cascades;
 global uniform sampler2DArray displacements;
@@ -63,20 +64,26 @@ void vertex() {
 	vec3 ray_d = normalize(far_w - ray_o);
 
 	vec3 world_pos;
+	float projected_coverage = 1.0;
 	if (ray_d.y > -1e-4) {
 		vec2 horiz_dir = length(ray_d.xz) > 1e-5 ? normalize(ray_d.xz) : vec2(0.0, 1.0);
 		world_pos = vec3(ray_o.x + horiz_dir.x * PROJECTED_GRID_FAR_HORIZON, sea_level, ray_o.z + horiz_dir.y * PROJECTED_GRID_FAR_HORIZON);
+		projected_coverage = 0.0;
 	} else {
 		float t = (sea_level - ray_o.y) / ray_d.y;
 		if (t < 0.0) {
 			vec2 horiz_dir = length(ray_d.xz) > 1e-5 ? normalize(ray_d.xz) : vec2(0.0, 1.0);
 			world_pos = vec3(ray_o.x + horiz_dir.x * PROJECTED_GRID_FAR_HORIZON, sea_level, ray_o.z + horiz_dir.y * PROJECTED_GRID_FAR_HORIZON);
+			projected_coverage = 0.0;
 		} else {
 			world_pos = ray_o + ray_d * t;
 			float dist_xz = length(world_pos.xz - ray_o.xz);
 			if (dist_xz > PROJECTED_GRID_FAR_HORIZON) {
 				vec2 horiz_dir = normalize(world_pos.xz - ray_o.xz);
 				world_pos = vec3(ray_o.x + horiz_dir.x * PROJECTED_GRID_FAR_HORIZON, sea_level, ray_o.z + horiz_dir.y * PROJECTED_GRID_FAR_HORIZON);
+				projected_coverage = 0.0;
+			} else {
+				projected_coverage = 1.0 - smoothstep(PROJECTED_GRID_FADE_START, PROJECTED_GRID_FAR_HORIZON, dist_xz);
 			}
 		}
 	}
@@ -91,14 +98,14 @@ void vertex() {
 	vec4 shore_data = water_surface_shore_sample(shore_uv, true);
 	float shore = shore_data.r;
 
-	world_pos += displacement * wave_scale * shore;
+	world_pos += displacement * wave_scale * shore * projected_coverage;
 	vec4 shore_offset = water_surface_shore_offset(world_pos.xz, shore_uv, in_mask, shore_data);
 	v_shore_slope = water_surface_shore_slope(world_pos.xz, shore_uv, in_mask, shore_data);
 	world_pos.xz += shore_offset.xy;
 	world_pos.y += shore_offset.z + 0.025;
 
 	v_world_pos = world_pos;
-	v_coverage = water_surface_body_gate(water_surface_shore_body_coverage(shore_data));
+	v_coverage = water_surface_body_gate(water_surface_shore_body_coverage(shore_data)) * projected_coverage;
 	POSITION = PROJECTION_MATRIX * VIEW_MATRIX * vec4(world_pos, 1.0);
 }
 

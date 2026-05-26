@@ -9,9 +9,30 @@ class_name SurfaceRefractionCompositorEffect
 extends PostProcessEffect
 
 const SHADER_PATH := "res://src/core/shaders/compute/surface_refraction.glsl"
+const TimestampTimingUtilsScript := preload("res://src/core/shaders/timestamp_timing_utils.gd")
 const MAX_CASCADES := 8
-const MAX_REASONABLE_TIMESTAMP_MS := 100.0
+const MAX_REASONABLE_TIMESTAMP_MS := 1000.0
 const DEFAULT_SOURCE_FRAME_TOLERANCE := 2
+const DEBUG_STATS_COUNTER_COUNT := 16
+const DEBUG_STATS_BYTE_SIZE := DEBUG_STATS_COUNTER_COUNT * 4
+const DEBUG_STATS_NAMES: Array[String] = [
+	"total_pixels",
+	"main_depth_far_pixels",
+	"visible_water_pixels",
+	"source_ready_pixels",
+	"projected_invalid_pixels",
+	"candidate_main_depth_far_pixels",
+	"candidate_water_owned_pixels",
+	"effective_depth_far_pixels",
+	"receiver_ray_miss_pixels",
+	"source_not_submerged_pixels",
+	"candidate_mask_pixels",
+	"stored_pixels",
+	"candidate_not_water_depth_far_pixels",
+	"candidate_offset_gt_half_px_pixels",
+	"candidate_offset_gt_two_px_pixels",
+	"source_candidate_mismatch_gt_half_px_pixels",
+]
 
 var refraction_strength: float = 0.45
 var edge_guard_strength: float = 1.0
@@ -19,12 +40,14 @@ var max_refr_thickness: float = 2.0
 var source_frame_tolerance: int = DEFAULT_SOURCE_FRAME_TOLERANCE:
 	set(value):
 		source_frame_tolerance = maxi(0, value)
+var diagnostic_stats_enabled: bool = false
 
 var _depth_sampler: RID
 var _linear_sampler: RID
 var _linear_repeat_sampler: RID
 var _state_buffer: RID
 var _state_buffer_size: int = 0
+var _debug_stats_buffer: RID
 var _displacement_rid: RID
 var _shore_mask_rid: RID
 var _fallback_shore_rid: RID
@@ -33,6 +56,9 @@ var _external_source_color_rid: RID
 var _external_source_depth_rid: RID
 var _external_source_size: Vector2i = Vector2i.ZERO
 var _external_source_process_frame: int = -1
+var _source_camera_projection: Projection = Projection()
+var _source_camera_transform: Transform3D = Transform3D.IDENTITY
+var _has_source_camera_matrices: bool = false
 
 var _sea_level: float = 0.0
 var _wave_scale: float = 1.0
@@ -54,12 +80,15 @@ var _last_source_size_valid: bool = false
 var _last_source_valid: bool = false
 var _last_source_fresh: bool = false
 var _last_dispatch_size: Vector2i = Vector2i.ZERO
+var _last_debug_stats: Dictionary = {}
 var _render_logged: bool = false
 var _dispatch_logged: bool = false
 var _last_perf_snapshot: Dictionary = {
 	"surface_refraction_ms": 0.0,
 	"frame": -1,
+	"timing_available": false,
 	"timing_valid": false,
+	"timing_debug": {},
 	"source_color_valid": false,
 	"source_valid": false,
 	"source_size_valid": false,
@@ -69,6 +98,7 @@ var _last_perf_snapshot: Dictionary = {
 	"source_frame_age": -1,
 	"source_frame_tolerance": DEFAULT_SOURCE_FRAME_TOLERANCE,
 	"dispatch_size": Vector2i.ZERO,
+	"debug_stats": {},
 	"debug_mode": 0,
 	"mask_mode": "final",
 	"reject_reason": "inactive",
@@ -103,6 +133,7 @@ func on_effect_removed() -> void:
 			_linear_sampler,
 			_linear_repeat_sampler,
 			_state_buffer,
+			_debug_stats_buffer,
 			_fallback_shore_rid,
 			_dummy_displacement_rid,
 		]:
@@ -112,6 +143,7 @@ func on_effect_removed() -> void:
 	_linear_sampler = RID()
 	_linear_repeat_sampler = RID()
 	_state_buffer = RID()
+	_debug_stats_buffer = RID()
 	_displacement_rid = RID()
 	_shore_mask_rid = RID()
 	_fallback_shore_rid = RID()
@@ -153,11 +185,24 @@ func set_external_source_buffers(color_rid: RID, depth_rid: RID, size: Vector2i,
 	_external_source_process_frame = source_process_frame
 
 
+func set_source_camera_matrices(projection: Projection, camera_transform: Transform3D) -> void:
+	_source_camera_projection = projection
+	_source_camera_transform = camera_transform
+	_has_source_camera_matrices = true
+
+
+func clear_source_camera_matrices() -> void:
+	_source_camera_projection = Projection()
+	_source_camera_transform = Transform3D.IDENTITY
+	_has_source_camera_matrices = false
+
+
 func clear_external_source_buffers() -> void:
 	_external_source_color_rid = RID()
 	_external_source_depth_rid = RID()
 	_external_source_size = Vector2i.ZERO
 	_external_source_process_frame = -1
+	clear_source_camera_matrices()
 	_last_source_color_valid = false
 	_last_source_depth_valid = false
 	_last_source_size_valid = false
@@ -166,7 +211,7 @@ func clear_external_source_buffers() -> void:
 
 
 func set_debug_mode(value: int) -> void:
-	_debug_mode = clampi(value, 0, 6)
+	_debug_mode = clampi(value, 0, 7)
 
 
 func get_debug_mode() -> int:
@@ -262,7 +307,12 @@ func _render_callback(p_effect_callback_type: int, render_data: RenderData) -> v
 			effect_enabled,
 			pipeline_rid.is_valid(),
 		])
-	if not effect_enabled or blend_factor <= 0.0 or refraction_strength <= 0.001 or not pipeline_rid.is_valid():
+	if (
+		not effect_enabled
+		or blend_factor <= 0.0
+		or (refraction_strength <= 0.001 and _debug_mode == 0)
+		or not pipeline_rid.is_valid()
+	):
 		_last_dispatch_size = Vector2i.ZERO
 		return
 	if rd == null:
@@ -306,6 +356,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 		_last_perf_snapshot = {
 			"surface_refraction_ms": 0.0,
 			"frame": rd.get_captured_timestamps_frame() if rd != null else -1,
+			"timing_available": rd.get_captured_timestamps_count() > 0 if rd != null else false,
 			"timing_valid": false,
 			"source_color_valid": _last_source_color_valid,
 			"source_depth_valid": _last_source_depth_valid,
@@ -317,6 +368,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 			"source_frame_age": source_age,
 			"source_frame_tolerance": source_frame_tolerance,
 			"dispatch_size": _last_dispatch_size,
+			"debug_stats": _refresh_debug_stats_snapshot(),
 			"debug_mode": _debug_mode,
 			"mask_mode": _mask_mode_name(),
 			"reject_reason": _reject_reason_name(),
@@ -327,6 +379,10 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var matrix_bytes := matrix_data.to_byte_array()
 	if not _ensure_state_buffer(matrix_bytes):
 		return
+	if not _ensure_debug_stats_buffer():
+		return
+	if diagnostic_stats_enabled:
+		_reset_debug_stats_buffer()
 
 	var pc := PackedFloat32Array()
 	pc.append(float(size.x))
@@ -346,7 +402,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	pc.append(1.0 if source_fresh else 0.0)
 	pc.append(float(_debug_mode))
 	pc.append(edge_guard_strength)
-	pc.append(0.0)
+	pc.append(1.0 if diagnostic_stats_enabled else 0.0)
 	pc.append(0.0)
 	pc.append(0.0)
 	var pc_bytes := pc.to_byte_array()
@@ -399,6 +455,12 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_shore.add_id(_shore_mask_rid)
 	uniforms.append(u_shore)
 
+	var u_debug_stats := RDUniform.new()
+	u_debug_stats.uniform_type = RenderingDevice.UNIFORM_TYPE_STORAGE_BUFFER
+	u_debug_stats.binding = 7
+	u_debug_stats.add_id(_debug_stats_buffer)
+	uniforms.append(u_debug_stats)
+
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
 		return
@@ -420,6 +482,7 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	rd.compute_list_bind_uniform_set(cl, uniform_set, 0)
 	rd.compute_list_set_push_constant(cl, pc_bytes, pc_bytes.size())
 	rd.compute_list_dispatch(cl, groups_x, groups_y, 1)
+	rd.compute_list_add_barrier(cl)
 	rd.compute_list_end()
 	rd.capture_timestamp("godotwind_surface_refraction_end")
 	rd.free_rid(uniform_set)
@@ -439,12 +502,35 @@ func _ensure_state_buffer(matrix_bytes: PackedByteArray) -> bool:
 	return true
 
 
+func _ensure_debug_stats_buffer() -> bool:
+	if rd == null:
+		return false
+	if _debug_stats_buffer.is_valid():
+		return true
+	var zero_bytes := PackedByteArray()
+	zero_bytes.resize(DEBUG_STATS_BYTE_SIZE)
+	_debug_stats_buffer = rd.storage_buffer_create(DEBUG_STATS_BYTE_SIZE, zero_bytes)
+	return _debug_stats_buffer.is_valid()
+
+
+func _reset_debug_stats_buffer() -> void:
+	if rd == null or not _debug_stats_buffer.is_valid():
+		return
+	var zero_bytes := PackedByteArray()
+	zero_bytes.resize(DEBUG_STATS_BYTE_SIZE)
+	rd.buffer_update(_debug_stats_buffer, 0, DEBUG_STATS_BYTE_SIZE, zero_bytes)
+
+
 func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Array:
 	var data := PackedFloat32Array()
 	var projection: Projection = scene_data.get_cam_projection()
 	var inv_proj: Projection = projection.inverse()
 	var inv_view: Transform3D = scene_data.get_cam_transform()
 	var view: Transform3D = inv_view.affine_inverse()
+	var source_projection: Projection = _source_camera_projection if _has_source_camera_matrices else projection
+	var source_inv_proj: Projection = source_projection.inverse()
+	var source_inv_view: Transform3D = _source_camera_transform if _has_source_camera_matrices else inv_view
+	var source_view: Transform3D = source_inv_view.affine_inverse()
 
 	for col: int in 4:
 		for row: int in 4:
@@ -470,6 +556,32 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(view.origin.x)
 	data.append(view.origin.y)
 	data.append(view.origin.z)
+	data.append(1.0)
+
+	for col: int in 4:
+		for row: int in 4:
+			data.append(source_inv_proj[col][row])
+	for col: int in 3:
+		data.append(source_inv_view.basis[col].x)
+		data.append(source_inv_view.basis[col].y)
+		data.append(source_inv_view.basis[col].z)
+		data.append(0.0)
+	data.append(source_inv_view.origin.x)
+	data.append(source_inv_view.origin.y)
+	data.append(source_inv_view.origin.z)
+	data.append(1.0)
+
+	for col: int in 4:
+		for row: int in 4:
+			data.append(source_projection[col][row])
+	for col: int in 3:
+		data.append(source_view.basis[col].x)
+		data.append(source_view.basis[col].y)
+		data.append(source_view.basis[col].z)
+		data.append(0.0)
+	data.append(source_view.origin.x)
+	data.append(source_view.origin.y)
+	data.append(source_view.origin.z)
 	data.append(1.0)
 
 	for i: int in range(MAX_CASCADES):
@@ -515,13 +627,21 @@ func _refresh_timestamp_snapshot() -> void:
 		"godotwind_surface_refraction_begin",
 		"godotwind_surface_refraction_end"
 	)
+	var timing_debug := _timestamp_pair_debug(
+		"godotwind_surface_refraction_begin",
+		"godotwind_surface_refraction_end"
+	)
+	var timing_available := rd.get_captured_timestamps_count() > 0
 	var timing_valid := pass_ms >= 0.0
 	pass_ms = maxf(pass_ms, 0.0)
 	var source_age := Engine.get_process_frames() - _external_source_process_frame if _external_source_process_frame >= 0 else -1
+	var debug_stats := _refresh_debug_stats_snapshot()
 	_last_perf_snapshot = {
 		"surface_refraction_ms": pass_ms,
 		"frame": frame,
+		"timing_available": timing_available,
 		"timing_valid": timing_valid,
+		"timing_debug": timing_debug,
 		"source_color_valid": _last_source_color_valid,
 		"source_depth_valid": _last_source_depth_valid,
 		"source_size_valid": _last_source_size_valid,
@@ -532,10 +652,36 @@ func _refresh_timestamp_snapshot() -> void:
 		"source_frame_age": source_age,
 		"source_frame_tolerance": source_frame_tolerance,
 		"dispatch_size": _last_dispatch_size,
+		"debug_stats": debug_stats,
 		"debug_mode": _debug_mode,
 		"mask_mode": _mask_mode_name(),
 		"reject_reason": _reject_reason_name(),
 	}
+
+
+func _refresh_debug_stats_snapshot() -> Dictionary:
+	if not diagnostic_stats_enabled:
+		_last_debug_stats = {}
+		return _last_debug_stats
+	if rd == null or not _debug_stats_buffer.is_valid():
+		_last_debug_stats = {"available": false, "reason": "buffer_unavailable"}
+		return _last_debug_stats
+	if not rd.has_method("buffer_get_data"):
+		_last_debug_stats = {"available": false, "reason": "buffer_get_data_unavailable"}
+		return _last_debug_stats
+	var bytes: PackedByteArray = rd.buffer_get_data(_debug_stats_buffer)
+	if bytes.size() < DEBUG_STATS_BYTE_SIZE:
+		_last_debug_stats = {
+			"available": false,
+			"reason": "short_read",
+			"byte_size": bytes.size(),
+		}
+		return _last_debug_stats
+	var result := {"available": true}
+	for i: int in DEBUG_STATS_NAMES.size():
+		result[DEBUG_STATS_NAMES[i]] = int(bytes.decode_u32(i * 4))
+	_last_debug_stats = result
+	return _last_debug_stats
 
 
 func _mask_mode_name() -> String:
@@ -552,6 +698,8 @@ func _mask_mode_name() -> String:
 			return "pre_absorption"
 		6:
 			return "post_absorption"
+		7:
+			return "ownership_rgb"
 		_:
 			return "final"
 
@@ -573,26 +721,93 @@ func _reject_reason_name() -> String:
 func _timestamp_pair_delta_ms(begin_name: String, end_name: String) -> float:
 	if rd == null:
 		return -1.0
-	var pending_gpu := -1
+	var begin_times: Array[int] = []
+	var end_times: Array[int] = []
+	var begin_cpu_times: Array[int] = []
+	var end_cpu_times: Array[int] = []
 	var last_valid_ms := -1.0
 	var count := rd.get_captured_timestamps_count()
 	for i: int in count:
 		var name := rd.get_captured_timestamp_name(i)
 		if name == begin_name:
-			pending_gpu = rd.get_captured_timestamp_gpu_time(i)
-		elif name == end_name and pending_gpu >= 0:
-			var gpu_ms := _timestamp_delta_ms(pending_gpu, rd.get_captured_timestamp_gpu_time(i))
+			begin_times.append(rd.get_captured_timestamp_gpu_time(i))
+			begin_cpu_times.append(rd.get_captured_timestamp_cpu_time(i))
+		elif name == end_name:
+			end_times.append(rd.get_captured_timestamp_gpu_time(i))
+			end_cpu_times.append(rd.get_captured_timestamp_cpu_time(i))
+	for begin_index: int in begin_times.size():
+		for end_index: int in end_times.size():
+			var gpu_ms := TimestampTimingUtilsScript.choose_delta_ms(
+				begin_times[begin_index],
+				end_times[end_index],
+				MAX_REASONABLE_TIMESTAMP_MS,
+				begin_cpu_times[begin_index],
+				end_cpu_times[end_index]
+			)
 			if _timestamp_delta_is_plausible(gpu_ms):
 				last_valid_ms = gpu_ms
-			pending_gpu = -1
 	return last_valid_ms
+
+
+func _timestamp_pair_debug(begin_name: String, end_name: String) -> Dictionary:
+	var result := {
+		"begin_count": 0,
+		"end_count": 0,
+		"first_begin_gpu_raw": -1,
+		"first_end_gpu_raw": -1,
+		"first_begin_cpu_raw": -1,
+		"first_end_cpu_raw": -1,
+		"min_positive_gpu_ms": -1.0,
+		"min_positive_cpu_ms": -1.0,
+		"chosen_unit": "invalid",
+		"chosen_micro_ms": -1.0,
+		"chosen_nano_ms": -1.0,
+	}
+	if rd == null:
+		return result
+	var begin_gpu_times: Array[int] = []
+	var end_gpu_times: Array[int] = []
+	var begin_cpu_times: Array[int] = []
+	var end_cpu_times: Array[int] = []
+	var count := rd.get_captured_timestamps_count()
+	for i: int in count:
+		var name := rd.get_captured_timestamp_name(i)
+		if name == begin_name:
+			begin_gpu_times.append(rd.get_captured_timestamp_gpu_time(i))
+			begin_cpu_times.append(rd.get_captured_timestamp_cpu_time(i))
+		elif name == end_name:
+			end_gpu_times.append(rd.get_captured_timestamp_gpu_time(i))
+			end_cpu_times.append(rd.get_captured_timestamp_cpu_time(i))
+	result["begin_count"] = begin_gpu_times.size()
+	result["end_count"] = end_gpu_times.size()
+	if not begin_gpu_times.is_empty():
+		result["first_begin_gpu_raw"] = begin_gpu_times[0]
+		result["first_begin_cpu_raw"] = begin_cpu_times[0]
+	if not end_gpu_times.is_empty():
+		result["first_end_gpu_raw"] = end_gpu_times[0]
+		result["first_end_cpu_raw"] = end_cpu_times[0]
+	for begin_index: int in begin_gpu_times.size():
+		for end_index: int in end_gpu_times.size():
+			var delta := TimestampTimingUtilsScript.choose_delta(
+				begin_gpu_times[begin_index],
+				end_gpu_times[end_index],
+				MAX_REASONABLE_TIMESTAMP_MS,
+				begin_cpu_times[begin_index],
+				end_cpu_times[end_index]
+			)
+			var gpu_ms := float(delta.get("ms", -1.0))
+			if gpu_ms >= 0.0 and (float(result["min_positive_gpu_ms"]) < 0.0 or gpu_ms < float(result["min_positive_gpu_ms"])):
+				result["min_positive_gpu_ms"] = gpu_ms
+				result["chosen_unit"] = str(delta.get("unit", "invalid"))
+				result["chosen_micro_ms"] = float(delta.get("micro_ms", -1.0))
+				result["chosen_nano_ms"] = float(delta.get("nano_ms", -1.0))
+	for begin_cpu: int in begin_cpu_times:
+		for end_cpu: int in end_cpu_times:
+			var cpu_ms := TimestampTimingUtilsScript.microsecond_delta_ms(begin_cpu, end_cpu)
+			if cpu_ms >= 0.0 and (float(result["min_positive_cpu_ms"]) < 0.0 or cpu_ms < float(result["min_positive_cpu_ms"])):
+				result["min_positive_cpu_ms"] = cpu_ms
+	return result
 
 
 func _timestamp_delta_is_plausible(gpu_ms: float) -> bool:
 	return gpu_ms >= 0.0 and gpu_ms <= MAX_REASONABLE_TIMESTAMP_MS
-
-
-func _timestamp_delta_ms(begin_us: int, end_us: int) -> float:
-	if begin_us < 0 or end_us < 0 or end_us < begin_us:
-		return -1.0
-	return float(end_us - begin_us) / 1000.0

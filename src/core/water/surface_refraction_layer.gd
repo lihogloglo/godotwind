@@ -1,9 +1,8 @@
 ## SurfaceRefractionLayer
 ##
-## Coordinator for production above-water surface refraction. The main ocean
-## remains opaque; this node owns the water-excluded capture and a
-## POST_TRANSPARENT compositor pass that replaces only pixels classified as
-## visible water surface with one refracted submerged source sample.
+## Coordinator for the experimental above-water surface refraction compositor.
+## The main ocean remains opaque; this node consumes either the legacy
+## water-excluded capture or an explicit controlled refraction source.
 class_name SurfaceRefractionLayer
 extends Node3D
 
@@ -30,6 +29,11 @@ var source_frame_tolerance: int = DEFAULT_SOURCE_FRAME_TOLERANCE:
 		source_frame_tolerance = maxi(0, value)
 		if _effect != null:
 			_effect.source_frame_tolerance = source_frame_tolerance
+var diagnostic_stats_enabled: bool = false:
+	set(value):
+		diagnostic_stats_enabled = value
+		if _effect != null:
+			_effect.diagnostic_stats_enabled = diagnostic_stats_enabled
 
 var _camera: Camera3D = null
 var _environment: Environment = null
@@ -39,6 +43,7 @@ var _enabled: bool = false
 var _overlay: MeshInstance3D = null
 var _capture: PrewaterCaptureRenderer = null
 var _effect: SurfaceRefractionCompositorEffect = null
+var _controlled_source: Object = null
 var _material: ShaderMaterial = null
 var _mesh_mode: int = -1
 var _attached_world_environment: WorldEnvironment = null
@@ -116,6 +121,14 @@ func set_source_frame_tolerance(value: int) -> void:
 	source_frame_tolerance = value
 
 
+func set_controlled_source(source: Object) -> void:
+	_controlled_source = source
+
+
+func clear_controlled_source() -> void:
+	_controlled_source = null
+
+
 func process_layer(main_viewport_size: Vector2i) -> void:
 	_ensure_nodes()
 	_ensure_effect()
@@ -128,15 +141,20 @@ func process_layer(main_viewport_size: Vector2i) -> void:
 		_sync_overlay_from_ocean()
 		_sync_material_from_ocean()
 
-	var capture_mask := _camera.cull_mask & ~source_exclusion_layer_mask
-	_capture.configure(_camera, _environment, capture_mask, 0)
-	_capture.near_water_capture_fade_start_m = 1.0e6 - 1.0
-	_capture.near_water_capture_distance_m = 1.0e6
-	_capture.set_resolution_scale(source_resolution_scale)
-	_capture.set_capture_enabled(true)
-	_capture.set_blend_factor(1.0)
-	_capture.set_activation_water_level(_get_ocean_sea_level())
-	_capture.update_capture(_safe_viewport_size(main_viewport_size))
+	if _has_controlled_source():
+		_controlled_source.call("set_enabled", true)
+		_controlled_source.set("source_resolution_scale", source_resolution_scale)
+		_controlled_source.call("process_source", _safe_viewport_size(main_viewport_size), _get_ocean_sea_level())
+	else:
+		var capture_mask := _camera.cull_mask & ~source_exclusion_layer_mask
+		_capture.configure(_camera, _environment, capture_mask, 0)
+		_capture.near_water_capture_fade_start_m = 1.0e6 - 1.0
+		_capture.near_water_capture_distance_m = 1.0e6
+		_capture.set_resolution_scale(source_resolution_scale)
+		_capture.set_capture_enabled(true)
+		_capture.set_blend_factor(1.0)
+		_capture.set_activation_water_level(_get_ocean_sea_level())
+		_capture.update_capture(_safe_viewport_size(main_viewport_size))
 
 	_sync_effect_from_water_state()
 	_apply_enabled_state()
@@ -156,13 +174,88 @@ func get_runtime_status() -> Dictionary:
 	var reject_reason := "inactive"
 	var compositor_enabled := false
 	var overlay_active := false
-	if _capture != null:
+	var surface_refraction_ms := 0.0
+	var source_mode := "controlled" if _has_controlled_source() else "legacy_exclusion"
+	var source_copy_ms := 0.0
+	var source_copy_frame := -1
+	var source_copy_timing_available := false
+	var source_copy_timing_valid := false
+	var source_copy_timing_marker_scope := ""
+	var source_copy_timing_marker_begin := ""
+	var source_copy_timing_marker_end := ""
+	var source_update_cpu_ms := 0.0
+	var source_render_ms := -1.0
+	var source_render_frame := -1
+	var source_render_timing_available := false
+	var source_render_timing_valid := false
+	var source_render_timing_scope := "unavailable"
+	var source_render_timing_marker_scope := ""
+	var source_render_timing_marker_begin := ""
+	var source_render_timing_marker_end := ""
+	var source_has_renderer_matrices := false
+	var source_renderer_matrix_frame := -1
+	var source_renderer_matrix_age := -1
+	var surface_refraction_timing_available := false
+	var surface_refraction_timing_valid := false
+	var surface_refraction_frame := -1
+	var surface_refraction_timing_debug := {}
+	var debug_stats := {}
+	if _has_controlled_source():
+		var controlled_snapshot: Dictionary = _controlled_source.call("get_runtime_status")
+		source_size = controlled_snapshot.get("source_size", Vector2i.ZERO)
+		source_valid = bool(controlled_snapshot.get("source_valid", false))
+		capture_age = int(controlled_snapshot.get("source_frame_age", -1))
+		source_copy_ms = float(controlled_snapshot.get("prewater_copy_ms", 0.0))
+		source_copy_frame = int(controlled_snapshot.get("prewater_copy_frame", -1))
+		source_copy_timing_available = bool(controlled_snapshot.get("prewater_copy_timing_available", false))
+		source_copy_timing_valid = bool(controlled_snapshot.get("prewater_copy_timing_valid", false))
+		source_copy_timing_marker_scope = str(controlled_snapshot.get("prewater_copy_timing_marker_scope", ""))
+		source_copy_timing_marker_begin = str(controlled_snapshot.get("prewater_copy_timing_marker_begin", ""))
+		source_copy_timing_marker_end = str(controlled_snapshot.get("prewater_copy_timing_marker_end", ""))
+		source_update_cpu_ms = float(controlled_snapshot.get("source_update_cpu_ms", 0.0))
+		source_render_ms = float(controlled_snapshot.get("source_render_ms", -1.0))
+		source_render_frame = int(controlled_snapshot.get("source_render_frame", -1))
+		source_render_timing_available = bool(controlled_snapshot.get("source_render_timing_available", false))
+		source_render_timing_valid = bool(controlled_snapshot.get("source_render_timing_valid", false))
+		source_render_timing_scope = str(controlled_snapshot.get("source_render_timing_scope", "unavailable"))
+		source_render_timing_marker_scope = str(controlled_snapshot.get("source_render_timing_marker_scope", ""))
+		source_render_timing_marker_begin = str(controlled_snapshot.get("source_render_timing_marker_begin", ""))
+		source_render_timing_marker_end = str(controlled_snapshot.get("source_render_timing_marker_end", ""))
+		source_has_renderer_matrices = bool(controlled_snapshot.get("source_has_renderer_matrices", false))
+		source_renderer_matrix_frame = int(controlled_snapshot.get("source_renderer_matrix_frame", -1))
+		source_renderer_matrix_age = int(controlled_snapshot.get("source_renderer_matrix_age", -1))
+	elif _capture != null:
 		source_size = _capture.get_source_size()
 		source_valid = _capture.has_capture()
 		var frame := _capture.get_capture_process_frame()
 		capture_age = Engine.get_process_frames() - frame if frame >= 0 else -1
+		var capture_snapshot := _capture.get_perf_snapshot()
+		source_copy_ms = float(capture_snapshot.get("prewater_copy_ms", 0.0))
+		source_copy_frame = int(capture_snapshot.get("frame", -1))
+		source_copy_timing_available = bool(capture_snapshot.get("timing_available", false))
+		source_copy_timing_valid = bool(capture_snapshot.get("timing_valid", false))
+		source_copy_timing_marker_scope = str(capture_snapshot.get("prewater_copy_timing_marker_scope", ""))
+		source_copy_timing_marker_begin = str(capture_snapshot.get("prewater_copy_timing_marker_begin", ""))
+		source_copy_timing_marker_end = str(capture_snapshot.get("prewater_copy_timing_marker_end", ""))
+		source_render_ms = float(capture_snapshot.get("source_render_ms", -1.0))
+		source_render_frame = int(capture_snapshot.get("source_render_frame", -1))
+		source_render_timing_available = bool(capture_snapshot.get("source_render_timing_available", false))
+		source_render_timing_valid = bool(capture_snapshot.get("source_render_timing_valid", false))
+		source_render_timing_scope = str(capture_snapshot.get("source_render_timing_scope", "unavailable"))
+		source_render_timing_marker_scope = str(capture_snapshot.get("source_render_timing_marker_scope", ""))
+		source_render_timing_marker_begin = str(capture_snapshot.get("source_render_timing_marker_begin", ""))
+		source_render_timing_marker_end = str(capture_snapshot.get("source_render_timing_marker_end", ""))
+		source_has_renderer_matrices = bool(capture_snapshot.get("capture_has_renderer_matrices", false))
+		source_renderer_matrix_frame = int(capture_snapshot.get("capture_renderer_matrix_frame", -1))
+		source_renderer_matrix_age = int(capture_snapshot.get("capture_renderer_matrix_age", -1))
 	if _effect != null:
 		var snapshot := _effect.get_surface_refraction_perf_snapshot()
+		surface_refraction_ms = float(snapshot.get("surface_refraction_ms", 0.0))
+		surface_refraction_timing_available = bool(snapshot.get("timing_available", false))
+		surface_refraction_timing_valid = bool(snapshot.get("timing_valid", false))
+		surface_refraction_frame = int(snapshot.get("frame", -1))
+		surface_refraction_timing_debug = snapshot.get("timing_debug", {})
+		debug_stats = snapshot.get("debug_stats", {})
 		source_depth_valid = bool(snapshot.get("source_depth_valid", false))
 		source_fresh = bool(snapshot.get("source_fresh", false))
 		dispatch_size = snapshot.get("dispatch_size", Vector2i.ZERO)
@@ -171,19 +264,96 @@ func get_runtime_status() -> Dictionary:
 		compositor_enabled = _effect.effect_enabled
 	if _overlay != null:
 		overlay_active = _overlay.visible
+	var copy_surface_timing_available := source_copy_timing_available and surface_refraction_timing_available
+	var copy_surface_timing_valid := (
+		copy_surface_timing_available
+		and source_copy_timing_valid
+		and surface_refraction_timing_valid
+	)
+	var copy_surface_ms := source_copy_ms + surface_refraction_ms if copy_surface_timing_valid else -1.0
+	var same_timing_frame := (
+		source_render_frame >= 0
+		and source_copy_frame >= 0
+		and surface_refraction_frame >= 0
+		and source_render_frame == source_copy_frame
+		and source_copy_frame == surface_refraction_frame
+	)
+	var total_timing_available := (
+		source_render_timing_available
+		and source_copy_timing_available
+		and surface_refraction_timing_available
+	)
+	var total_timing_valid := (
+		total_timing_available
+		and source_render_timing_valid
+		and copy_surface_timing_valid
+		and same_timing_frame
+	)
+	var total_refraction_ms := source_render_ms + copy_surface_ms if total_timing_valid else -1.0
+	var total_unavailable_reason := "available"
+	if not source_render_timing_available:
+		total_unavailable_reason = "source_render_timing_unavailable"
+	elif not source_render_timing_valid:
+		total_unavailable_reason = "source_render_timing_invalid"
+	elif not source_copy_timing_available:
+		total_unavailable_reason = "source_copy_timing_unavailable"
+	elif not source_copy_timing_valid:
+		total_unavailable_reason = "source_copy_timing_invalid"
+	elif not surface_refraction_timing_available:
+		total_unavailable_reason = "surface_refraction_timing_unavailable"
+	elif not surface_refraction_timing_valid:
+		total_unavailable_reason = "surface_refraction_timing_invalid"
+	elif not same_timing_frame:
+		total_unavailable_reason = "timing_frame_mismatch"
 	return {
 		"enabled": _enabled,
 		"source_valid": source_valid,
 		"source_depth_valid": source_depth_valid,
 		"source_fresh": source_fresh,
 		"source_size": source_size,
+		"source_mode": source_mode,
 		"source_resolution_scale": source_resolution_scale,
 		"capture_frame_age": capture_age,
+		"source_has_renderer_matrices": source_has_renderer_matrices,
+		"source_renderer_matrix_frame": source_renderer_matrix_frame,
+		"source_renderer_matrix_age": source_renderer_matrix_age,
 		"source_frame_tolerance": source_frame_tolerance,
+		"refraction_strength": refraction_strength,
+		"edge_guard_strength": edge_guard_strength,
 		"mesh_mode": _mesh_mode,
 		"compositor_enabled": compositor_enabled,
 		"overlay_active": overlay_active,
 		"dispatch_size": dispatch_size,
+		"surface_refraction_ms": surface_refraction_ms,
+		"surface_refraction_frame": surface_refraction_frame,
+		"surface_refraction_timing_available": surface_refraction_timing_available,
+		"surface_refraction_timing_valid": surface_refraction_timing_valid,
+		"surface_refraction_timing_debug": surface_refraction_timing_debug,
+		"surface_refraction_debug_stats": debug_stats,
+		"controlled_source_render_ms": source_render_ms,
+		"controlled_source_render_frame": source_render_frame,
+		"controlled_source_render_timing_available": source_render_timing_available,
+		"controlled_source_render_timing_valid": source_render_timing_valid,
+		"controlled_source_render_timing_scope": source_render_timing_scope,
+		"controlled_source_render_timing_marker_scope": source_render_timing_marker_scope,
+		"controlled_source_render_timing_marker_begin": source_render_timing_marker_begin,
+		"controlled_source_render_timing_marker_end": source_render_timing_marker_end,
+		"controlled_source_copy_ms": source_copy_ms,
+		"controlled_source_copy_frame": source_copy_frame,
+		"controlled_source_copy_timing_available": source_copy_timing_available,
+		"controlled_source_copy_timing_valid": source_copy_timing_valid,
+		"controlled_source_copy_timing_marker_scope": source_copy_timing_marker_scope,
+		"controlled_source_copy_timing_marker_begin": source_copy_timing_marker_begin,
+		"controlled_source_copy_timing_marker_end": source_copy_timing_marker_end,
+		"controlled_source_update_cpu_ms": source_update_cpu_ms,
+		"controlled_copy_surface_ms": copy_surface_ms,
+		"controlled_copy_surface_timing_available": copy_surface_timing_available,
+		"controlled_copy_surface_timing_valid": copy_surface_timing_valid,
+		"controlled_total_refraction_ms": total_refraction_ms,
+		"controlled_total_refraction_timing_available": total_timing_available,
+		"controlled_total_refraction_timing_valid": total_timing_valid,
+		"controlled_total_refraction_unavailable_reason": total_unavailable_reason,
+		"controlled_total_same_timing_frame": same_timing_frame,
 		"mask_mode": mask_mode,
 		"reject_reason": reject_reason,
 		"debug_mode": get_debug_mode(),
@@ -194,6 +364,7 @@ func _ensure_nodes() -> void:
 	if _capture == null:
 		_capture = PrewaterCaptureRendererScript.new()
 		_capture.name = "SurfaceRefractionSourceCapture"
+		_capture.occlusion_capture_enabled = false
 		add_child(_capture)
 	if _overlay == null:
 		_overlay = MeshInstance3D.new()
@@ -209,6 +380,7 @@ func _ensure_effect() -> void:
 		_effect.effect_enabled = false
 		_effect.blend_factor = 0.0
 		_effect.source_frame_tolerance = source_frame_tolerance
+		_effect.diagnostic_stats_enabled = diagnostic_stats_enabled
 		_effect.on_effect_added()
 	_ensure_attached()
 
@@ -293,6 +465,8 @@ func _apply_enabled_state() -> void:
 	if _capture != null and not active:
 		_capture.set_capture_enabled(false)
 		_capture.set_blend_factor(0.0)
+	if _has_controlled_source():
+		_controlled_source.call("set_enabled", active)
 	if _effect != null and not active:
 		_effect.clear_external_source_buffers()
 	if _material != null and (not active or not diagnostic_overlay_enabled):
@@ -302,15 +476,30 @@ func _apply_enabled_state() -> void:
 func _push_capture_to_effect() -> void:
 	if _effect == null or _capture == null:
 		return
+	if _has_controlled_source():
+		if not bool(_controlled_source.call("push_to_surface_refraction_effect", _effect)):
+			_effect.clear_external_source_buffers()
+		return
 	if not _capture.has_capture():
 		_effect.clear_external_source_buffers()
 		return
+	if _capture.has_capture_renderer_matrices():
+		_effect.set_source_camera_matrices(
+			_capture.get_capture_renderer_projection(),
+			_capture.get_capture_renderer_camera_transform()
+		)
+	else:
+		_effect.clear_source_camera_matrices()
 	_effect.set_external_source_buffers(
 		_capture.get_source_color_rid(),
 		_capture.get_source_depth_rid(),
 		_capture.get_source_size(),
 		_capture.get_capture_process_frame()
 	)
+
+
+func _has_controlled_source() -> bool:
+	return _controlled_source != null and is_instance_valid(_controlled_source)
 
 
 func _sync_effect_from_water_state() -> void:

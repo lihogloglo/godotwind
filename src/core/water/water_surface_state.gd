@@ -53,6 +53,7 @@ var displacement_texture_size: int = 0
 var render_mesh_mode: int = 0
 var render_mesh_origin: Vector2 = Vector2.ZERO
 var render_clipmap_base_quad_size: float = 1.0
+var render_clipmap_inner_quad_size: float = 1.0
 var render_clipmap_ring_vertex_count: int = 0
 var render_clipmap_ring_count: int = 0
 var render_projected_grid_dim: int = 0

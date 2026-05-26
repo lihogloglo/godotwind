@@ -75,8 +75,8 @@ var _sun_direction: Vector3 = Vector3(0.25, 0.85, 0.45).normalized()
 var _sun_visibility: float = 1.0
 var _quality_tier: int = QUALITY_MEDIUM
 var _receiver_source_mode: int = RECEIVER_SOURCE_MAIN_ABOVE_CAPTURE_UNDER
-var _user_underwater_feature_flags: int = QUALITY_HIGH_FEATURE_FLAGS
-var _underwater_feature_flags: int = QUALITY_MEDIUM_FEATURE_FLAGS
+var _user_underwater_feature_flags: int = 0
+var _underwater_feature_flags: int = 0
 var _particle_noise_scale: float = 0.70
 var _particle_density: float = 0.15
 var _particle_near_gate_m: float = 1.5
@@ -310,20 +310,13 @@ func set_sun_visibility(value: float) -> void:
 	_sun_visibility = clampf(value, 0.0, 1.0)
 
 
-func set_underwater_feature_enabled(feature_name: StringName, enabled: bool) -> void:
-	var bit := _feature_bit(feature_name)
-	if bit == 0:
-		return
-	if enabled:
-		_user_underwater_feature_flags |= bit
-	else:
-		_user_underwater_feature_flags &= ~bit
-	_refresh_effective_feature_flags()
+func set_underwater_feature_enabled(_feature_name: StringName, _enabled: bool) -> void:
+	_user_underwater_feature_flags = 0
+	_underwater_feature_flags = 0
 
 
-func is_underwater_feature_enabled(feature_name: StringName) -> bool:
-	var bit := _feature_bit(feature_name)
-	return bit != 0 and (_underwater_feature_flags & bit) != 0
+func is_underwater_feature_enabled(_feature_name: StringName) -> bool:
+	return false
 
 
 func set_quality_tier(tier: int) -> void:
@@ -352,12 +345,12 @@ func set_receiver_refraction_enabled(enabled: bool) -> void:
 	_receiver_refraction_enabled = enabled
 
 
-func set_receiver_medium_enabled(enabled: bool) -> void:
-	_receiver_medium_enabled = enabled
+func set_receiver_medium_enabled(_enabled: bool) -> void:
+	_receiver_medium_enabled = false
 
 
-func set_receiver_surface_film_enabled(enabled: bool) -> void:
-	_receiver_surface_film_enabled = enabled
+func set_receiver_surface_film_enabled(_enabled: bool) -> void:
+	_receiver_surface_film_enabled = false
 
 
 func set_underwater_particle_params(noise_scale: float, density: float, near_gate_m: float, far_gate_m: float) -> void:
@@ -389,7 +382,8 @@ func _feature_bit(feature_name: StringName) -> int:
 
 
 func _refresh_effective_feature_flags() -> void:
-	_underwater_feature_flags = _user_underwater_feature_flags & _quality_feature_mask(_quality_tier)
+	_user_underwater_feature_flags = 0
+	_underwater_feature_flags = 0
 
 
 func _quality_feature_mask(tier: int) -> int:

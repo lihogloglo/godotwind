@@ -6,3 +6,14 @@ License: MIT
 
 File:
   sea_spray.png
+
+Boujie experimental water textures
+
+Source: Boujie Water Shader by Zach Bernal / Chrisknyfe and contributors
+URL: https://github.com/Chrisknyfe/boujie_water_shader/tree/zb/fix_refraction_distance_fade
+Commit: 444067b4a39b28d0b9e2e0caf541ccf485723b73
+License: MIT
+
+Files:
+  boujie/ocean_albedo_white_highcontrast.png
+  boujie/refraction.png

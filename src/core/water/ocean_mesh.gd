@@ -13,9 +13,11 @@ extends MeshInstance3D
 # with depth_draw_always, while denser overlapping rings regressed crest order.
 const LEGACY_NUM_LOD_RINGS: int = 11
 const LEGACY_BASE_QUAD_SIZE: float = 2.0
+const LEGACY_INNER_RING_QUAD_SIZE: float = 2.0
 const LEGACY_RING_VERTEX_COUNT: int = 64
 const HIGH_NUM_LOD_RINGS: int = 11
 const HIGH_BASE_QUAD_SIZE: float = 2.0
+const HIGH_INNER_RING_QUAD_SIZE: float = 0.5
 const HIGH_RING_VERTEX_COUNT: int = 64
 
 # Projected grid configuration — single flat N×N mesh in local [0,1]²; the
@@ -31,12 +33,21 @@ enum QualityMode { FLAT, HIGH }
 # Wicked Engine flat grid + vertex-shader unproject path. PROJECTED is only
 # meaningful in HIGH quality (FFT); FLAT ignores it.
 enum MeshMode { CLIPMAP, PROJECTED }
+enum SurfaceShaderMode { DEFAULT, BOUJIE_EXPERIMENTAL }
+# Compatibility alias: serialized/user scripts may still use BOUJIE_EXPERIMENTAL,
+# while UI/logging now presents this path as Boujie High.
+const SURFACE_SHADER_MODE_BOUJIE_HIGH_FEATURE := SurfaceShaderMode.BOUJIE_EXPERIMENTAL
+
+const BOUJIE_ALBEDO_TEXTURE_PATH := "res://src/core/water/textures/boujie/ocean_albedo_white_highcontrast.png"
+const BOUJIE_REFRACTION_TEXTURE_PATH := "res://src/core/water/textures/boujie/refraction.png"
+const WATER_MICRO_NORMAL_TEXTURE_PATH := "res://assets/water/water_normal.png"
 
 # Shader state
 var _material: ShaderMaterial = null
 var _shader: Shader = null
 var _quality: QualityMode = QualityMode.HIGH
 var _mesh_mode: MeshMode = MeshMode.CLIPMAP
+var _surface_shader_mode: SurfaceShaderMode = SurfaceShaderMode.DEFAULT
 
 # Cached state for quality switching
 var _cached_shore_mask: Texture2D = null
@@ -97,6 +108,10 @@ func _create_shader() -> void:
 			var shader_path := "res://src/core/water/shaders/ocean_fft_opaque.gdshader"
 			if _mesh_mode == MeshMode.PROJECTED:
 				shader_path = "res://src/core/water/shaders/ocean_fft_projected.gdshader"
+			if _surface_shader_mode == SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
+				shader_path = "res://src/core/water/shaders/ocean_boujie_experimental_clipmap.gdshader"
+				if _mesh_mode == MeshMode.PROJECTED:
+					shader_path = "res://src/core/water/shaders/ocean_boujie_experimental_projected.gdshader"
 			_shader = load(shader_path) as Shader
 			if not _shader:
 				Log.warn("water", "OceanMesh: FFT shader not found at %s, falling back to flat" % shader_path)
@@ -154,8 +169,51 @@ func _setup_fft_defaults() -> void:
 	_cached_foam_texture = foam_tex
 	_material.set_shader_parameter("refraction_strength", 0.0)
 	_material.set_shader_parameter("refraction_edge_guard_strength", 0.0)
+	if _surface_shader_mode == SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
+		_setup_boujie_experimental_defaults()
 
 	Log.debug("water", "OceanMesh: FFT shader defaults configured")
+
+
+func _setup_boujie_experimental_defaults() -> void:
+	var albedo_tex := _load_texture_or_null(BOUJIE_ALBEDO_TEXTURE_PATH)
+	var refraction_tex := _load_texture_or_null(BOUJIE_REFRACTION_TEXTURE_PATH)
+	var micro_normal_tex := _load_texture_or_null(WATER_MICRO_NORMAL_TEXTURE_PATH)
+	if albedo_tex:
+		_material.set_shader_parameter("boujie_texture_albedo", albedo_tex)
+	if refraction_tex:
+		_material.set_shader_parameter("boujie_texture_refraction", refraction_tex)
+	if micro_normal_tex:
+		_material.set_shader_parameter("micro_normal_texture", micro_normal_tex)
+	_material.set_shader_parameter("boujie_refraction", 0.088)
+	_material.set_shader_parameter("boujie_refraction_opacity", 1.0)
+	_material.set_shader_parameter("refraction_strength", 1.0)
+	_material.set_shader_parameter("refraction_edge_guard_strength", 1.0)
+	_material.set_shader_parameter("refraction_scaling_distance_min", 50.0)
+	_material.set_shader_parameter("refraction_scaling_power", 2.0)
+	_material.set_shader_parameter("boujie_beers_law", 0.02)
+	_material.set_shader_parameter("boujie_depth_offset", -0.75)
+	_material.set_shader_parameter("boujie_snell_tightness", 0.6)
+	_material.set_shader_parameter("boujie_uv_blend_sharpness", 2.0)
+	_material.set_shader_parameter("boujie_uv_tri_scale", Vector3(36.0, 36.0, 36.0))
+	_material.set_shader_parameter("texture_advection_strength", 1.0)
+	_material.set_shader_parameter("micro_normal_strength", 0.16)
+	_material.set_shader_parameter("micro_normal_uv_scale", 0.075)
+	_material.set_shader_parameter("micro_normal_speed_scale", 0.04)
+	_material.set_shader_parameter("micro_normal_flat_boost", 1.35)
+	_material.set_shader_parameter("boujie_albedo", Color(0.235294, 0.647059, 0.960784, 0.0))
+	_material.set_shader_parameter("boujie_albedo_fresnel", Color(0.317647, 0.596078, 0.988235, 1.0))
+	_material.set_shader_parameter("boujie_albedo_snell", Color(0.0, 0.101961, 0.239216, 1.0))
+	_material.set_shader_parameter("distance_fade_min", 2708.0)
+	_material.set_shader_parameter("distance_fade_max", 4000.0)
+	_material.set_shader_parameter("near_fade_min", 1.5)
+	_material.set_shader_parameter("near_fade_max", 1.7)
+	_material.set_shader_parameter("foam_fade_min", 516.96)
+	_material.set_shader_parameter("foam_fade_max", 1440.0)
+	_material.set_shader_parameter("shore_fade_min", 516.96)
+	_material.set_shader_parameter("shore_fade_max", 1440.0)
+	_material.set_shader_parameter("depth_fog_fade_min", 516.96)
+	_material.set_shader_parameter("depth_fog_fade_max", 1440.0)
 
 
 func _load_foam_texture() -> Texture2D:
@@ -182,6 +240,15 @@ func _load_foam_texture() -> Texture2D:
 	return tex
 
 
+func _load_texture_or_null(path: String) -> Texture2D:
+	if ResourceLoader.exists(path):
+		var tex := load(path) as Texture2D
+		if tex:
+			return tex
+	Log.warn("water", "OceanMesh: Optional water texture missing: %s" % path)
+	return null
+
+
 # ============================================================================
 # CLIPMAP MESH CREATION
 # ============================================================================
@@ -192,6 +259,10 @@ func _clipmap_ring_count() -> int:
 
 func _clipmap_base_quad_size() -> float:
 	return HIGH_BASE_QUAD_SIZE if _quality == QualityMode.HIGH else LEGACY_BASE_QUAD_SIZE
+
+
+func _clipmap_inner_ring_quad_size() -> float:
+	return HIGH_INNER_RING_QUAD_SIZE if _quality == QualityMode.HIGH else LEGACY_INNER_RING_QUAD_SIZE
 
 
 func _clipmap_ring_vertex_count() -> int:
@@ -214,10 +285,12 @@ func _create_clipmap_mesh(radius: float) -> void:
 	var prev_outer_radius := 0.0
 	var ring_count := _clipmap_ring_count()
 	var base_quad_size := _clipmap_base_quad_size()
+	var inner_ring_quad_size := _clipmap_inner_ring_quad_size()
 	var ring_vertex_count := _clipmap_ring_vertex_count()
+	var inner_ring_radius := base_quad_size * float(ring_vertex_count) * 0.5
 
 	for ring in range(ring_count):
-		var quad_size := base_quad_size * pow(2.0, float(ring))
+		var quad_size := inner_ring_quad_size if ring == 0 else base_quad_size * pow(2.0, float(ring))
 		# 2026-04-09 — clipmap seam fix. Successive rings have 2x quad_size
 		# so the inner ring's outer edge has twice as many vertices as the
 		# outer ring's inner edge, creating T-junctions. When the FFT
@@ -233,7 +306,7 @@ func _create_clipmap_mesh(radius: float) -> void:
 		var inner_radius := prev_outer_radius
 		if ring > 0:
 			inner_radius = maxf(0.0, prev_outer_radius - quad_size)
-		var outer_radius := quad_size * ring_vertex_count * 0.5
+		var outer_radius := inner_ring_radius if ring == 0 else quad_size * ring_vertex_count * 0.5
 		outer_radius = minf(outer_radius, radius)
 
 		if outer_radius <= inner_radius:
@@ -322,11 +395,11 @@ func _create_projected_mesh(radius: float) -> void:
 			var i01 := i00 + (dim + 1)
 			var i11 := i01 + 1
 			indices[ii + 0] = i00
-			indices[ii + 1] = i01
-			indices[ii + 2] = i10
+			indices[ii + 1] = i10
+			indices[ii + 2] = i01
 			indices[ii + 3] = i10
-			indices[ii + 4] = i01
-			indices[ii + 5] = i11
+			indices[ii + 4] = i11
+			indices[ii + 5] = i01
 			ii += 6
 
 	var normals := PackedVector3Array()
@@ -460,12 +533,41 @@ func get_mesh_mode() -> MeshMode:
 	return _mesh_mode
 
 
+func get_surface_shader_mode() -> SurfaceShaderMode:
+	return _surface_shader_mode
+
+
+func set_surface_shader_mode(mode: int) -> bool:
+	var clamped := clampi(mode, SurfaceShaderMode.DEFAULT, SurfaceShaderMode.BOUJIE_EXPERIMENTAL)
+	var next_mode := clamped as SurfaceShaderMode
+	if _surface_shader_mode == next_mode:
+		return false
+	_surface_shader_mode = next_mode
+	_create_shader()
+	_create_material()
+	_restore_cached_state()
+	Log.info("water", "OceanMesh: Surface shader changed to %s" % get_surface_shader_mode_name())
+	return true
+
+
+func get_surface_shader_mode_name() -> String:
+	match _surface_shader_mode:
+		SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
+			return "Boujie High"
+		_:
+			return "Default"
+
+
 func get_clipmap_origin() -> Vector2:
 	return Vector2(global_position.x, global_position.z)
 
 
 func get_clipmap_base_quad_size() -> float:
 	return _clipmap_base_quad_size()
+
+
+func get_clipmap_inner_quad_size() -> float:
+	return _clipmap_inner_ring_quad_size()
 
 
 func get_clipmap_ring_vertex_count() -> int:
