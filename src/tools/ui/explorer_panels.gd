@@ -86,6 +86,31 @@ var cirrus_slider: HSlider = null  # cirrus_coverage
 var cirrus_size_slider: HSlider = null
 var cirrus_thickness_slider: HSlider = null
 
+## Water effects widgets
+var underwater_medium_toggle: CheckBox = null
+var underwater_absorption_toggle: CheckBox = null
+var underwater_snell_toggle: CheckBox = null
+var underwater_wobble_toggle: CheckBox = null
+var underwater_caustics_toggle: CheckBox = null
+var underwater_particles_toggle: CheckBox = null
+var underwater_particle_quality_btn: OptionButton = null
+var underwater_particle_opacity_slider: HSlider = null
+var water_turbidity_slider: HSlider = null
+var water_visibility_slider: HSlider = null
+var water_color_picker: ColorPickerButton = null
+var surface_ssr_toggle: CheckBox = null
+var sea_spray_toggle: CheckBox = null
+var sea_spray_quality_btn: OptionButton = null
+var water_status_label: Label = null
+
+## Distance/rendering tier widgets
+var near_gameplay_toggle: CheckBox = null
+var static_visuals_toggle: CheckBox = null
+var far_impostors_toggle: CheckBox = null
+var hlod_toggle: CheckBox = null
+var distant_lights_toggle: CheckBox = null
+var hlod_status_label: Label = null
+
 ## Debug panel widgets
 var lod_mode_btn: Button = null
 var view_distance_label: Label = null
@@ -101,6 +126,11 @@ var _env_vbox: VBoxContainer = null
 var _render_vbox: VBoxContainer = null
 var _nav_vbox: VBoxContainer = null
 var _debug_vbox: VBoxContainer = null
+var _sky_vbox: VBoxContainer = null
+var _weather_vbox: VBoxContainer = null
+var _clouds_vbox: VBoxContainer = null
+var _water_vbox: VBoxContainer = null
+var _distance_vbox: VBoxContainer = null
 
 
 func _init(callbacks: Dictionary, initial_state: Dictionary = {}) -> void:
@@ -146,34 +176,50 @@ func build(vbox: VBoxContainer) -> void:
 	tab_container.add_theme_font_size_override("font_size", 11)
 
 	# Create 4 tabs — each is a ScrollContainer > VBoxContainer
-	var env_scroll := _make_tab_scroll("Scene")
-	_env_vbox = env_scroll.get_child(0) as VBoxContainer
+	var sky_scroll := _make_tab_scroll("Sky")
+	_sky_vbox = sky_scroll.get_child(0) as VBoxContainer
+
+	var weather_scroll := _make_tab_scroll("Weather")
+	_weather_vbox = weather_scroll.get_child(0) as VBoxContainer
+
+	var clouds_scroll := _make_tab_scroll("Clouds")
+	_clouds_vbox = clouds_scroll.get_child(0) as VBoxContainer
+
+	var water_scroll := _make_tab_scroll("Water")
+	_water_vbox = water_scroll.get_child(0) as VBoxContainer
+
+	var distance_scroll := _make_tab_scroll("Distance")
+	_distance_vbox = distance_scroll.get_child(0) as VBoxContainer
 
 	var render_scroll := _make_tab_scroll("Render")
 	_render_vbox = render_scroll.get_child(0) as VBoxContainer
 
-	var nav_scroll := _make_tab_scroll("Nav")
-	_nav_vbox = nav_scroll.get_child(0) as VBoxContainer
-
 	var debug_scroll := _make_tab_scroll("Debug")
 	_debug_vbox = debug_scroll.get_child(0) as VBoxContainer
 
-	tab_container.add_child(env_scroll)
+	tab_container.add_child(sky_scroll)
+	tab_container.add_child(weather_scroll)
+	tab_container.add_child(clouds_scroll)
+	tab_container.add_child(water_scroll)
+	tab_container.add_child(distance_scroll)
 	tab_container.add_child(render_scroll)
-	tab_container.add_child(nav_scroll)
 	tab_container.add_child(debug_scroll)
 
-	# Populate each tab
-	_build_environment_tab(_env_vbox)
+	_build_sky_tab(_sky_vbox)
+	_build_weather_tab(_weather_vbox)
+	_build_clouds_tab(_clouds_vbox)
+	_build_water_tab(_water_vbox)
+	_build_distance_tab(_distance_vbox)
 	_build_rendering_tab(_render_vbox)
-	_build_navigation_tab(_nav_vbox)
 	_build_debug_tab(_debug_vbox)
 
 	# Disable keyboard focus on all controls
 	_strip_focus(tab_container)
 
 	# For backward compat — panel_vbox points to env tab
-	panel_vbox = _env_vbox
+	_env_vbox = _distance_vbox
+	_nav_vbox = _distance_vbox
+	panel_vbox = _sky_vbox
 
 	# Insert into parent
 	var separator_idx := 1  # After pinned stats
@@ -255,6 +301,272 @@ func update_slider_label(slider: HSlider, value: float) -> void:
 	var value_label: Label = row.get_node_or_null("Value")
 	if value_label:
 		value_label.text = "%.1f" % value
+
+
+func _build_sky_tab(vbox: VBoxContainer) -> void:
+	_add_section(vbox, "Sky")
+	show_sky_toggle = CheckBox.new()
+	show_sky_toggle.text = "Sky"
+	show_sky_toggle.button_pressed = _initial_state.get("show_sky", false)
+	show_sky_toggle.toggled.connect(_cb.get("show_sky_toggled", Callable()))
+	vbox.add_child(show_sky_toggle)
+
+	time_of_day_slider = create_slider_row(vbox, "Time:", 0.0, 24.0, 8.0, _cb.get("time_of_day_changed", Callable()))
+	time_of_day_slider.step = 0.1
+
+	var speed_pause_row := HBoxContainer.new()
+	speed_pause_row.add_theme_constant_override("separation", 4)
+	var speed_label := Label.new()
+	speed_label.text = "Speed:"
+	speed_label.add_theme_font_size_override("font_size", 11)
+	speed_label.custom_minimum_size.x = 40
+	speed_pause_row.add_child(speed_label)
+	time_scale_slider = HSlider.new()
+	time_scale_slider.min_value = 0.0
+	time_scale_slider.max_value = 300.0
+	time_scale_slider.value = 30.0
+	time_scale_slider.step = 5.0
+	time_scale_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	time_scale_slider.value_changed.connect(_cb.get("time_scale_changed", Callable()))
+	speed_pause_row.add_child(time_scale_slider)
+	time_pause_toggle = CheckBox.new()
+	time_pause_toggle.text = "Pause"
+	time_pause_toggle.toggled.connect(_cb.get("time_pause_toggled", Callable()))
+	speed_pause_row.add_child(time_pause_toggle)
+	vbox.add_child(speed_pause_row)
+
+	_add_section(vbox, "Cirrus")
+	cirrus_slider = create_slider_row(vbox, "Coverage:", 0.0, 1.0, 0.55, _cb.get("cirrus_changed", Callable()) if _cb.has("cirrus_changed") else Callable())
+	cirrus_slider.step = 0.05
+	cirrus_size_slider = create_slider_row(vbox, "Size:", 0.3, 2.5, 0.7, _cb.get("cirrus_size_changed", Callable()) if _cb.has("cirrus_size_changed") else Callable())
+	cirrus_size_slider.step = 0.05
+	cirrus_thickness_slider = create_slider_row(vbox, "Thickness:", 0.0, 1.0, 0.6, _cb.get("cirrus_thickness_changed", Callable()) if _cb.has("cirrus_thickness_changed") else Callable())
+	cirrus_thickness_slider.step = 0.05
+
+
+func _build_weather_tab(vbox: VBoxContainer) -> void:
+	_add_section(vbox, "Weather")
+	weather_enabled_toggle = CheckBox.new()
+	weather_enabled_toggle.text = "Enable Weather"
+	weather_enabled_toggle.toggled.connect(_cb.get("weather_toggled", Callable()))
+	vbox.add_child(weather_enabled_toggle)
+
+	var weather_row := HBoxContainer.new()
+	var weather_label := Label.new()
+	weather_label.text = "Weather:"
+	weather_label.add_theme_font_size_override("font_size", 11)
+	weather_label.custom_minimum_size.x = 60
+	weather_row.add_child(weather_label)
+	weather_type_btn = OptionButton.new()
+	weather_type_btn.add_item("Auto", -1)
+	for i: int in WeatherTypes.TYPE_NAMES.size():
+		weather_type_btn.add_item(WeatherTypes.TYPE_NAMES[i], i)
+	weather_type_btn.selected = 0
+	weather_type_btn.item_selected.connect(_cb.get("weather_type_changed", Callable()))
+	weather_type_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	weather_row.add_child(weather_type_btn)
+	vbox.add_child(weather_row)
+
+	fog_density_slider = create_slider_row(vbox, "Fog:", 0.1, 3.0, 1.0, _cb.get("fog_density_changed", Callable()))
+	fog_density_slider.step = 0.1
+	depth_fog_toggle = CheckBox.new()
+	depth_fog_toggle.text = "Depth Fog"
+	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
+	vbox.add_child(depth_fog_toggle)
+	native_vfog_toggle = CheckBox.new()
+	native_vfog_toggle.text = "Volumetric Fog"
+	native_vfog_toggle.toggled.connect(_cb.get("native_vfog_toggled", Callable()))
+	vbox.add_child(native_vfog_toggle)
+	godrays_toggle = CheckBox.new()
+	godrays_toggle.text = "God Rays"
+	godrays_toggle.toggled.connect(_cb.get("godrays_toggled", Callable()))
+	vbox.add_child(godrays_toggle)
+
+	weather_status_label = Label.new()
+	weather_status_label.name = "WeatherStatus"
+	weather_status_label.text = "Weather: Clear | Hour: 8.0"
+	weather_status_label.add_theme_font_size_override("font_size", 10)
+	weather_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(weather_status_label)
+
+
+func _build_clouds_tab(vbox: VBoxContainer) -> void:
+	_add_section(vbox, "SunshineClouds2")
+	cloud_coverage_slider = create_slider_row(vbox, "Coverage:", 0.0, 1.0, 0.45, _cb.get("cloud_coverage_changed", Callable()))
+	cloud_coverage_slider.step = 0.02
+	cloud_density_slider = create_slider_row(vbox, "Density:", 0.02, 1.0, 0.14, _cb.get("cloud_density_changed", Callable()) if _cb.has("cloud_density_changed") else Callable())
+	cloud_density_slider.step = 0.01
+	cloud_sharpness_slider = create_slider_row(vbox, "Sharpness:", 0.0, 2.0, 0.75, _cb.get("cloud_sharpness_changed", Callable()) if _cb.has("cloud_sharpness_changed") else Callable())
+	cloud_sharpness_slider.step = 0.02
+	cloud_size_slider = create_slider_row(vbox, "Size:", 0.3, 3.0, 1.0, _cb.get("cloud_size_changed", Callable()) if _cb.has("cloud_size_changed") else Callable())
+	cloud_size_slider.step = 0.05
+	wind_strength_slider = create_slider_row(vbox, "Wind:", 0.0, 1.0, 0.25, _cb.get("wind_strength_changed", Callable()) if _cb.has("wind_strength_changed") else Callable())
+	wind_strength_slider.step = 0.02
+
+
+func _build_water_tab(vbox: VBoxContainer) -> void:
+	_add_section(vbox, "Ocean")
+	show_ocean_toggle = CheckBox.new()
+	show_ocean_toggle.text = "Ocean"
+	show_ocean_toggle.button_pressed = _initial_state.get("show_ocean", false)
+	show_ocean_toggle.toggled.connect(_cb.get("show_ocean_toggled", Callable()))
+	vbox.add_child(show_ocean_toggle)
+
+	ocean_controls_container = VBoxContainer.new()
+	ocean_controls_container.name = "OceanControls"
+	ocean_controls_container.visible = _initial_state.get("show_ocean", false)
+	vbox.add_child(ocean_controls_container)
+
+	_add_section(ocean_controls_container, "Underwater")
+	underwater_medium_toggle = _add_checkbox(ocean_controls_container, "Medium", true, _cb.get("underwater_medium_toggled", Callable()))
+	underwater_absorption_toggle = _add_checkbox(ocean_controls_container, "Absorption Fog", true, _cb.get("underwater_absorption_toggled", Callable()))
+	underwater_snell_toggle = _add_checkbox(ocean_controls_container, "Snell Window", true, _cb.get("underwater_snell_toggled", Callable()))
+	underwater_wobble_toggle = _add_checkbox(ocean_controls_container, "Wobble", true, _cb.get("underwater_wobble_toggled", Callable()))
+	underwater_caustics_toggle = _add_checkbox(ocean_controls_container, "Caustics", true, _cb.get("underwater_caustics_toggled", Callable()))
+	underwater_particles_toggle = _add_checkbox(ocean_controls_container, "Particles", true, _cb.get("underwater_particles_toggled", Callable()))
+	underwater_particle_quality_btn = _add_quality_dropdown(ocean_controls_container, "Particle Q:", 3, _cb.get("underwater_particle_quality_changed", Callable()))
+	underwater_particle_opacity_slider = create_slider_row(ocean_controls_container, "Particle Opacity:", 0.0, 2.0, 1.0, _cb.get("underwater_particle_opacity_changed", Callable()))
+	underwater_particle_opacity_slider.step = 0.05
+
+	_add_section(ocean_controls_container, "Optics")
+	water_turbidity_slider = create_slider_row(ocean_controls_container, "Turbidity:", 0.0, 1.0, 0.0, _cb.get("water_turbidity_changed", Callable()))
+	water_turbidity_slider.step = 0.01
+	water_visibility_slider = create_slider_row(ocean_controls_container, "Visibility m:", 1.0, 500.0, 58.0, _cb.get("water_visibility_changed", Callable()))
+	water_visibility_slider.step = 1.0
+	var color_row := HBoxContainer.new()
+	var color_label := Label.new()
+	color_label.text = "Color:"
+	color_label.add_theme_font_size_override("font_size", 11)
+	color_label.custom_minimum_size.x = 70
+	color_row.add_child(color_label)
+	water_color_picker = ColorPickerButton.new()
+	water_color_picker.color = Color(0.02, 0.04, 0.06, 1.0)
+	water_color_picker.edit_alpha = false
+	water_color_picker.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	water_color_picker.color_changed.connect(_cb.get("water_color_changed", Callable()))
+	color_row.add_child(water_color_picker)
+	ocean_controls_container.add_child(color_row)
+
+	_add_section(ocean_controls_container, "Surface")
+	wave_scale_slider = create_slider_row(ocean_controls_container, "Wave Height:", 0.0, 3.0, 1.0, _cb.get("wave_scale_changed", Callable()))
+	wave_scale_slider.step = 0.05
+	choppiness_slider = create_slider_row(ocean_controls_container, "Choppiness:", 0.0, 1.0, 0.3, _cb.get("choppiness_changed", Callable()) if _cb.has("choppiness_changed") else Callable())
+	choppiness_slider.step = 0.02
+	surface_ssr_toggle = _add_checkbox(ocean_controls_container, "Surface SSR", true, _cb.get("surface_ssr_toggled", Callable()))
+	sea_spray_toggle = _add_checkbox(ocean_controls_container, "Sea Spray", true, _cb.get("sea_spray_toggled", Callable()))
+	sea_spray_quality_btn = _add_quality_dropdown(ocean_controls_container, "Spray Q:", 2, _cb.get("sea_spray_quality_changed", Callable()))
+
+	_add_section(ocean_controls_container, "Advanced")
+	var quality_row := HBoxContainer.new()
+	var quality_label := Label.new()
+	quality_label.text = "Quality:"
+	quality_label.add_theme_font_size_override("font_size", 11)
+	quality_label.custom_minimum_size.x = 70
+	quality_row.add_child(quality_label)
+	water_quality_btn = OptionButton.new()
+	water_quality_btn.add_item("Auto", -1)
+	water_quality_btn.add_item("Flat", 0)
+	water_quality_btn.add_item("High FFT", 1)
+	water_quality_btn.selected = 0
+	water_quality_btn.item_selected.connect(_cb.get("water_quality_changed", Callable()))
+	water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	quality_row.add_child(water_quality_btn)
+	ocean_controls_container.add_child(quality_row)
+
+	water_status_label = Label.new()
+	water_status_label.name = "WaterStatus"
+	water_status_label.text = "Water: medium ON | particles ON"
+	water_status_label.add_theme_font_size_override("font_size", 10)
+	water_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	ocean_controls_container.add_child(water_status_label)
+
+
+func _build_distance_tab(vbox: VBoxContainer) -> void:
+	var camera_label := Label.new()
+	camera_label.name = "CameraLabel"
+	camera_label.add_theme_font_size_override("font_size", 11)
+	camera_label.text = "Cell: (0, 0) | Mode: Fly"
+	vbox.add_child(camera_label)
+
+	_add_section(vbox, "View")
+	var dist_label := Label.new()
+	dist_label.name = "DistLabel"
+	dist_label.text = StreamingConfig.format_view_distance(_initial_state.get("view_distance", StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS))
+	dist_label.add_theme_font_size_override("font_size", 11)
+	view_distance_label = dist_label
+	vbox.add_child(dist_label)
+
+	_add_section(vbox, "Streaming Tiers")
+	near_gameplay_toggle = _add_checkbox(vbox, "NEAR Gameplay", _initial_state.get("near_gameplay", true), _cb.get("near_gameplay_toggled", Callable()))
+	static_visuals_toggle = _add_checkbox(vbox, "MID Static Visuals", _initial_state.get("static_visuals", true), _cb.get("static_visuals_toggled", Callable()))
+	far_impostors_toggle = _add_checkbox(vbox, "FAR Impostors", _initial_state.get("far_impostors", true), _cb.get("far_impostors_toggled", Callable()))
+	hlod_toggle = _add_checkbox(vbox, "HLOD", _initial_state.get("hlod", false), _cb.get("hlod_toggled", Callable()))
+	distant_lights_toggle = _add_checkbox(vbox, "Distant Lights", _initial_state.get("distant_lights", true), _cb.get("distant_lights_toggled", Callable()))
+
+	hlod_status_label = Label.new()
+	hlod_status_label.name = "HLODStatusLabel"
+	hlod_status_label.text = "HLOD: Off"
+	hlod_status_label.add_theme_font_size_override("font_size", 10)
+	hlod_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(hlod_status_label)
+
+	_add_section(vbox, "Terrain")
+	var terrain_label := Label.new()
+	terrain_label.name = "TerrainLabel"
+	terrain_label.add_theme_font_size_override("font_size", 11)
+	terrain_label.text = "Regions: --"
+	vbox.add_child(terrain_label)
+
+	_add_section(vbox, "Characters")
+	show_characters_toggle = _add_checkbox(vbox, "NPCs", _initial_state.get("show_characters", false), _cb.get("show_characters_toggled", Callable()))
+
+	_add_section(vbox, "Quick Teleport")
+	_add_teleport_row(vbox, [{"label": "Seyda Neen", "x": -2, "y": -9}, {"label": "Balmora", "x": -3, "y": -2}])
+	_add_teleport_row(vbox, [{"label": "Vivec", "x": 5, "y": -6}, {"label": "Origin", "x": 0, "y": 0}])
+
+
+func _add_checkbox(parent: Control, text: String, pressed: bool, callback: Callable) -> CheckBox:
+	var check := CheckBox.new()
+	check.text = text
+	check.button_pressed = pressed
+	check.toggled.connect(callback)
+	parent.add_child(check)
+	return check
+
+
+func _add_quality_dropdown(parent: Control, label_text: String, selected_id: int, callback: Callable) -> OptionButton:
+	var row := HBoxContainer.new()
+	var label := Label.new()
+	label.text = label_text
+	label.add_theme_font_size_override("font_size", 11)
+	label.custom_minimum_size.x = 70
+	row.add_child(label)
+	var dropdown := OptionButton.new()
+	dropdown.add_item("Off", 0)
+	dropdown.add_item("Low", 1)
+	dropdown.add_item("Medium", 2)
+	dropdown.add_item("High", 3)
+	dropdown.selected = clampi(selected_id, 0, 3)
+	dropdown.item_selected.connect(callback)
+	dropdown.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	row.add_child(dropdown)
+	parent.add_child(row)
+	return dropdown
+
+
+func _add_teleport_row(parent: Control, entries: Array[Dictionary]) -> void:
+	var teleport_cb: Callable = _cb.get("teleport_to_cell", Callable())
+	var row := HBoxContainer.new()
+	row.add_theme_constant_override("separation", 4)
+	for data: Dictionary in entries:
+		var btn := Button.new()
+		var target_x := int(data["x"])
+		var target_y := int(data["y"])
+		btn.text = str(data["label"])
+		btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+		btn.pressed.connect(func() -> void: teleport_cb.call(target_x, target_y))
+		row.add_child(btn)
+	parent.add_child(row)
 
 
 # ══════════════════════════════════════════════════════════════════════════════

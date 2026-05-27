@@ -173,6 +173,9 @@ var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS
 var _hlod_flyby_mode: bool = false
+var _hlod_ui_transition_until_msec: int = 0
+var _hlod_ui_last_toggle_msec: int = -100000
+const HLOD_UI_COOLDOWN_MSEC := 1500
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
 var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 
@@ -1228,6 +1231,36 @@ func _setup_console() -> void:
 		PackedStringArray(["ocean_spray", "ocean_spray off", "ocean_spray status"])
 	)
 
+	console.register_command(
+		"ocean_mesh",
+		_cmd_ocean_mesh,
+		"Switch ocean mesh mode for visual diagnosis. Projected is FFT-only.",
+		"water",
+		PackedStringArray(["water_mesh"]),
+		[CommandRegistry.ParameterInfo.new("mode", TYPE_STRING, "status|clipmap|projected", false, "status")] as Array[CommandRegistry.ParameterInfo],
+		PackedStringArray(["ocean_mesh status", "ocean_mesh projected", "ocean_mesh clipmap"])
+	)
+
+	console.register_command(
+		"wet_live",
+		_cmd_wet_live,
+		"Toggle live screen-space wetness compositor for water artifact diagnosis.",
+		"water",
+		PackedStringArray(),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on|off|status", false, "status")] as Array[CommandRegistry.ParameterInfo],
+		PackedStringArray(["wet_live status", "wet_live off", "wet_live on"])
+	)
+
+	console.register_command(
+		"sdfgi",
+		_cmd_sdfgi,
+		"Toggle active Environment SDFGI for water artifact diagnosis.",
+		"rendering",
+		PackedStringArray(),
+		[CommandRegistry.ParameterInfo.new("state", TYPE_STRING, "on|off|status", false, "status")] as Array[CommandRegistry.ParameterInfo],
+		PackedStringArray(["sdfgi status", "sdfgi off", "sdfgi on"])
+	)
+
 	# Register weather console commands
 	if _weather_controls:
 		_weather_controls.register_console_commands(console)
@@ -1692,7 +1725,24 @@ func _setup_visibility_toggles() -> void:
 		"water_quality_changed": _ocean_controls.on_water_quality_changed,
 		"wave_scale_changed": _ocean_controls.on_wave_scale_changed,
 		"choppiness_changed": _ocean_controls.on_choppiness_changed,
-		"debug_shore_toggled": _ocean_controls.on_debug_shore_toggled,
+		"underwater_medium_toggled": _ocean_controls.set_underwater_medium_enabled,
+		"underwater_absorption_toggled": func(enabled: bool) -> void: _ocean_controls.set_underwater_feature_enabled(&"absorption_fog", enabled),
+		"underwater_snell_toggled": func(enabled: bool) -> void: _ocean_controls.set_underwater_feature_enabled(&"snell", enabled),
+		"underwater_wobble_toggled": func(enabled: bool) -> void: _ocean_controls.set_underwater_feature_enabled(&"wobble", enabled),
+		"underwater_caustics_toggled": func(enabled: bool) -> void: _ocean_controls.set_underwater_feature_enabled(&"caustics", enabled),
+		"underwater_particles_toggled": _ocean_controls.set_underwater_particles_enabled,
+		"underwater_particle_quality_changed": func(index: int) -> void:
+			if _panels and _panels.underwater_particle_quality_btn:
+				_ocean_controls.set_underwater_particles_quality(_panels.underwater_particle_quality_btn.get_item_id(index)),
+		"underwater_particle_opacity_changed": _ocean_controls.set_underwater_particles_opacity,
+		"water_turbidity_changed": _ocean_controls.on_water_turbidity_changed,
+		"water_visibility_changed": _ocean_controls.on_water_visibility_changed,
+		"water_color_changed": _ocean_controls.set_water_color,
+		"surface_ssr_toggled": _ocean_controls.set_surface_ssr_enabled,
+		"sea_spray_toggled": _ocean_controls.set_sea_spray_enabled,
+		"sea_spray_quality_changed": func(index: int) -> void:
+			if _panels and _panels.sea_spray_quality_btn:
+				_ocean_controls.set_sea_spray_quality(_panels.sea_spray_quality_btn.get_item_id(index)),
 		"taa_toggled": _env_controls.on_taa_toggled,
 		"ssao_toggled": _env_controls.on_ssao_toggled,
 		"ssil_toggled": _env_controls.on_ssil_toggled,
@@ -1714,6 +1764,11 @@ func _setup_visibility_toggles() -> void:
 		"show_tiers_toggled": _on_show_tiers_toggled,
 		"show_cells_toggled": _on_show_cells_toggled,
 		"show_lod_levels_toggled": _on_show_lod_levels_toggled,
+		"near_gameplay_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("near_gameplay", enabled),
+		"static_visuals_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("static_visuals", enabled),
+		"far_impostors_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("far_impostors", enabled),
+		"hlod_toggled": _on_hlod_ui_toggled,
+		"distant_lights_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("distant_lights", enabled),
 		"lod_mode_pressed": _on_lod_mode_pressed,
 		"dump_profiling": func() -> void:
 			if _profiling_report:
@@ -1728,6 +1783,11 @@ func _setup_visibility_toggles() -> void:
 		"show_chunk_debug": _show_chunk_debug,
 		"show_tier_debug": _show_tier_debug,
 		"show_cell_debug": _show_cell_debug,
+		"near_gameplay": true,
+		"static_visuals": SettingsManager.get_distant_rendering_enabled(),
+		"far_impostors": SettingsManager.get_distant_rendering_enabled(),
+		"hlod": false,
+		"distant_lights": SettingsManager.get_distant_rendering_enabled(),
 	}
 	_panels = ExplorerPanelsScript.new(callbacks, initial_state)
 	var vbox: VBoxContainer = stats_panel.get_node_or_null("VBox")
@@ -1821,6 +1881,74 @@ func _on_lod_mode_pressed() -> void:
 			var mode: int = _debug_overlay.lod_debug_mode
 			_panels.lod_mode_btn.text = "LOD Mode: " + ("Expected" if mode == 1 else "Actual")
 		_log("LOD debug mode: %s" % ("Expected" if _debug_overlay.lod_debug_mode == 1 else "Actual"))
+
+
+func _set_subsystem_toggle_from_ui(name: String, enabled: bool) -> void:
+	if _subsystem_toggles:
+		_subsystem_toggles.set_flag(name, enabled)
+		return
+	match name:
+		"near_gameplay":
+			if native_streaming_manager:
+				native_streaming_manager.set_near_tier_visible(enabled)
+		"static_visuals":
+			if native_streaming_manager:
+				native_streaming_manager.set_mid_tier_visible(enabled)
+		"far_impostors":
+			if native_streaming_manager:
+				native_streaming_manager.set_impostors_visible(enabled)
+		"distant_lights":
+			if native_streaming_manager:
+				native_streaming_manager.set_distant_lights_visible(enabled)
+
+
+func _on_hlod_ui_toggled(enabled: bool) -> void:
+	var now := Time.get_ticks_msec()
+	if now - _hlod_ui_last_toggle_msec < HLOD_UI_COOLDOWN_MSEC:
+		if _panels and _panels.hlod_toggle:
+			_panels.hlod_toggle.set_pressed_no_signal(not enabled)
+		_log("[color=yellow]HLOD toggle cooling down; wait %.1fs[/color]" % [float(HLOD_UI_COOLDOWN_MSEC - (now - _hlod_ui_last_toggle_msec)) / 1000.0])
+		return
+	_hlod_ui_last_toggle_msec = now
+	_hlod_ui_transition_until_msec = now + HLOD_UI_COOLDOWN_MSEC
+	_update_hlod_ui_status("Starting" if enabled else "Stopping")
+	_set_subsystem_toggle_from_ui("hlod", enabled)
+
+
+func _sync_distance_toggle_widgets() -> void:
+	if not _panels or not _subsystem_toggles:
+		return
+	if _panels.near_gameplay_toggle:
+		_panels.near_gameplay_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("near_gameplay"))
+	if _panels.static_visuals_toggle:
+		_panels.static_visuals_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("static_visuals"))
+	if _panels.far_impostors_toggle:
+		_panels.far_impostors_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("far_impostors"))
+	if _panels.hlod_toggle:
+		_panels.hlod_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("hlod"))
+	if _panels.distant_lights_toggle:
+		_panels.distant_lights_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("distant_lights"))
+	_update_hlod_ui_status("On" if _subsystem_toggles.get_flag("hlod") else "Off")
+
+
+func _on_subsystem_flag_changed(_name: String, _enabled: bool) -> void:
+	_sync_distance_toggle_widgets()
+
+
+func _update_hlod_ui_status(state: String = "") -> void:
+	if not _panels or not _panels.hlod_status_label:
+		return
+	var stats: Dictionary = native_streaming_manager.get_hlod_stats() if native_streaming_manager else {}
+	var active := bool(stats.get("enabled", false))
+	var pending := int(stats.get("pending_merges", 0)) + int(stats.get("cached_publish_queue_size", 0)) + int(stats.get("merge_queue_size", 0))
+	var cells := int(stats.get("active_cells", 0))
+	var label_state := state
+	if label_state.is_empty():
+		if Time.get_ticks_msec() < _hlod_ui_transition_until_msec:
+			label_state = "Starting" if active else "Stopping"
+		else:
+			label_state = "On" if active else "Off"
+	_panels.hlod_status_label.text = "HLOD: %s | chunks %d | pending %d" % [label_state, cells, pending]
 
 
 ## Toggle characters (NPCs/creatures) visibility
@@ -1983,6 +2111,10 @@ func _setup_subsystem_toggles() -> void:
 	_subsystem_toggles.register_alias("impostors", "far_impostors")
 	_subsystem_toggles.register_alias("mid_objects", "static_visuals")
 	_subsystem_toggles.register_alias("near_objects", "near_gameplay")
+	var flag_changed_cb := Callable(self, "_on_subsystem_flag_changed")
+	if _subsystem_toggles.has_signal("flag_changed") and not _subsystem_toggles.is_connected("flag_changed", flag_changed_cb):
+		_subsystem_toggles.connect("flag_changed", flag_changed_cb)
+	_sync_distance_toggle_widgets()
 	if native_streaming_manager != null:
 		native_streaming_manager.call("set_impostors_visible", bool(defaults.get("far_impostors", true)))
 		native_streaming_manager.call("set_hlod_visible", bool(defaults.get("hlod", false)))
@@ -2093,6 +2225,8 @@ func _setup_subsystem_toggles() -> void:
 		elif a == "--no-shadows":
 			_subsystem_toggles.set_flag("shadows", false)
 			_log("[color=yellow]--no-shadows: directional shadows OFF[/color]")
+
+	_sync_distance_toggle_widgets()
 
 	# Register console commands
 	if console:
@@ -2520,6 +2654,107 @@ func _cmd_ocean_spray(args: Dictionary) -> String:
 		int(status.get("particle_candidates", 0)),
 		float(status.get("weather_energy", 0.0)),
 		"yes" if bool(status.get("has_fft", false)) else "no",
+	]
+
+
+func _cmd_ocean_mesh(args: Dictionary) -> String:
+	if OceanManager == null or not OceanManager.is_initialized():
+		return "OceanManager not initialized"
+
+	var raw := String(args.get("mode", "status")).to_lower().strip_edges()
+	if raw in ["", "status", "info"]:
+		return _format_ocean_mesh_status()
+	if raw in ["clipmap", "clip", "0"]:
+		OceanManager.rebuild_mesh_with_mode(OceanMesh.MeshMode.CLIPMAP)
+		return _format_ocean_mesh_status()
+	if raw in ["projected", "project", "proj", "1"]:
+		if OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
+			return "Projected mesh is FFT-only. Switch Water quality to High FFT first, then run: ocean_mesh projected"
+		OceanManager.rebuild_mesh_with_mode(OceanMesh.MeshMode.PROJECTED)
+		return _format_ocean_mesh_status()
+	return "Usage: ocean_mesh [status|clipmap|projected]"
+
+
+func _format_ocean_mesh_status() -> String:
+	var mode := "Unknown"
+	if OceanManager.has_method("get_mesh_mode"):
+		mode = "Projected" if OceanManager.get_mesh_mode() == OceanMesh.MeshMode.PROJECTED else "Clipmap"
+	var quality := "Unknown"
+	if OceanManager.has_method("get_water_quality_name"):
+		quality = OceanManager.get_water_quality_name()
+	var shader := "Unknown"
+	if OceanManager.has_method("get_surface_shader_mode_name"):
+		shader = OceanManager.get_surface_shader_mode_name()
+	return "ocean_mesh=%s quality=%s shader=%s" % [mode, quality, shader]
+
+
+func _cmd_wet_live(args: Dictionary) -> String:
+	if not WetnessManager:
+		return "WetnessManager unavailable"
+
+	var raw := String(args.get("state", "status")).to_lower().strip_edges()
+	if raw in ["", "status", "info"]:
+		return _format_wet_live_status()
+	if raw in ["on", "true", "1", "yes"]:
+		WetnessManager.set_enabled(true)
+		WetnessManager.set_live_compositor_enabled(true)
+		return _format_wet_live_status()
+	if raw in ["off", "false", "0", "no"]:
+		WetnessManager.set_live_compositor_enabled(false)
+		return _format_wet_live_status()
+	return "Usage: wet_live [on|off|status]"
+
+
+func _format_wet_live_status() -> String:
+	if not WetnessManager:
+		return "WetnessManager unavailable"
+
+	var manager_on := false
+	if WetnessManager.has_method("is_enabled"):
+		manager_on = WetnessManager.is_enabled()
+	var live_on := false
+	if WetnessManager.has_method("is_live_compositor_enabled"):
+		live_on = WetnessManager.is_live_compositor_enabled()
+	var effect_on := false
+	if ShaderManager and ShaderManager.has_method("is_effect_enabled"):
+		effect_on = bool(ShaderManager.call("is_effect_enabled", "wet_compositor"))
+
+	return "wet_live=%s manager=%s wet_compositor_effect=%s" % [
+		"ON" if live_on else "off",
+		"ON" if manager_on else "off",
+		"ON" if effect_on else "off",
+	]
+
+
+func _cmd_sdfgi(args: Dictionary) -> String:
+	if not _env_controls:
+		return "Environment controls unavailable"
+
+	var raw := String(args.get("state", "status")).to_lower().strip_edges()
+	if raw in ["", "status", "info"]:
+		return _format_sdfgi_status()
+	if raw in ["on", "true", "1", "yes"]:
+		_env_controls.on_sdfgi_toggled(true)
+		return _format_sdfgi_status()
+	if raw in ["off", "false", "0", "no"]:
+		_env_controls.on_sdfgi_toggled(false)
+		return _format_sdfgi_status()
+	return "Usage: sdfgi [on|off|status]"
+
+
+func _format_sdfgi_status() -> String:
+	if not _env_controls:
+		return "Environment controls unavailable"
+
+	var env := _env_controls.get_active_environment()
+	if not env:
+		return "sdfgi=unknown (no active Environment)"
+
+	return "sdfgi=%s cascades=%d occlusion=%s sky_light=%s" % [
+		"ON" if env.sdfgi_enabled else "off",
+		env.sdfgi_cascades,
+		"ON" if env.sdfgi_use_occlusion else "off",
+		"ON" if env.sdfgi_read_sky_light else "off",
 	]
 
 
@@ -3232,6 +3467,17 @@ func _process(delta: float) -> void:
 	# Update ocean controls
 	if _ocean_controls:
 		_ocean_controls.process(delta)
+		if _panels and _panels.water_status_label:
+			var water_status := _ocean_controls.get_runtime_status()
+			var spray_status: Dictionary = water_status.get("sea_spray", {})
+			var optics_status: Dictionary = water_status.get("optics", {})
+			_panels.water_status_label.text = "Water: medium %s | particles %s | spray %s | vis %.0fm | turb %.2f" % [
+				"ON" if bool(water_status.get("underwater_medium_enabled", false)) else "OFF",
+				"ON" if bool(water_status.get("underwater_particles_enabled", false)) else "OFF",
+				"ON" if bool(spray_status.get("enabled", false)) else "OFF",
+				float(optics_status.get("visibility_m", 0.0)),
+				float(optics_status.get("turbidity", 0.0)),
+			]
 
 	# Update horizon map sun direction
 	if _horizon_map_manager:
@@ -3244,6 +3490,7 @@ func _process(delta: float) -> void:
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:
 		_update_stats()
+		_update_hlod_ui_status()
 
 
 func _get_distant_render_end_m() -> float:

@@ -36,3 +36,22 @@ func test_alias_routes_to_canonical_flag() -> void:
 	assert_bool(toggles.get_flag("far_impostors")).is_false()
 	assert_bool(toggles.get_flag("impostors")).is_false()
 	assert_dict(applied).contains_key_value("far_impostors", false)
+
+
+func test_flag_changed_emits_canonical_name_for_ui_sync() -> void:
+	var changed_name := ""
+	var changed_enabled := true
+	var toggles := SubsystemTogglesScript.new()
+	toggles.setup(
+		{"hlod": func(_on: bool) -> void: pass},
+		{"hlod": false}
+	)
+	toggles.flag_changed.connect(func(name: String, enabled: bool) -> void:
+		changed_name = name
+		changed_enabled = enabled
+	)
+
+	toggles.set_flag("hlod", true)
+
+	assert_str(changed_name).is_equal("hlod")
+	assert_bool(changed_enabled).is_true()

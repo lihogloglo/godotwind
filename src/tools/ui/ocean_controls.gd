@@ -26,6 +26,14 @@ const MAIN_SCENE_UNDERWATER_PARTICLE_OPACITY: float = 1.0
 # ── Public state (readable by world_explorer) ──
 
 var show_ocean: bool = true
+var underwater_medium_enabled: bool = true
+var underwater_particles_enabled: bool = true
+var underwater_features: Dictionary = {
+	&"absorption_fog": true,
+	&"snell": true,
+	&"wobble": true,
+	&"caustics": true,
+}
 
 
 # ── Private state ──
@@ -116,9 +124,12 @@ func on_water_quality_changed(index: int) -> void:
 func on_wave_scale_changed(value: float) -> void:
 	_panels.update_slider_label(_panels.wave_scale_slider, value)
 	if OceanManager:
-		OceanManager.wave_scale = value
-		if OceanManager._ocean_mesh:
-			OceanManager._ocean_mesh.set_wave_scale(value)
+		if OceanManager.has_method("set_wave_scale"):
+			OceanManager.set_wave_scale(value)
+		else:
+			OceanManager.wave_scale = value
+			if OceanManager._ocean_mesh:
+				OceanManager._ocean_mesh.set_wave_scale(value)
 
 
 ## Handle choppiness change. Routes through OceanManager.set_choppiness
@@ -129,11 +140,123 @@ func on_choppiness_changed(value: float) -> void:
 		OceanManager.set_choppiness(value)
 
 
+func on_water_turbidity_changed(value: float) -> void:
+	_panels.update_slider_label(_panels.water_turbidity_slider, value)
+	set_water_turbidity(value)
+
+
+func on_water_visibility_changed(value: float) -> void:
+	_panels.update_slider_label(_panels.water_visibility_slider, value)
+	set_water_visibility_distance(value)
+
+
+func set_water_turbidity(value: float) -> void:
+	if OceanManager and OceanManager.has_method("set_water_scattering_strength"):
+		OceanManager.set_water_scattering_strength(value)
+
+
+func set_water_visibility_distance(value: float) -> void:
+	if OceanManager and OceanManager.has_method("set_water_visibility_distance"):
+		OceanManager.set_water_visibility_distance(value)
+
+
+func set_water_color(value: Color) -> void:
+	if OceanManager and OceanManager.has_method("set_absorption_tint_color"):
+		OceanManager.set_absorption_tint_color(value)
+
+
 ## Toggle debug shore mask visualization.
 func on_debug_shore_toggled(enabled: bool) -> void:
 	if OceanManager and OceanManager._ocean_mesh:
 		OceanManager._ocean_mesh.set_debug_shore_mask(enabled)
 		_log("Debug shore mask: %s" % ("ON" if enabled else "OFF"))
+
+
+func set_underwater_medium_enabled(enabled: bool) -> void:
+	underwater_medium_enabled = enabled
+	if not enabled and ShaderManager and ShaderManager.is_effect_enabled(UNDERWATER_EFFECT_NAME):
+		ShaderManager.disable_effect(UNDERWATER_EFFECT_NAME, 0.0)
+	elif enabled and show_ocean:
+		_sync_main_scene_underwater()
+	_log("Underwater medium: %s" % ("ON" if enabled else "OFF"))
+
+
+func set_underwater_feature_enabled(feature_name: StringName, enabled: bool) -> void:
+	if feature_name == &"particles":
+		set_underwater_particles_enabled(enabled)
+		return
+	if not underwater_features.has(feature_name):
+		Log.warn("water", "Unknown underwater feature: %s" % str(feature_name))
+		return
+	underwater_features[feature_name] = enabled
+	var effect := _get_underwater_effect()
+	if effect and effect.has_method("set_underwater_feature_enabled"):
+		effect.call("set_underwater_feature_enabled", feature_name, enabled)
+	_log("Underwater %s: %s" % [str(feature_name), "ON" if enabled else "OFF"])
+
+
+func is_underwater_feature_enabled(feature_name: StringName) -> bool:
+	if feature_name == &"particles":
+		return underwater_particles_enabled
+	return bool(underwater_features.get(feature_name, false))
+
+
+func set_underwater_particles_enabled(enabled: bool) -> void:
+	underwater_particles_enabled = enabled
+	if OceanManager and OceanManager.has_method("set_underwater_particles_enabled"):
+		OceanManager.set_underwater_particles_enabled(enabled)
+	_log("Underwater particles: %s" % ("ON" if enabled else "OFF"))
+
+
+func set_underwater_particles_quality(quality: int) -> void:
+	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
+		OceanManager.set_underwater_particles_quality(quality)
+
+
+func set_underwater_particles_opacity(value: float) -> void:
+	if OceanManager and OceanManager.has_method("set_underwater_particles_opacity"):
+		OceanManager.set_underwater_particles_opacity(value)
+
+
+func set_surface_ssr_enabled(enabled: bool) -> void:
+	if OceanManager and OceanManager.has_method("set_surface_ssr_enabled"):
+		OceanManager.set_surface_ssr_enabled(enabled)
+	_log("Water surface SSR: %s" % ("ON" if enabled else "OFF"))
+
+
+func set_sea_spray_enabled(enabled: bool) -> void:
+	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
+		OceanManager.set_sea_spray_enabled(enabled)
+	_log("Sea spray: %s" % ("ON" if enabled else "OFF"))
+
+
+func set_sea_spray_quality(quality: int) -> void:
+	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
+		OceanManager.set_sea_spray_quality(quality)
+
+
+func get_runtime_status() -> Dictionary:
+	var effect := _get_underwater_effect()
+	var status := {
+		"ocean_enabled": show_ocean,
+		"underwater_medium_enabled": underwater_medium_enabled,
+		"underwater_particles_enabled": underwater_particles_enabled,
+		"underwater_features": underwater_features.duplicate(),
+		"underwater_effect_loaded": effect != null,
+	}
+	if OceanManager:
+		if OceanManager.has_method("get_underwater_particles_status"):
+			status["underwater_particles"] = OceanManager.get_underwater_particles_status()
+		if OceanManager.has_method("get_sea_spray_status"):
+			status["sea_spray"] = OceanManager.get_sea_spray_status()
+		if OceanManager.has_method("is_surface_ssr_enabled"):
+			status["surface_ssr_enabled"] = OceanManager.is_surface_ssr_enabled()
+		status["optics"] = {
+			"visibility_m": OceanManager.get_water_visibility_distance() if OceanManager.has_method("get_water_visibility_distance") else 0.0,
+			"turbidity": OceanManager.get_water_scattering_strength() if OceanManager.has_method("get_water_scattering_strength") else 0.0,
+			"color": OceanManager.get_absorption_tint_color() if OceanManager.has_method("get_absorption_tint_color") else Color.BLACK,
+		}
+	return status
 
 
 # ── Private methods ──
@@ -191,15 +314,16 @@ func _sync_main_scene_underwater() -> void:
 		return
 	if not _attach_shader_manager_to_active_view():
 		return
-	if not ShaderManager.is_effect_enabled(UNDERWATER_EFFECT_NAME):
+	if underwater_medium_enabled and not ShaderManager.is_effect_enabled(UNDERWATER_EFFECT_NAME):
 		ShaderManager.enable_effect(UNDERWATER_EFFECT_NAME, 0.0)
 
 	var effect := ShaderManager.get_effect(UNDERWATER_EFFECT_NAME)
 	if effect == null:
+		_apply_underwater_particle_defaults()
 		return
 
-	effect.effect_enabled = true
-	effect.blend_factor = 1.0
+	effect.effect_enabled = underwater_medium_enabled
+	effect.blend_factor = 1.0 if underwater_medium_enabled else 0.0
 	_configure_underwater_effect(effect)
 
 	var state: WaterSurfaceState = OceanManager.get_water_surface_state()
@@ -236,11 +360,8 @@ func _configure_underwater_effect(effect: PostProcessEffect) -> void:
 	if effect.has_method("set_quality_tier"):
 		effect.call("set_quality_tier", MAIN_SCENE_UNDERWATER_QUALITY)
 	if effect.has_method("set_underwater_feature_enabled"):
-		effect.call("set_underwater_feature_enabled", &"absorption_fog", true)
-		effect.call("set_underwater_feature_enabled", &"snell", true)
-		effect.call("set_underwater_feature_enabled", &"wobble", true)
-		effect.call("set_underwater_feature_enabled", &"particles", true)
-		effect.call("set_underwater_feature_enabled", &"caustics", true)
+		for feature_name: StringName in underwater_features:
+			effect.call("set_underwater_feature_enabled", feature_name, bool(underwater_features[feature_name]))
 	_push_underwater_sun_direction(effect)
 	_apply_underwater_particle_defaults()
 
@@ -264,7 +385,7 @@ func _apply_underwater_particle_defaults() -> void:
 	if OceanManager.has_method("set_underwater_particles_render_layers"):
 		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	if OceanManager.has_method("set_underwater_particles_enabled"):
-		OceanManager.set_underwater_particles_enabled(true)
+		OceanManager.set_underwater_particles_enabled(underwater_particles_enabled)
 	if OceanManager.has_method("set_underwater_particles_quality"):
 		OceanManager.set_underwater_particles_quality(MAIN_SCENE_UNDERWATER_PARTICLE_QUALITY)
 	if OceanManager.has_method("set_underwater_particles_count"):
@@ -276,6 +397,12 @@ func _apply_underwater_particle_defaults() -> void:
 	if OceanManager.has_method("set_underwater_particles_opacity"):
 		OceanManager.set_underwater_particles_opacity(MAIN_SCENE_UNDERWATER_PARTICLE_OPACITY)
 	_underwater_particle_defaults_applied = true
+
+
+func _get_underwater_effect() -> PostProcessEffect:
+	if not ShaderManager:
+		return null
+	return ShaderManager.get_effect(UNDERWATER_EFFECT_NAME)
 
 
 func _get_camera_water_level(state: WaterSurfaceState) -> float:
@@ -329,6 +456,16 @@ func _sync_ocean_sliders() -> void:
 	if _panels.wave_scale_slider:
 		_panels.wave_scale_slider.value = OceanManager.wave_scale
 		_panels.update_slider_label(_panels.wave_scale_slider, OceanManager.wave_scale)
+	if _panels.water_turbidity_slider and OceanManager.has_method("get_water_scattering_strength"):
+		var turbidity := OceanManager.get_water_scattering_strength()
+		_panels.water_turbidity_slider.value = turbidity
+		_panels.update_slider_label(_panels.water_turbidity_slider, turbidity)
+	if _panels.water_visibility_slider and OceanManager.has_method("get_water_visibility_distance"):
+		var visibility_m := OceanManager.get_water_visibility_distance()
+		_panels.water_visibility_slider.value = visibility_m
+		_panels.update_slider_label(_panels.water_visibility_slider, visibility_m)
+	if _panels.water_color_picker and OceanManager.has_method("get_absorption_tint_color"):
+		_panels.water_color_picker.color = OceanManager.get_absorption_tint_color()
 
 
 ## Sync the water quality dropdown with the current ocean quality.

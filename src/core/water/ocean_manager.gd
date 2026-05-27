@@ -1328,6 +1328,17 @@ func get_time() -> float:
 	return _time
 
 
+func set_wave_scale(value: float) -> void:
+	wave_scale = clampf(value, 0.0, 3.0)
+	if _ocean_mesh:
+		_ocean_mesh.set_wave_scale(wave_scale)
+	if _ocean_spray:
+		_ocean_spray.set_wave_scale(wave_scale)
+	if _underwater_particulates:
+		_underwater_particulates.sync_from_water_state(get_water_surface_state())
+	_push_surface_motion_uniforms()
+
+
 func get_ocean_mesh() -> OceanMesh:
 	return _ocean_mesh
 

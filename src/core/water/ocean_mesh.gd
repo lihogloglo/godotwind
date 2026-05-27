@@ -59,6 +59,10 @@ var _debug_shore_mask: bool = false
 
 
 func initialize(radius: float, quality_override: int = -1, mesh_mode: int = -1) -> void:
+	# Procedural transparent water is not static level geometry. Let it receive
+	# lighting/reflections, but keep it out of SDFGI voxelization/occlusion.
+	gi_mode = GeometryInstance3D.GI_MODE_DISABLED
+
 	_select_quality(quality_override)
 	if mesh_mode >= 0:
 		_mesh_mode = mesh_mode as MeshMode

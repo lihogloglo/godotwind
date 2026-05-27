@@ -143,6 +143,15 @@ func _update_labels(fps: float, frame_ms: float, p95_ms: float, draw_calls: int,
 		var dist_label: Label = _find_label(_panels._nav_vbox, "DistLabel")
 		if dist_label:
 			dist_label.text = StreamingConfig.format_view_distance(view_distance)
+		var hlod_label: Label = _find_label(_panels._nav_vbox, "HLODStatusLabel")
+		if hlod_label:
+			var active := bool(stats.get("hlod_active", false))
+			var pending := int(stats.get("hlod_pending", 0)) + int(stats.get("hlod_cached_publish_queue", 0)) + int(stats.get("hlod_merge_queue_size", 0))
+			hlod_label.text = "HLOD: %s | chunks %d | pending %d" % [
+				"On" if active else "Off",
+				int(stats.get("hlod_cells", 0)),
+				pending,
+			]
 
 	# ── Debug tab labels ──
 	if _panels._debug_vbox:
