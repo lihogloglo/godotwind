@@ -200,6 +200,7 @@ varying float v_choppiness;
 // without adding per-fragment shore-mask reads.
 varying vec2 v_shore_slope;
 varying float v_shore_choppiness;
+varying float v_interaction_foam;
 varying float v_projected_coverage;
 
 // Shore mask sampled in vertex() of each .gdshader — not here in fragment.
@@ -372,7 +373,6 @@ void fragment() {
 	if (v_projected_coverage <= 0.001) {
 		discard;
 	}
-
 	float map_size = float(textureSize(normals, 0).x);
 	float dist = v_vertex_dist;
 
@@ -425,6 +425,7 @@ void fragment() {
 	// At depth > 1m, full gradient. Prevents visual noise at the thin-water zone.
 	gradient *= smoothstep(0.0, 1.0, water_thickness);
 	gradient.xy += v_shore_slope;
+	gradient.xy += water_surface_interaction_gradient(v_world_pos.xz);
 
 	// ========================================================================
 	// SHORE BLEND — depth-driven. Thin water blends toward shallow color,
@@ -451,7 +452,9 @@ void fragment() {
 	// Shore edge foam — depth-buffer driven. Foam rings around any opaque
 	// geometry below the surface (terrain, rocks) for free.
 	float shore_foam = (1.0 - smoothstep(0.0, foam_edge_width, water_thickness)) * foam_detail;
+	float interaction_foam = water_surface_interaction_foam(v_world_pos.xz) * mix(0.45, 1.0, foam_detail);
 	foam_factor = max(jacobian_foam, shore_foam);
+	foam_factor = max(foam_factor, interaction_foam);
 
 	// ========================================================================
 	// NORMALS — flatten at distance to reduce shimmer
@@ -763,6 +766,14 @@ void fragment() {
 	// probe/sky reflections sharp on calm water.
 	ROUGHNESS = (1.0 - fresnel) * foam_factor * 0.6 + roughness;
 	METALLIC = 0.0;
+	if (water_interaction_debug_enabled) {
+		vec3 interaction_debug_color = water_surface_interaction_debug_color(v_world_pos.xz);
+		ALBEDO = interaction_debug_color;
+		EMISSION = interaction_debug_color * 1.5;
+		ROUGHNESS = 1.0;
+		METALLIC = 0.0;
+		SPECULAR = 0.0;
+	}
 	SPECULAR = 0.5;  // F0 for environment reflections — separate from light() specular
 }
 

@@ -55,6 +55,16 @@ var _cached_shore_bounds: Rect2 = Rect2()
 var _cached_shore_fade_distance: float = 50.0
 var _cached_wave_scale: float = 1.0
 var _cached_foam_texture: Texture2D = null
+var _cached_water_interaction_texture: Texture2D = null
+var _cached_water_interaction_bounds: Vector4 = Vector4.ZERO
+var _cached_water_interaction_enabled: bool = false
+var _cached_water_interaction_debug_enabled: bool = false
+var _cached_water_body_atlas_texture: Texture2D = null
+var _cached_water_body_atlas_bounds: Vector4 = Vector4.ZERO
+var _cached_water_body_atlas_available: bool = false
+var _cached_water_interaction_surface_height: float = 0.0
+var _water_interaction_fallback_texture: Texture2D = null
+var _water_body_atlas_fallback_texture: Texture2D = null
 var _debug_shore_mask: bool = false
 
 
@@ -135,12 +145,30 @@ func _create_inline_flat_shader() -> Shader:
 shader_type spatial;
 render_mode depth_draw_opaque, cull_disabled;
 
+#include "res://src/core/water/shaders/water_interaction_common.gdshaderinc"
+
 uniform vec4 water_color : source_color = vec4(0.1, 0.15, 0.18, 1.0);
 uniform float roughness = 0.3;
 
+varying vec3 v_world_pos;
+
+void vertex() {
+	v_world_pos = (MODEL_MATRIX * vec4(VERTEX, 1.0)).xyz;
+	VERTEX.y += water_surface_interaction_height(v_world_pos.xz);
+}
+
 void fragment() {
 	float fresnel = mix(pow(1.0 - max(dot(VIEW, NORMAL), 0.0), 5.0), 1.0, 0.02);
-	ALBEDO = water_color.rgb;
+	vec2 ripple_gradient = water_surface_interaction_gradient(v_world_pos.xz);
+	vec3 ripple_normal = normalize(vec3(-ripple_gradient.x, 1.0, -ripple_gradient.y));
+	NORMAL = normalize((VIEW_MATRIX * vec4(ripple_normal, 0.0)).xyz);
+	float ripple_foam = water_surface_interaction_foam(v_world_pos.xz);
+	ALBEDO = mix(water_color.rgb, vec3(0.55, 0.72, 0.74), ripple_foam);
+	if (water_interaction_debug_enabled) {
+		vec3 debug_color = water_surface_interaction_debug_color(v_world_pos.xz);
+		ALBEDO = debug_color;
+		EMISSION = debug_color * 1.4;
+	}
 	ROUGHNESS = roughness;
 	METALLIC = 0.0;
 }
@@ -171,6 +199,11 @@ func _setup_fft_defaults() -> void:
 	var foam_tex := _load_foam_texture()
 	_material.set_shader_parameter("foam_texture", foam_tex)
 	_cached_foam_texture = foam_tex
+	set_water_interaction_texture(
+		_cached_water_interaction_texture,
+		_cached_water_interaction_bounds,
+		_cached_water_interaction_enabled
+	)
 	_material.set_shader_parameter("refraction_strength", 0.0)
 	_material.set_shader_parameter("refraction_edge_guard_strength", 0.0)
 	if _surface_shader_mode == SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
@@ -254,6 +287,24 @@ func _load_texture_or_null(path: String) -> Texture2D:
 			return tex
 	Log.warn("water", "OceanMesh: Optional water texture missing: %s" % path)
 	return null
+
+
+func _get_water_interaction_fallback_texture() -> Texture2D:
+	if _water_interaction_fallback_texture != null:
+		return _water_interaction_fallback_texture
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(0.0, 0.0, 0.0, 0.0))
+	_water_interaction_fallback_texture = ImageTexture.create_from_image(img)
+	return _water_interaction_fallback_texture
+
+
+func _get_water_body_atlas_fallback_texture() -> Texture2D:
+	if _water_body_atlas_fallback_texture != null:
+		return _water_body_atlas_fallback_texture
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(0.0, 0.0, 0.0, 0.0))
+	_water_body_atlas_fallback_texture = ImageTexture.create_from_image(img)
+	return _water_body_atlas_fallback_texture
 
 
 # ============================================================================
@@ -621,12 +672,60 @@ func set_shore_mask(mask: Texture2D, world_bounds: Rect2, fade_distance: float =
 			world_bounds, fade_distance])
 
 
+func set_water_interaction_texture(texture: Texture2D, bounds: Vector4, enabled: bool) -> void:
+	_cached_water_interaction_texture = texture
+	_cached_water_interaction_bounds = bounds
+	_cached_water_interaction_enabled = enabled
+	if _material == null or _quality != QualityMode.HIGH:
+		return
+	_material.set_shader_parameter("water_interaction_map", texture if texture != null else _get_water_interaction_fallback_texture())
+	_material.set_shader_parameter("water_interaction_bounds", bounds)
+	_material.set_shader_parameter("water_interaction_enabled", enabled and texture != null)
+	_material.set_shader_parameter("water_interaction_debug_enabled", _cached_water_interaction_debug_enabled)
+	_material.set_shader_parameter("water_interaction_surface_height", _cached_water_interaction_surface_height)
+	_material.set_shader_parameter("water_interaction_body_filter_mode", 2)
+
+
+func set_water_interaction_surface_height(surface_height: float) -> void:
+	_cached_water_interaction_surface_height = surface_height
+	if _material != null and _quality == QualityMode.HIGH:
+		_material.set_shader_parameter("water_interaction_surface_height", surface_height)
+		_material.set_shader_parameter("water_interaction_body_filter_mode", 2)
+
+
+func set_water_body_atlas_texture(texture: Texture2D, bounds: Vector4, available: bool) -> void:
+	_cached_water_body_atlas_texture = texture
+	_cached_water_body_atlas_bounds = bounds
+	_cached_water_body_atlas_available = available
+	if _material == null or _quality != QualityMode.HIGH:
+		return
+	_material.set_shader_parameter("water_body_atlas_map", texture if texture != null else _get_water_body_atlas_fallback_texture())
+	_material.set_shader_parameter("water_body_atlas_bounds", bounds)
+	_material.set_shader_parameter("water_body_atlas_available", available and texture != null)
+
+
+func set_water_interaction_debug_enabled(enabled: bool) -> void:
+	_cached_water_interaction_debug_enabled = enabled
+	if _material != null and _quality == QualityMode.HIGH:
+		_material.set_shader_parameter("water_interaction_debug_enabled", enabled)
+
+
 func clear_runtime_textures() -> void:
 	_cached_shore_mask = null
 	_cached_foam_texture = null
+	_cached_water_interaction_texture = null
+	_cached_water_interaction_enabled = false
+	_cached_water_interaction_debug_enabled = false
+	_cached_water_body_atlas_texture = null
+	_cached_water_body_atlas_available = false
 	if _material:
 		_material.set_shader_parameter("shore_mask", null)
 		_material.set_shader_parameter("foam_texture", null)
+		_material.set_shader_parameter("water_interaction_map", _get_water_interaction_fallback_texture())
+		_material.set_shader_parameter("water_interaction_enabled", false)
+		_material.set_shader_parameter("water_interaction_debug_enabled", false)
+		_material.set_shader_parameter("water_body_atlas_map", _get_water_body_atlas_fallback_texture())
+		_material.set_shader_parameter("water_body_atlas_available", false)
 	material_override = null
 
 
@@ -679,6 +778,19 @@ func _restore_cached_state() -> void:
 
 	if _quality == QualityMode.HIGH and _cached_foam_texture:
 		_material.set_shader_parameter("foam_texture", _cached_foam_texture)
+	if _quality == QualityMode.HIGH:
+		set_water_interaction_texture(
+			_cached_water_interaction_texture,
+			_cached_water_interaction_bounds,
+			_cached_water_interaction_enabled
+		)
+		set_water_interaction_surface_height(_cached_water_interaction_surface_height)
+		set_water_body_atlas_texture(
+			_cached_water_body_atlas_texture,
+			_cached_water_body_atlas_bounds,
+			_cached_water_body_atlas_available
+		)
+		set_water_interaction_debug_enabled(_cached_water_interaction_debug_enabled)
 
 
 func _quality_name() -> String:

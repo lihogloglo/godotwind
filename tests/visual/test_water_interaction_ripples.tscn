@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://b1fvl8xt8jq5h"]
+
+[ext_resource type="Script" path="res://tests/visual/test_water_interaction_ripples.gd" id="1_7gri4"]
+
+[node name="WaterInteractionRipples" type="Node3D"]
+script = ExtResource("1_7gri4")

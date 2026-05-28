@@ -40,6 +40,8 @@ const OceanControlsScript := preload("res://src/tools/ui/ocean_controls.gd")
 const EnvironmentControlsScript := preload("res://src/tools/ui/environment_controls.gd")
 const WeatherControlsScript := preload("res://src/tools/ui/weather_controls.gd")
 const StatsCollectorScript := preload("res://src/tools/ui/stats_collector.gd")
+const RiverWaterBodyScript := preload("res://src/core/water/river_water_body.gd")
+const PolygonWaterVolumeScript := preload("res://src/core/water/polygon_water_volume.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const FlyCameraScript := preload("res://src/core/player/fly_camera.gd")
 const PlayerControllerScript := preload("res://src/core/player/player_controller.gd")
@@ -85,6 +87,7 @@ const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
 const BenchLadderRunnerScript := preload("res://src/tools/bench_ladder_runner.gd")
 const StreamingStressRunnerScript := preload("res://src/tools/streaming_stress_runner.gd")
 const LoadingStateMachineScript := preload("res://src/core/loading/loading_state_machine.gd")
+const WATER_RENDER_PUBLISH_MAX_CELLS_PER_FRAME := 4
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
 
@@ -177,6 +180,15 @@ var _hlod_ui_transition_until_msec: int = 0
 var _hlod_ui_last_toggle_msec: int = -100000
 const HLOD_UI_COOLDOWN_MSEC := 1500
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
+var _water_render_root: Node3D = null
+var _river_render_nodes_by_body_id: Dictionary[StringName, Node3D] = {}
+var _river_render_ref_counts: Dictionary[StringName, int] = {}
+var _cell_river_body_ids: Dictionary[Vector2i, Array] = {}
+var _river_render_publish_queue: Array[Vector2i] = []
+var _river_render_publish_queue_set: Dictionary[Vector2i, bool] = {}
+var _river_render_publish_last_usec: int = 0
+var _river_render_publish_total_usec: int = 0
+var _river_render_publish_count: int = 0
 var _player_npc_id: String = "fargoth"  # Default player character NPC ID
 
 # Interior cell browser (constructed by CellBrowser)
@@ -266,6 +278,7 @@ func _request_fast_quit(reason: String) -> void:
 
 	if _ocean_controls:
 		_ocean_controls.set_enabled(false)
+	_cleanup_water_provider()
 
 	# Stop background worker threads from blocking on WTP handles
 	if native_streaming_manager:
@@ -297,8 +310,18 @@ func _release_shutdown_refs() -> void:
 
 
 func _exit_tree() -> void:
+	_cleanup_water_provider()
 	if Engine.has_meta("_quitting"):
 		_release_shutdown_refs()
+
+
+func _cleanup_water_provider() -> void:
+	if world_source != null and world_source.has_method("get_water_provider"):
+		var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
+		if water_provider != null and water_provider.has_method("drain_async_requests"):
+			water_provider.call("drain_async_requests", true)
+	if OceanManager and OceanManager.has_method("set_world_water_provider"):
+		OceanManager.call("set_world_water_provider", null)
 
 
 func _ready() -> void:
@@ -343,6 +366,10 @@ func _ready() -> void:
 	cell_manager = CellManagerScript.new()
 	world_source = MorrowindWorldSourceScript.new()
 	world_object_source = world_source.get_object_source()
+	if world_source.has_method("get_water_provider") and OceanManager.has_method("set_world_water_provider"):
+		var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
+		if water_provider != null:
+			OceanManager.call("set_world_water_provider", water_provider)
 	if cell_manager.has_method("set_world_source"):
 		cell_manager.call("set_world_source", world_source)
 	else:
@@ -3022,6 +3049,7 @@ func _cmd_hlod_stats(_args: Dictionary) -> String:
 func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 	_log("Cell loaded: (%d, %d) - %d objects (native)" % [grid.x, grid.y, object_count])
 	_update_stats()
+	_prepare_water_for_loaded_cell(grid)
 
 	# Register doors from newly loaded cell with pocket manager
 	if _pocket_manager:
@@ -3037,9 +3065,346 @@ func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 			_debug_view_commands.on_cell_loaded(cell_node)
 
 
+func _prepare_water_for_loaded_cell(grid: Vector2i) -> void:
+	if world_source == null or not world_source.has_method("get_water_provider"):
+		return
+	var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
+	if water_provider == null:
+		return
+	if water_provider.has_method("request_prepare_cell_grid"):
+		var err: int = water_provider.call("request_prepare_cell_grid", grid)
+		if err != OK and err != ERR_DOES_NOT_EXIST:
+			Log.warn("water", "WorldExplorer: failed to request water for cell %s (error %d)" % [grid, err])
+	elif water_provider.has_method("prepare_cell_grid"):
+		var err: int = water_provider.call("prepare_cell_grid", grid)
+		if err != OK and err != ERR_DOES_NOT_EXIST:
+			Log.warn("water", "WorldExplorer: failed to prepare water for cell %s (error %d)" % [grid, err])
+	_enqueue_river_render_publish(grid)
+	_process_river_render_publish_queue(water_provider)
+
+
+func _process_water_provider_async() -> void:
+	if world_source == null or not world_source.has_method("get_water_provider"):
+		return
+	var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
+	if water_provider != null and water_provider.has_method("process_async_requests"):
+		water_provider.call("process_async_requests")
+	if water_provider != null:
+		_process_river_render_publish_queue(water_provider)
+
+
+func _ensure_water_render_root() -> Node3D:
+	if _water_render_root != null and is_instance_valid(_water_render_root):
+		return _water_render_root
+	_water_render_root = Node3D.new()
+	_water_render_root.name = "GeneratedWaterBodies"
+	add_child(_water_render_root)
+	return _water_render_root
+
+
+func _enqueue_river_render_publish(grid: Vector2i) -> void:
+	if _river_render_publish_queue_set.has(grid):
+		return
+	_river_render_publish_queue_set[grid] = true
+	_river_render_publish_queue.append(grid)
+
+
+func _process_river_render_publish_queue(water_provider: RefCounted) -> void:
+	if water_provider == null or _river_render_publish_queue.is_empty():
+		return
+	var start_usec := Time.get_ticks_usec()
+	var processed := 0
+	var remaining: Array[Vector2i] = []
+	for grid: Vector2i in _river_render_publish_queue:
+		if processed >= WATER_RENDER_PUBLISH_MAX_CELLS_PER_FRAME:
+			remaining.append(grid)
+			continue
+		_river_render_publish_queue_set.erase(grid)
+		if _is_cell_loaded_or_tracked_for_river_render(grid):
+			var complete := _publish_river_render_payloads_for_cell(grid, water_provider)
+			if not complete:
+				remaining.append(grid)
+				_river_render_publish_queue_set[grid] = true
+		processed += 1
+	_river_render_publish_queue = remaining
+	_river_render_publish_last_usec = Time.get_ticks_usec() - start_usec
+	_river_render_publish_total_usec += _river_render_publish_last_usec
+	_river_render_publish_count += 1
+
+
+func _is_cell_loaded_or_tracked_for_river_render(grid: Vector2i) -> bool:
+	if _cell_river_body_ids.has(grid):
+		return true
+	if native_streaming_manager != null and "_loaded_cells" in native_streaming_manager:
+		return native_streaming_manager._loaded_cells.has(grid)
+	return false
+
+
+func get_generated_water_runtime_status() -> Dictionary:
+	var hydrology_status := _get_water_provider_runtime_status()
+	return {
+		"river_render_node_count": _river_render_nodes_by_body_id.size(),
+		"river_render_tracked_cell_count": _cell_river_body_ids.size(),
+		"water_publish_queue_size": _river_render_publish_queue.size(),
+		"water_publish_last_usec": _river_render_publish_last_usec,
+		"water_publish_total_usec": _river_render_publish_total_usec,
+		"water_publish_count": _river_render_publish_count,
+		"hydrology": hydrology_status,
+	}
+
+
+func _get_water_provider_runtime_status() -> Dictionary:
+	if world_source == null or not world_source.has_method("get_water_provider"):
+		return {}
+	var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
+	if water_provider == null:
+		return {}
+	if water_provider.has_method("get_runtime_status"):
+		var status_v: Variant = water_provider.call("get_runtime_status")
+		if status_v is Dictionary:
+			return status_v
+	var status := {
+		"active_hydrology_tasks": 0,
+		"cached_regions": 0,
+		"cache_memory_bytes_estimate": 0,
+	}
+	if "_pending_region_tasks" in water_provider:
+		status["active_hydrology_tasks"] = water_provider._pending_region_tasks.size()
+	if "_region_cache" in water_provider:
+		var cache: Dictionary = water_provider._region_cache
+		status["cached_regions"] = cache.size()
+		var bytes := 0
+		for region_data_v: Variant in cache.values():
+			if not region_data_v is Dictionary:
+				continue
+			var region_data: Dictionary = region_data_v as Dictionary
+			var flow_image: Image = region_data.get("flow_image") as Image
+			if flow_image == null:
+				continue
+			bytes += flow_image.get_width() * flow_image.get_height() * 4
+		status["cache_memory_bytes_estimate"] = bytes
+	return status
+
+
+func _publish_river_render_payloads_for_cell(grid: Vector2i, water_provider: RefCounted) -> bool:
+	if water_provider == null:
+		return true
+	var payloads: Array = []
+	if water_provider.has_method("get_water_render_payloads_for_cell_grid"):
+		payloads = water_provider.call("get_water_render_payloads_for_cell_grid", grid)
+	elif water_provider.has_method("get_river_render_payloads_for_cell_grid"):
+		payloads = water_provider.call("get_river_render_payloads_for_cell_grid", grid)
+	else:
+		return true
+	if payloads.is_empty():
+		if _water_provider_cell_ready_for_publish(grid, water_provider):
+			_apply_river_render_id_diff(grid, [])
+			return true
+		return false
+	var next_ids: Array = []
+	for payload_v: Variant in payloads:
+		if not payload_v is Dictionary:
+			continue
+		var payload: Dictionary = payload_v as Dictionary
+		var body_id_v: Variant = payload.get("body_id", &"")
+		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		if body_id == &"":
+			continue
+		if next_ids.has(body_id):
+			continue
+		next_ids.append(body_id)
+		if not _river_render_nodes_by_body_id.has(body_id):
+			var water_node := _create_generated_water_node(payload)
+			if water_node == null:
+				continue
+			_set_generated_water_render_only(water_node)
+			_ensure_water_render_root().add_child(water_node)
+			_unregister_generated_water_from_water_registry(water_node)
+			_river_render_nodes_by_body_id[body_id] = water_node
+			_river_render_ref_counts[body_id] = 0
+	_apply_river_render_id_diff(grid, next_ids)
+	return true
+
+
+func _water_provider_cell_ready_for_publish(grid: Vector2i, water_provider: RefCounted) -> bool:
+	if water_provider.has_method("is_cell_grid_water_ready"):
+		return bool(water_provider.call("is_cell_grid_water_ready", grid))
+	if not ("_active_cell_regions" in water_provider):
+		return true
+	var sentinel := Vector2i(2147483647, 2147483647)
+	var region_coord: Vector2i = water_provider._active_cell_regions.get(grid, sentinel)
+	if region_coord == sentinel:
+		return true
+	if "_pending_region_tasks" in water_provider and water_provider._pending_region_tasks.has(region_coord):
+		return false
+	if "_region_cache" in water_provider:
+		if water_provider._region_cache.has(region_coord):
+			return true
+		if "_pending_region_tasks" in water_provider:
+			return not water_provider._pending_region_tasks.has(region_coord)
+		return true
+	return true
+
+
+func _apply_river_render_id_diff(grid: Vector2i, next_ids: Array) -> void:
+	var current_ids: Array = _cell_river_body_ids.get(grid, [])
+	for body_id_v: Variant in current_ids:
+		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		if next_ids.has(body_id):
+			continue
+		_decrement_river_render_ref(body_id)
+	for body_id_v: Variant in next_ids:
+		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		if current_ids.has(body_id):
+			continue
+		_river_render_ref_counts[body_id] = int(_river_render_ref_counts.get(body_id, 0)) + 1
+	if next_ids.is_empty():
+		_cell_river_body_ids.erase(grid)
+	else:
+		_cell_river_body_ids[grid] = next_ids
+
+
+func _create_generated_water_node(payload: Dictionary) -> Node3D:
+	var body_type_v: Variant = payload.get("body_type", &"river")
+	var body_type := body_type_v if body_type_v is StringName else StringName(str(body_type_v))
+	if body_type == &"lake" or body_type == &"pool":
+		return _create_generated_still_water_node(payload)
+	return _create_generated_river_node(payload)
+
+
+func _create_generated_river_node(payload: Dictionary) -> RiverWaterBody3D:
+	var points_v: Variant = payload.get("centerline_world_points", PackedVector3Array())
+	var points := PackedVector3Array()
+	if points_v is PackedVector3Array:
+		points = points_v
+	elif points_v is Array:
+		for point_v: Variant in points_v:
+			if point_v is Vector3:
+				points.append(point_v)
+	if points.size() < 2:
+		return null
+	var river: RiverWaterBody3D = RiverWaterBodyScript.new()
+	var body_id_v: Variant = payload.get("body_id", &"generated_river")
+	river.name = str(body_id_v)
+	river.curve = Curve3D.new()
+	var origin := points[0]
+	for i in points.size():
+		river.curve.add_point(points[i] - origin)
+	river.point_widths.clear()
+	var width := maxf(float(payload.get("mean_width_meters", 8.0)), 1.0)
+	for _i in points.size():
+		river.point_widths.append(width)
+	river.global_position = origin
+	river.surface_height = float(payload.get("surface_height", origin.y)) - origin.y
+	river.depth = 3.0
+	river.flow_speed = float(payload.get("flow_speed_meters_per_second", 1.4))
+	river.length_step_m = 2.0
+	river.width_subdivisions = 6
+	river.water_color = Color(0.025, 0.13, 0.16, 1.0)
+	var flow_image: Image = payload.get("flowmap_image") as Image
+	if flow_image != null:
+		river.flowmap_image = flow_image
+		river.flowmap_enabled = true
+	var flowmap_bounds_v: Variant = payload.get("flowmap_region_bounds", AABB())
+	if flowmap_bounds_v is AABB:
+		river.flowmap_region_bounds = flowmap_bounds_v
+	return river
+
+
+func _create_generated_still_water_node(payload: Dictionary) -> PolygonWaterVolume:
+	var points_v: Variant = payload.get("polygon_world_points_xz", PackedVector2Array())
+	var points := PackedVector2Array()
+	if points_v is PackedVector2Array:
+		points = points_v
+	elif points_v is Array:
+		for point_v: Variant in points_v:
+			if point_v is Vector2:
+				points.append(point_v)
+	if points.size() < 3:
+		return null
+	var water: PolygonWaterVolume = PolygonWaterVolumeScript.new()
+	var body_id_v: Variant = payload.get("body_id", &"generated_lake")
+	water.name = str(body_id_v)
+	var surface_height := float(payload.get("surface_height", 0.0))
+	var origin := Vector3(points[0].x, surface_height, points[0].y)
+	var local_points := PackedVector2Array()
+	for point: Vector2 in points:
+		local_points.append(Vector2(point.x - origin.x, point.y - origin.z))
+	water.global_position = origin
+	water.polygon_points = local_points
+	water.water_surface_height = 0.0
+	var depth := maxf(float(payload.get("depth", 3.0)), 0.25)
+	var bounds_v: Variant = payload.get("bounds", AABB())
+	if bounds_v is AABB:
+		var bounds: AABB = bounds_v
+		water.size = Vector3(maxf(bounds.size.x, 0.1), depth, maxf(bounds.size.z, 0.1))
+	else:
+		water.size.y = depth
+	water.water_type = WaterVolume.WaterType.LAKE
+	water.enable_waves = true
+	water.wave_scale = 0.08
+	water.wave_speed = 0.35
+	water.roughness = 0.18
+	water.clarity = 0.62
+	water.flow_speed = 0.0
+	water.current_strength = 0.0
+	water.water_color = Color(0.03, 0.16, 0.18, 1.0)
+	water.register_with_water_registry = false
+	water.enable_swimming = false
+	water.enable_buoyancy = false
+	water.detection_collision_mask = 0
+	return water
+
+
+func _set_generated_water_render_only(water_node: Node3D) -> void:
+	for property: Dictionary in water_node.get_property_list():
+		if StringName(property.get("name", "")) == &"register_with_water_registry":
+			water_node.set(&"register_with_water_registry", false)
+			return
+	water_node.set_meta(&"register_with_water_registry", false)
+
+
+func _unregister_generated_water_from_water_registry(water_node: Node3D) -> void:
+	if water_node == null or not is_instance_valid(water_node):
+		return
+	if not OceanManager or not OceanManager.has_method("unregister_water_body"):
+		return
+	if water_node.has_method("get_water_body_descriptor"):
+		var descriptor: RefCounted = water_node.call("get_water_body_descriptor") as RefCounted
+		if descriptor != null:
+			OceanManager.call("unregister_water_body", descriptor)
+
+
+func _decrement_river_render_ref(body_id: StringName) -> void:
+	var refs := int(_river_render_ref_counts.get(body_id, 0)) - 1
+	if refs > 0:
+		_river_render_ref_counts[body_id] = refs
+		return
+	_river_render_ref_counts.erase(body_id)
+	var river: Node3D = _river_render_nodes_by_body_id.get(body_id, null)
+	_river_render_nodes_by_body_id.erase(body_id)
+	if river != null and is_instance_valid(river):
+		river.queue_free()
+
+
+func _release_river_render_payloads_for_cell(grid: Vector2i) -> void:
+	var ids: Array = _cell_river_body_ids.get(grid, [])
+	_cell_river_body_ids.erase(grid)
+	for body_id_v: Variant in ids:
+		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		_decrement_river_render_ref(body_id)
+	_river_render_publish_queue_set.erase(grid)
+	_river_render_publish_queue.erase(grid)
+
+
 ## Callback for native streaming manager cell unloaded
 func _on_native_cell_unloaded(grid: Vector2i) -> void:
 	_log("Cell unloaded: (%d, %d) (native)" % [grid.x, grid.y])
+	_release_river_render_payloads_for_cell(grid)
+	if world_source != null and world_source.has_method("get_water_provider"):
+		var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
+		if water_provider != null and water_provider.has_method("release_cell_grid"):
+			water_provider.call("release_cell_grid", grid)
 
 	# Unregister doors from unloaded cell
 	if _pocket_manager:
@@ -3447,6 +3812,7 @@ func _process(delta: float) -> void:
 	# Fly-camera interact hold-threshold polling. Cheap; safe to run every
 	# frame even when the press state is inactive (early-outs immediately).
 	_poll_fly_interact_hold()
+	_process_water_provider_async()
 
 	# Record frame timing for profiler
 	if profiler:

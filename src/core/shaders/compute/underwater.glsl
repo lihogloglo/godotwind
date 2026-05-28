@@ -9,6 +9,7 @@ layout(set = 0, binding = 2) uniform sampler2D source_color_tex;
 layout(set = 0, binding = 4) uniform sampler2DArray displacement_tex;
 layout(set = 0, binding = 5) uniform sampler2D shore_mask_tex;
 layout(set = 0, binding = 6) uniform sampler2D caustics_noise_tex;
+layout(set = 0, binding = 7) uniform sampler2D water_body_atlas_tex;
 
 #define MAX_CASCADES 8
 
@@ -20,6 +21,8 @@ layout(std430, set = 0, binding = 3) readonly buffer UnderwaterState {
 	vec4 shore_params0; // x=fade, y=amp, z=freq, w=speed
 	vec4 shore_params1; // x=steep, yzw=reserved
 	vec4 water_tint; // rgb=medium asymptote, a=caustics strength
+	vec4 water_body_atlas_bounds; // x=min_x, y=min_z, z=size_x, w=size_z
+	vec4 water_body_atlas_params; // x=available, yzw=reserved
 } state;
 
 layout(push_constant, std430) uniform Params {
@@ -95,7 +98,27 @@ vec3 get_world_ray(vec2 uv) {
 	return normalize((state.inv_view * vec4(view_dir, 0.0)).xyz);
 }
 
+vec4 sample_water_body_atlas(vec2 world_xz) {
+	if (state.water_body_atlas_params.x <= 0.5 || state.water_body_atlas_bounds.z <= 0.0 || state.water_body_atlas_bounds.w <= 0.0) {
+		return vec4(0.0);
+	}
+	vec2 atlas_uv = (world_xz - state.water_body_atlas_bounds.xy) / state.water_body_atlas_bounds.zw;
+	if (atlas_uv.x < 0.0 || atlas_uv.x > 1.0 || atlas_uv.y < 0.0 || atlas_uv.y > 1.0) {
+		return vec4(0.0);
+	}
+	return textureLod(water_body_atlas_tex, atlas_uv, 0.0);
+}
+
+float water_body_atlas_gate(vec2 world_xz) {
+	return smoothstep(0.015, 0.12, clamp(sample_water_body_atlas(world_xz).r, 0.0, 1.0));
+}
+
 float dynamic_water_level(vec2 world_xz, vec3 cam_pos) {
+	vec4 atlas = sample_water_body_atlas(world_xz);
+	float atlas_gate = smoothstep(0.015, 0.12, clamp(atlas.r, 0.0, 1.0));
+	if (atlas_gate > 0.001) {
+		return atlas.g;
+	}
 	if (!surface_sample_enabled) {
 		return camera_water_level_cached;
 	}

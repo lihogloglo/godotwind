@@ -75,8 +75,9 @@ func _process(_delta: float) -> void:
 		var camera_pos := _camera.global_position
 		global_position = camera_pos
 		_spawn_center = _compute_spawn_center(camera_pos)
-		_surface_level = _sample_surface_level(camera_pos)
-		_camera_water_depth = maxf(_surface_level - camera_pos.y, 0.0)
+		var water_query := _sample_camera_water_query(camera_pos)
+		_surface_level = float(water_query.get("height", _sea_level))
+		_camera_water_depth = maxf(float(water_query.get("depth", 0.0)), 0.0)
 	if _process_material == null:
 		return
 	_process_material.set_shader_parameter(&"camera_position", global_position)
@@ -233,7 +234,16 @@ func _compute_spawn_center(camera_pos: Vector3) -> Vector3:
 	)
 
 
-func _sample_surface_level(world_pos: Vector3) -> float:
-	if _water_state != null and _water_state.can_sample_height():
-		return _water_state.sample_height(world_pos, _sea_level)
-	return _sea_level
+func _sample_camera_water_query(world_pos: Vector3) -> Dictionary:
+	if _water_state == null:
+		return {
+			"height": _sea_level,
+			"depth": 0.0,
+		}
+	var query := _water_state.sample_surface_query(world_pos)
+	var water_y := float(query.get("height", _sea_level))
+	var has_body := bool(query.get("has_water_body", false)) and not is_nan(water_y) and water_y > -1.0e20
+	return {
+		"height": water_y if has_body else _sea_level,
+		"depth": water_y - world_pos.y if has_body else 0.0,
+	}

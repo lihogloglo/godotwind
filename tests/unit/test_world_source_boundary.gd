@@ -258,6 +258,17 @@ func test_world_source_contract_exposes_required_providers() -> void:
 	assert_object(source.get_object_spawn_adapter()).is_not_null()
 	assert_object(source.get_terrain_provider()).is_not_null()
 	assert_object(source.get_asset_provider()).is_not_null()
+	assert_object(source.get_water_provider()).is_null()
+
+
+func test_world_source_exposes_optional_water_provider_without_object_streaming_requirement() -> void:
+	var source := FakeTerrainOnlyWorldSource.new()
+	var provider := RefCounted.new()
+	source.water_provider = provider
+
+	assert_bool(source.is_configured()).is_true()
+	assert_bool(source.is_object_streaming_configured()).is_false()
+	assert_object(source.get_water_provider()).is_same(provider)
 
 
 func test_world_source_separates_terrain_and_object_streaming_capabilities() -> void:

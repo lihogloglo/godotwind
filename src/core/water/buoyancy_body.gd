@@ -1,6 +1,6 @@
 ## BuoyancyBody3D — RigidBody3D with probe-based buoyancy physics.
 ## Add BuoyancyProbe3D children to define sampling points.
-## Queries OceanManager for wave heights via GPU readback (exact match with visual).
+## Queries OceanManager's unified water surface; ocean remains the fallback body.
 ##
 ## Two modes:
 ## - Simple probe mode (default): each probe applies buoyancy force proportional to depth.
@@ -65,9 +65,12 @@ func _physics_process(_delta: float) -> void:
 	# With the guard, the cost collapses to one branch per frozen body.
 	if freeze:
 		return
-	if not OceanManager or not OceanManager.is_initialized():
+	if not OceanManager:
 		return
 	if _probes.is_empty():
+		return
+	var water_state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	if water_state == null or not water_state.can_sample_height():
 		return
 
 	var gravity_vec: Vector3 = ProjectSettings.get_setting("physics/3d/default_gravity_vector", Vector3.DOWN)
@@ -76,10 +79,15 @@ func _physics_process(_delta: float) -> void:
 
 	_submerged_count = 0
 	_is_submerged = false
+	var water_velocity_sum := Vector3.ZERO
 
 	for probe: BuoyancyProbe3D in _probes:
 		var probe_pos: Vector3 = probe.global_position
-		var wave_height: float = OceanManager.get_wave_height(probe_pos)
+		var wave_height: float = water_state.sample_height(probe_pos, -INF)
+		if wave_height <= -INF * 0.5:
+			probe.depth = -INF
+			probe.is_submerged = false
+			continue
 		var depth: float = wave_height - probe_pos.y
 
 		probe.depth = depth
@@ -88,6 +96,7 @@ func _physics_process(_delta: float) -> void:
 		if depth > 0.0:
 			_is_submerged = true
 			_submerged_count += 1
+			water_velocity_sum += water_state.sample_base_velocity(probe_pos, Vector3.ZERO)
 
 			# Weight-relative Archimedes approximation. The previous depth * density
 			# scalar produced huge forces for small props once apply_force() was no
@@ -112,7 +121,10 @@ func _physics_process(_delta: float) -> void:
 	# Hydrodynamic drag when submerged
 	if _is_submerged:
 		var submersion_ratio: float = float(_submerged_count) / float(_probes.size())
-		linear_velocity *= 1.0 - drag_linear * submersion_ratio
+		var average_water_velocity := water_velocity_sum / float(maxi(_submerged_count, 1))
+		var relative_velocity := linear_velocity - average_water_velocity
+		relative_velocity *= 1.0 - drag_linear * submersion_ratio
+		linear_velocity = average_water_velocity + relative_velocity
 		angular_velocity *= 1.0 - drag_angular * submersion_ratio
 
 

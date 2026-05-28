@@ -17,6 +17,7 @@ var asset_provider: RefCounted = null
 var character_source: RefCounted = null
 var weather_provider: RefCounted = null
 var dialogue_provider: RefCounted = null
+var water_provider: RefCounted = null
 
 
 func initialize() -> Error:
@@ -28,7 +29,8 @@ func is_configured() -> bool:
 		or is_terrain_configured() \
 		or character_source != null \
 		or weather_provider != null \
-		or dialogue_provider != null
+		or dialogue_provider != null \
+		or water_provider != null
 
 
 func is_object_streaming_configured() -> bool:
@@ -72,3 +74,7 @@ func get_weather_provider() -> RefCounted:
 
 func get_dialogue_provider() -> RefCounted:
 	return dialogue_provider
+
+
+func get_water_provider() -> RefCounted:
+	return water_provider

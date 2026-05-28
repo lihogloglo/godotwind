@@ -6,6 +6,7 @@ const MorrowindWorldObjectSourceScript: Script = preload("res://src/core/world/m
 const MorrowindObjectSpawnAdapterScript := preload("res://src/core/world/morrowind/morrowind_object_spawn_adapter.gd")
 const MorrowindAssetProviderScript: Script = preload("res://src/core/world/morrowind/morrowind_asset_provider.gd")
 const MorrowindDataProviderScript: Script = preload("res://src/core/world/morrowind/morrowind_data_provider.gd")
+const MorrowindHydrologyProviderScript: Script = preload("res://src/core/world/morrowind/morrowind_hydrology_provider.gd")
 
 
 func _init() -> void:
@@ -17,3 +18,5 @@ func _init() -> void:
 	object_spawn_adapter.configure(object_source)
 	asset_provider = MorrowindAssetProviderScript.new()
 	terrain_provider = MorrowindDataProviderScript.new()
+	water_provider = MorrowindHydrologyProviderScript.new()
+	water_provider.configure(terrain_provider, coordinate_mapper)

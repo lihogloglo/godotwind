@@ -9,6 +9,12 @@ extends Node
 const CS := preload("res://src/core/coordinate_system.gd")
 const OceanSprayScript := preload("res://src/core/water/ocean_spray.gd")
 const UnderwaterParticulatesScript := preload("res://src/core/water/underwater_particulates.gd")
+const WaterBodyRegistryScript := preload("res://src/core/water/water_body_registry.gd")
+const WaterInteractionSimScript := preload("res://src/core/water/water_interaction_sim.gd")
+
+const WATER_BODY_ATLAS_RESOLUTION := 128
+const WATER_BODY_ATLAS_EXTENT_M := 512.0
+const WATER_BODY_ATLAS_UPDATE_MOVE_M := 2.0
 
 # Project settings paths
 const SETTING_ENABLED := "ocean/enabled"
@@ -89,7 +95,26 @@ var _current_ocean_wind_speed_mps: float = 2.0
 var _ocean_mesh: OceanMesh = null
 var _ocean_spray: OceanSpray = null
 var _underwater_particulates: UnderwaterParticulates = null
+var _water_interaction_sim: WaterInteractionSim = null
 var _shore_mask: ShoreMaskGenerator = null
+var _water_body_registry: RefCounted = WaterBodyRegistryScript.new()
+var _water_interactors: Array[Node] = []
+var _water_interaction_renderers: Array[Node] = []
+var _world_water_provider: RefCounted = null
+var _water_interaction_debug_enabled: bool = false
+var _water_interaction_sync_initialized: bool = false
+var _water_interaction_last_texture: Texture2D = null
+var _water_dynamic_flow_last_texture: Texture2D = null
+var _water_interaction_last_bounds: Vector4 = Vector4.ZERO
+var _water_interaction_last_enabled: bool = false
+var _water_dynamic_flow_last_enabled: bool = false
+var _water_interaction_last_debug: bool = false
+var _water_interaction_last_body_atlas_texture: Texture2D = null
+var _water_interaction_last_body_atlas_bounds: Vector4 = Vector4.ZERO
+var _water_interaction_last_body_atlas_available: bool = false
+var _water_interaction_last_surface_height: float = NAN
+var _water_interaction_renderer_sync_count: int = 0
+var _local_flow_obstacles: Array[Dictionary] = []
 var _terrain: Terrain3D = null
 var _camera: Camera3D = null
 var _enabled: bool = true
@@ -101,6 +126,15 @@ var _active_shore_mask_rd: RID = RID()
 var _active_shore_mask_image: Image = null
 var _active_shore_mask_bounds: Rect2 = Rect2(-8000.0, -8000.0, 16000.0, 16000.0)
 var _active_shore_fade_distance: float = 50.0
+var _water_body_atlas_image: Image = null
+var _water_body_atlas_texture: ImageTexture = null
+var _water_body_atlas_rd: RID = RID()
+var _water_body_atlas_bounds: Rect2 = Rect2()
+var _water_body_atlas_center_xz: Vector2 = Vector2.INF
+var _water_body_atlas_frame: int = -1
+var _water_body_atlas_last_rebuild_usec: int = 0
+var _water_body_atlas_total_rebuild_usec: int = 0
+var _water_body_atlas_rebuild_count: int = 0
 var _current_shore_wave_amplitude: float = 0.18
 var _current_shore_wave_frequency: float = SHORE_WAVE_SPATIAL_FREQUENCY
 var _current_shore_wave_speed: float = 0.4
@@ -239,6 +273,7 @@ func _deferred_init() -> void:
 	_update_shader_parameters()
 	_setup_spray_layer()
 	_setup_underwater_particulates_layer()
+	_setup_water_interaction_layer()
 	# Shore mask — vertex dampening only (CREST OceanDepthCache pattern).
 	# Fragment-side shore visuals remain depth-driven (water_thickness).
 	_load_shore_mask()
@@ -273,6 +308,152 @@ func _set_active_shore_mask(texture: Texture2D, bounds: Rect2, fade_distance: fl
 		_ocean_mesh.set_shore_mask(texture, bounds, fade_distance)
 	if _ocean_spray:
 		_ocean_spray.set_shore_mask(texture, bounds)
+
+
+func _setup_water_interaction_layer() -> void:
+	if _water_interaction_sim != null:
+		return
+	_water_interaction_sim = WaterInteractionSimScript.new()
+	_water_interaction_sim.name = "WaterInteractionSim"
+	add_child(_water_interaction_sim)
+	_sync_water_interaction_to_renderers(true)
+
+
+func _dispose_water_interaction_layer() -> void:
+	if _water_interaction_sim == null:
+		return
+	var sim := _water_interaction_sim
+	_water_interaction_sim = null
+	if sim.get_parent() == self:
+		remove_child(sim)
+	sim.queue_free()
+	_water_interactors.clear()
+	_sync_water_interaction_to_renderers(true)
+
+
+func _update_water_interaction_layer(delta: float) -> void:
+	update_local_water_interactions(delta)
+
+
+func update_local_water_interactions(delta: float, center_world: Vector3 = Vector3.INF) -> void:
+	if _water_interaction_sim == null:
+		_setup_water_interaction_layer()
+	if _water_interaction_sim == null:
+		return
+	var center := center_world
+	if center == Vector3.INF and _camera != null and is_instance_valid(_camera):
+		center = _camera.global_position
+	elif center == Vector3.INF:
+		center = Vector3(0.0, sea_level, 0.0)
+	if _water_body_registry.has_sources():
+		_update_water_body_atlas(center)
+	else:
+		_clear_water_body_atlas()
+	_water_interaction_sim.configure_water_body_mask(_water_body_atlas_rd, get_water_body_atlas_bounds(), has_water_body_atlas())
+	_water_interaction_sim.update_sim(delta, center)
+	_sync_water_interaction_to_renderers()
+
+
+func _sync_water_interaction_to_renderers(force: bool = false) -> void:
+	var texture: Texture2D = null
+	var dynamic_flow_texture: Texture2D = null
+	var bounds := Vector4.ZERO
+	var active := false
+	var dynamic_flow_active := false
+	if _water_interaction_sim == null:
+		active = false
+	else:
+		var stats := _water_interaction_sim.get_stats()
+		texture = _water_interaction_sim.get_texture()
+		dynamic_flow_texture = _water_interaction_sim.get_flow_texture()
+		bounds = _water_interaction_sim.get_bounds()
+		active = bool(stats.get("enabled", false)) and texture != null
+		dynamic_flow_active = active and dynamic_flow_texture != null
+	var body_atlas_texture := get_water_body_atlas_texture()
+	var body_atlas_bounds := get_water_body_atlas_bounds()
+	var body_atlas_available := has_water_body_atlas()
+	if not force \
+			and _water_interaction_sync_initialized \
+			and texture == _water_interaction_last_texture \
+			and dynamic_flow_texture == _water_dynamic_flow_last_texture \
+			and bounds == _water_interaction_last_bounds \
+			and active == _water_interaction_last_enabled \
+			and dynamic_flow_active == _water_dynamic_flow_last_enabled \
+			and _water_interaction_debug_enabled == _water_interaction_last_debug \
+			and body_atlas_texture == _water_interaction_last_body_atlas_texture \
+			and body_atlas_bounds == _water_interaction_last_body_atlas_bounds \
+			and body_atlas_available == _water_interaction_last_body_atlas_available \
+			and sea_level == _water_interaction_last_surface_height:
+		return
+	_water_interaction_sync_initialized = true
+	_water_interaction_last_texture = texture
+	_water_dynamic_flow_last_texture = dynamic_flow_texture
+	_water_interaction_last_bounds = bounds
+	_water_interaction_last_enabled = active
+	_water_dynamic_flow_last_enabled = dynamic_flow_active
+	_water_interaction_last_debug = _water_interaction_debug_enabled
+	_water_interaction_last_body_atlas_texture = body_atlas_texture
+	_water_interaction_last_body_atlas_bounds = body_atlas_bounds
+	_water_interaction_last_body_atlas_available = body_atlas_available
+	_water_interaction_last_surface_height = sea_level
+	if _ocean_mesh != null:
+		_ocean_mesh.set_water_interaction_texture(texture, bounds, active)
+		if _ocean_mesh.has_method("set_water_interaction_surface_height"):
+			_ocean_mesh.call("set_water_interaction_surface_height", sea_level)
+		if _ocean_mesh.has_method("set_water_body_atlas_texture"):
+			_ocean_mesh.call(
+				"set_water_body_atlas_texture",
+				body_atlas_texture,
+				body_atlas_bounds,
+				body_atlas_available
+			)
+		_ocean_mesh.set_water_interaction_debug_enabled(_water_interaction_debug_enabled)
+	_sync_registered_water_interaction_renderers(
+		texture,
+		bounds,
+		active,
+		_water_interaction_debug_enabled,
+		body_atlas_texture,
+		body_atlas_bounds,
+		body_atlas_available,
+		dynamic_flow_texture,
+		bounds,
+		dynamic_flow_active
+	)
+
+
+func _sync_registered_water_interaction_renderers(
+	texture: Texture2D,
+	bounds: Vector4,
+	active: bool,
+	debug_enabled: bool,
+	body_atlas_texture: Texture2D,
+	body_atlas_bounds: Vector4,
+	body_atlas_available: bool,
+	dynamic_flow_texture: Texture2D,
+	dynamic_flow_bounds: Vector4,
+	dynamic_flow_active: bool
+) -> void:
+	for i in range(_water_interaction_renderers.size() - 1, -1, -1):
+		var renderer := _water_interaction_renderers[i]
+		if not is_instance_valid(renderer):
+			_water_interaction_renderers.remove_at(i)
+			continue
+		if renderer.has_method("sync_water_interaction_texture"):
+			renderer.call(
+				"sync_water_interaction_texture",
+				texture,
+				bounds,
+				active,
+				debug_enabled,
+				body_atlas_texture,
+				body_atlas_bounds,
+				body_atlas_available,
+				dynamic_flow_texture,
+				dynamic_flow_bounds,
+				dynamic_flow_active
+			)
+			_water_interaction_renderer_sync_count += 1
 
 
 func _load_shore_mask() -> void:
@@ -317,6 +498,9 @@ func _process(delta: float) -> void:
 			_ocean_spray.set_camera(_camera)
 		if _underwater_particulates:
 			_underwater_particulates.set_camera(_camera)
+		_update_water_body_atlas(cam_pos)
+	else:
+		_clear_water_body_atlas()
 
 	# Drive FFT pipeline updates (rate-limited)
 	if _wave_generator and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH:
@@ -334,6 +518,7 @@ func _process(delta: float) -> void:
 		_ocean_spray.set_ocean_time(_time)
 	if _underwater_particulates:
 		_underwater_particulates.sync_from_water_state(get_water_surface_state())
+	_update_water_interaction_layer(delta)
 
 	# Push sun direction to the ocean surface shader for SSS backlight.
 	# Scan the scene tree at most once every 60 frames so we notice late-spawned
@@ -359,6 +544,40 @@ func _process(delta: float) -> void:
 				_displacement_cpu = _displacement_cpu_per_cascade[0]
 			else:
 				_displacement_cpu = PackedByteArray()
+
+
+func _physics_process(delta: float) -> void:
+	if not _system_enabled or not _enabled or _water_interactors.is_empty():
+		return
+	var state := get_water_surface_state()
+	for i in range(_water_interactors.size() - 1, -1, -1):
+		var interactor := _water_interactors[i]
+		if not is_instance_valid(interactor):
+			_water_interactors.remove_at(i)
+			continue
+		if not interactor.has_method("gather_impulses"):
+			continue
+		var impulses: Array = interactor.call("gather_impulses", delta, state)
+		for impulse: Dictionary in impulses:
+			emit_water_impulse(
+				impulse["position"],
+				float(impulse["radius_m"]),
+				float(impulse["strength"]),
+				impulse["kind"],
+				impulse["body_id"],
+				impulse.get("wake_direction", Vector2.ZERO),
+				float(impulse.get("wake_length_m", 0.0))
+			)
+		if interactor.has_method("gather_flow_obstacles"):
+			var obstacles: Array = interactor.call("gather_flow_obstacles", delta, state)
+			for obstacle: Dictionary in obstacles:
+				emit_water_flow_obstacle(
+					obstacle["position"],
+					float(obstacle["radius_m"]),
+					float(obstacle.get("block_strength", 0.0)),
+					float(obstacle.get("wake_strength", 0.0)),
+					obstacle.get("body_id", WaterSurfaceState.WATER_BODY_NONE)
+				)
 
 
 func _find_active_camera() -> Camera3D:
@@ -911,6 +1130,556 @@ func get_wave_velocity(_world_pos: Vector3) -> Vector3:
 	return Vector3.ZERO
 
 
+func get_water_body_registry() -> RefCounted:
+	return _water_body_registry
+
+
+func register_water_body(body: RefCounted) -> Error:
+	var err: Error = _water_body_registry.register_body(body)
+	if err == OK:
+		_clear_water_body_atlas()
+	return err
+
+
+func unregister_water_body(body: RefCounted) -> void:
+	_water_body_registry.unregister_body(body)
+	_clear_water_body_atlas()
+
+
+func unregister_water_body_id(body_id: StringName) -> void:
+	_water_body_registry.unregister_body_id(body_id)
+	_clear_water_body_atlas()
+
+
+func register_water_body_provider(provider: RefCounted) -> Error:
+	var err: Error = _water_body_registry.register_provider(provider)
+	if err == OK:
+		_clear_water_body_atlas()
+	return err
+
+
+func unregister_water_body_provider(provider: RefCounted) -> void:
+	_water_body_registry.unregister_provider(provider)
+	_clear_water_body_atlas()
+
+
+func set_world_water_provider(provider: RefCounted) -> Error:
+	if _world_water_provider != null:
+		_water_body_registry.unregister_provider(_world_water_provider)
+	_world_water_provider = provider
+	if provider == null:
+		_clear_water_body_atlas()
+		return OK
+	return register_water_body_provider(provider)
+
+
+func get_water_body_runtime_status() -> Dictionary:
+	var registry_stats: Dictionary = {}
+	if _water_body_registry.has_method("get_stats"):
+		registry_stats = _water_body_registry.call("get_stats")
+	return {
+		"atlas_available": has_water_body_atlas(),
+		"atlas_rebuild_last_usec": _water_body_atlas_last_rebuild_usec,
+		"atlas_rebuild_total_usec": _water_body_atlas_total_rebuild_usec,
+		"atlas_rebuild_count": _water_body_atlas_rebuild_count,
+		"atlas_resolution": WATER_BODY_ATLAS_RESOLUTION if has_water_body_atlas() else 0,
+		"atlas_bounds": _water_body_atlas_bounds,
+		"registry": registry_stats,
+		"world_provider": _get_world_water_provider_status(),
+	}
+
+
+func force_update_water_body_atlas(center: Vector3) -> void:
+	_rebuild_water_body_atlas(center)
+
+
+func get_water_body_atlas_texture() -> Texture2D:
+	return _water_body_atlas_texture
+
+
+func get_water_body_atlas_texture_rd() -> RID:
+	return _water_body_atlas_rd
+
+
+func get_water_body_atlas_image() -> Image:
+	return _water_body_atlas_image
+
+
+func get_water_body_atlas_bounds_rect() -> Rect2:
+	return _water_body_atlas_bounds
+
+
+func get_water_body_atlas_bounds() -> Vector4:
+	return Vector4(
+		_water_body_atlas_bounds.position.x,
+		_water_body_atlas_bounds.position.y,
+		_water_body_atlas_bounds.size.x,
+		_water_body_atlas_bounds.size.y
+	)
+
+
+func has_water_body_atlas() -> bool:
+	return _water_body_atlas_texture != null and _water_body_atlas_image != null and _water_body_atlas_bounds.size != Vector2.ZERO
+
+
+func sample_water_body_atlas(world_pos: Vector3) -> Dictionary:
+	if not has_water_body_atlas():
+		return {}
+	var uv := Vector2(
+		(world_pos.x - _water_body_atlas_bounds.position.x) / maxf(_water_body_atlas_bounds.size.x, 0.001),
+		(world_pos.z - _water_body_atlas_bounds.position.y) / maxf(_water_body_atlas_bounds.size.y, 0.001)
+	)
+	if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+		return {}
+	var size := _water_body_atlas_image.get_size()
+	var px := clampi(floori(uv.x * float(size.x)), 0, size.x - 1)
+	var py := clampi(floori(uv.y * float(size.y)), 0, size.y - 1)
+	var sample := _water_body_atlas_image.get_pixel(px, py)
+	var coverage := clampf(sample.r, 0.0, 1.0)
+	return {
+		"coverage": coverage,
+		"height": sample.g,
+		"body_gate": smoothstep(WaterSurfaceState.COVERAGE_GATE_START, WaterSurfaceState.COVERAGE_GATE_END, coverage),
+	}
+
+
+func _update_water_body_atlas(camera_pos: Vector3) -> void:
+	if not _water_body_registry.has_sources():
+		_clear_water_body_atlas()
+		return
+	var center_xz := Vector2(camera_pos.x, camera_pos.z)
+	var moved_enough := _water_body_atlas_center_xz == Vector2.INF \
+		or center_xz.distance_to(_water_body_atlas_center_xz) >= WATER_BODY_ATLAS_UPDATE_MOVE_M
+	if not moved_enough and has_water_body_atlas():
+		return
+	_rebuild_water_body_atlas(camera_pos)
+
+
+func _rebuild_water_body_atlas(center: Vector3) -> void:
+	var rebuild_start_usec := Time.get_ticks_usec()
+	if not _water_body_registry.has_sources():
+		_clear_water_body_atlas()
+		return
+	var resolution: int = WATER_BODY_ATLAS_RESOLUTION
+	var extent: float = WATER_BODY_ATLAS_EXTENT_M
+	var half_extent: float = extent * 0.5
+	var bounds := Rect2(center.x - half_extent, center.z - half_extent, extent, extent)
+	var image := _water_body_atlas_image
+	if image == null or image.get_width() != resolution or image.get_height() != resolution or image.get_format() != Image.FORMAT_RGBAF:
+		image = Image.create(resolution, resolution, false, Image.FORMAT_RGBAF)
+	var inv_resolution: float = 1.0 / float(resolution)
+	for y: int in resolution:
+		var world_z := bounds.position.y + (float(y) + 0.5) * extent * inv_resolution
+		for x: int in resolution:
+			var world_x := bounds.position.x + (float(x) + 0.5) * extent * inv_resolution
+			var query_pos := Vector3(world_x, center.y, world_z)
+			var coverage: float = _water_body_registry.sample_coverage(query_pos, 0.0)
+			var height: float = 0.0
+			if coverage > WaterSurfaceState.COVERAGE_GATE_START:
+				height = _water_body_registry.sample_height(query_pos, sea_level)
+			image.set_pixel(x, y, Color(coverage, height, 0.0, 1.0 if coverage > 0.0 else 0.0))
+	_water_body_atlas_image = image
+	_water_body_atlas_bounds = bounds
+	_water_body_atlas_center_xz = Vector2(center.x, center.z)
+	_water_body_atlas_frame = Engine.get_process_frames()
+	if _water_body_atlas_texture == null:
+		_water_body_atlas_texture = ImageTexture.create_from_image(image)
+	else:
+		_water_body_atlas_texture.update(image)
+	_water_body_atlas_rd = RID()
+	if _water_body_atlas_texture != null:
+		var texture_rid := _water_body_atlas_texture.get_rid()
+		if texture_rid.is_valid():
+			_water_body_atlas_rd = RenderingServer.texture_get_rd_texture(texture_rid)
+	_water_body_atlas_last_rebuild_usec = Time.get_ticks_usec() - rebuild_start_usec
+	_water_body_atlas_total_rebuild_usec += _water_body_atlas_last_rebuild_usec
+	_water_body_atlas_rebuild_count += 1
+
+
+func _clear_water_body_atlas() -> void:
+	_water_body_atlas_image = null
+	_water_body_atlas_texture = null
+	_water_body_atlas_rd = RID()
+	_water_body_atlas_bounds = Rect2()
+	_water_body_atlas_center_xz = Vector2.INF
+	_water_body_atlas_frame = -1
+
+
+func _get_world_water_provider_status() -> Dictionary:
+	if _world_water_provider == null:
+		return {}
+	if _world_water_provider.has_method("get_runtime_status"):
+		var status_v: Variant = _world_water_provider.call("get_runtime_status")
+		if status_v is Dictionary:
+			return status_v
+	var status := {
+		"provider_id": StringName(_world_water_provider.get("provider_id")),
+		"active_hydrology_tasks": 0,
+		"cached_regions": 0,
+		"cache_memory_bytes_estimate": 0,
+	}
+	if "_pending_region_tasks" in _world_water_provider:
+		status["active_hydrology_tasks"] = _world_water_provider._pending_region_tasks.size()
+	if "_region_cache" in _world_water_provider:
+		var cache: Dictionary = _world_water_provider._region_cache
+		status["cached_regions"] = cache.size()
+		var bytes := 0
+		for region_data_v: Variant in cache.values():
+			if not region_data_v is Dictionary:
+				continue
+			var region_data: Dictionary = region_data_v as Dictionary
+			var flow_image: Image = region_data.get("flow_image") as Image
+			if flow_image == null:
+				continue
+			bytes += flow_image.get_width() * flow_image.get_height() * 4
+		status["cache_memory_bytes_estimate"] = bytes
+	return status
+
+
+func sample_water_height(world_pos: Vector3) -> float:
+	var registered_height: float = _water_body_registry.sample_height(world_pos, NAN)
+	if not is_nan(registered_height):
+		return registered_height
+	if _system_enabled and _enabled and get_water_coverage(world_pos) > WaterSurfaceState.COVERAGE_GATE_START:
+		return get_wave_height(world_pos)
+	return -INF
+
+
+func sample_water_displacement(world_pos: Vector3) -> Vector3:
+	if _water_body_registry.sample_coverage(world_pos, 0.0) > WaterSurfaceState.COVERAGE_GATE_START:
+		return Vector3.ZERO
+	return get_wave_displacement(world_pos)
+
+
+func sample_water_normal(world_pos: Vector3) -> Vector3:
+	if _water_body_registry.sample_coverage(world_pos, 0.0) > WaterSurfaceState.COVERAGE_GATE_START:
+		return _water_body_registry.sample_normal(world_pos, Vector3.UP)
+	return get_wave_normal(world_pos)
+
+
+func sample_water_gradient(world_pos: Vector3) -> Vector2:
+	if _water_body_registry.sample_coverage(world_pos, 0.0) > WaterSurfaceState.COVERAGE_GATE_START:
+		return _water_body_registry.sample_gradient(world_pos, Vector2.ZERO)
+	return get_wave_gradient(world_pos)
+
+
+func sample_water_velocity(world_pos: Vector3) -> Vector3:
+	return sample_base_water_velocity(world_pos) + _sample_local_flow_delta(world_pos)
+
+
+func sample_base_water_velocity(world_pos: Vector3) -> Vector3:
+	var registered_velocity: Vector3 = _sample_base_water_velocity(world_pos)
+	if registered_velocity != Vector3.INF:
+		return registered_velocity
+	return get_wave_velocity(world_pos) if _system_enabled and _enabled else Vector3.ZERO
+
+
+func _sample_base_water_velocity(world_pos: Vector3) -> Vector3:
+	return _water_body_registry.sample_velocity(world_pos, Vector3.INF)
+
+
+func sample_water_coverage(world_pos: Vector3) -> float:
+	var registered_coverage: float = _water_body_registry.sample_coverage(world_pos, 0.0)
+	if registered_coverage > WaterSurfaceState.COVERAGE_GATE_START:
+		return registered_coverage
+	return get_water_coverage(world_pos)
+
+
+func sample_signed_water_shore_distance(world_pos: Vector3) -> float:
+	if _water_body_registry.sample_coverage(world_pos, 0.0) > WaterSurfaceState.COVERAGE_GATE_START:
+		return 0.0
+	return get_signed_shore_distance(world_pos)
+
+
+func sample_water_shore_side(world_pos: Vector3) -> int:
+	if _water_body_registry.sample_coverage(world_pos, 0.0) > WaterSurfaceState.COVERAGE_GATE_START:
+		return WaterSurfaceState.SHORE_SIDE_WATER
+	return get_shore_side(world_pos)
+
+
+func sample_water_body_id_at(world_pos: Vector3) -> StringName:
+	var registered_id: StringName = _water_body_registry.sample_water_body_id(world_pos, WaterSurfaceState.WATER_BODY_NONE)
+	if registered_id != WaterSurfaceState.WATER_BODY_NONE:
+		return registered_id
+	return get_water_body_id_at(world_pos)
+
+
+func sample_water_surface_query(world_pos: Vector3) -> Dictionary:
+	var registered: Dictionary = _water_body_registry.sample_surface_query(world_pos)
+	if not registered.is_empty():
+		return registered
+	var coverage := get_water_coverage(world_pos)
+	var has_ocean := _system_enabled and _enabled and coverage > WaterSurfaceState.COVERAGE_GATE_START
+	var height := get_wave_height(world_pos) if has_ocean else -INF
+	return {
+		"height": height,
+		"displacement": get_wave_displacement(world_pos) if has_ocean else Vector3.ZERO,
+		"normal": get_wave_normal(world_pos) if has_ocean else Vector3.UP,
+		"gradient": get_wave_gradient(world_pos) if has_ocean else Vector2.ZERO,
+		"velocity": get_wave_velocity(world_pos) if has_ocean else Vector3.ZERO,
+		"coverage": coverage if has_ocean else 0.0,
+		"body_gate": WaterSurfaceState.coverage_to_body_gate_static(coverage if has_ocean else 0.0),
+		"depth": height - world_pos.y if has_ocean else -INF,
+		"water_body_id": get_water_body_id_at(world_pos) if has_ocean else WaterSurfaceState.WATER_BODY_NONE,
+		"has_water_body": has_ocean,
+		"coverage_source": get_water_query_source(),
+	}
+
+
+func emit_water_impulse(
+	world_pos: Vector3,
+	radius_m: float,
+	strength: float,
+	kind: StringName = &"impact",
+	body_id: StringName = &"",
+	wake_direction: Vector2 = Vector2.ZERO,
+	wake_length_m: float = 0.0,
+) -> void:
+	if not _system_enabled or not _enabled:
+		return
+	if _water_interaction_sim == null:
+		_setup_water_interaction_layer()
+	if _water_interaction_sim == null:
+		return
+	var sampled_body_id := body_id
+	if sampled_body_id == &"":
+		sampled_body_id = sample_water_body_id_at(world_pos)
+	if sampled_body_id == WaterSurfaceState.WATER_BODY_NONE:
+		return
+	var coverage := sample_water_coverage(world_pos)
+	if coverage <= WaterSurfaceState.COVERAGE_GATE_START:
+		return
+	var water_height := sample_water_height(world_pos)
+	if is_nan(water_height) or absf(water_height) >= 1.0e20:
+		return
+	var shaped_strength := strength
+	match kind:
+		&"wake":
+			shaped_strength *= 0.65
+		&"projectile":
+			shaped_strength *= 1.25
+		_:
+			shaped_strength = strength
+	var body_gate := smoothstep(WaterSurfaceState.COVERAGE_GATE_START, WaterSurfaceState.COVERAGE_GATE_END, clampf(coverage, 0.0, 1.0))
+	var requires_atlas := sampled_body_id != WaterSurfaceState.WATER_BODY_OCEAN and has_water_body_atlas()
+	_water_interaction_sim.queue_impulse(
+		world_pos,
+		radius_m,
+		shaped_strength,
+		water_height,
+		body_gate,
+		requires_atlas,
+		wake_direction,
+		wake_length_m
+	)
+
+
+func emit_water_flow_obstacle(
+	world_pos: Vector3,
+	radius_m: float,
+	block_strength: float,
+	wake_strength: float,
+	body_id: StringName = &""
+) -> void:
+	var sampled_body_id := body_id
+	if sampled_body_id == &"":
+		sampled_body_id = sample_water_body_id_at(world_pos)
+	if sampled_body_id == WaterSurfaceState.WATER_BODY_NONE:
+		return
+	var coverage := sample_water_coverage(world_pos)
+	if coverage <= WaterSurfaceState.COVERAGE_GATE_START:
+		return
+	var water_height := sample_water_height(world_pos)
+	if is_nan(water_height) or absf(water_height) >= 1.0e20:
+		return
+	var base_velocity := _sample_base_water_velocity(world_pos)
+	if base_velocity == Vector3.INF:
+		base_velocity = get_wave_velocity(world_pos) if _system_enabled and _enabled else Vector3.ZERO
+	if Vector2(base_velocity.x, base_velocity.z).length_squared() <= 0.0001:
+		return
+	var body_gate := smoothstep(WaterSurfaceState.COVERAGE_GATE_START, WaterSurfaceState.COVERAGE_GATE_END, clampf(coverage, 0.0, 1.0))
+	var requires_atlas := sampled_body_id != WaterSurfaceState.WATER_BODY_OCEAN and has_water_body_atlas()
+	if _water_interaction_sim == null:
+		_setup_water_interaction_layer()
+	if _water_interaction_sim != null:
+		_water_interaction_sim.queue_flow_obstacle(
+			world_pos,
+			radius_m,
+			base_velocity,
+			block_strength,
+			wake_strength,
+			water_height,
+			body_gate,
+			requires_atlas
+		)
+	_track_local_flow_obstacle(world_pos, radius_m, base_velocity, block_strength, wake_strength)
+
+
+func _track_local_flow_obstacle(
+	world_pos: Vector3,
+	radius_m: float,
+	base_velocity: Vector3,
+	block_strength: float,
+	wake_strength: float
+) -> void:
+	var now := Time.get_ticks_msec()
+	_local_flow_obstacles.append({
+		"position": Vector2(world_pos.x, world_pos.z),
+		"radius": clampf(radius_m, 0.08, 32.0),
+		"base_velocity": Vector2(base_velocity.x, base_velocity.z),
+		"block_strength": clampf(block_strength, 0.0, 2.0),
+		"wake_strength": clampf(wake_strength, 0.0, 2.0),
+		"expires_msec": now + 220,
+	})
+	if _local_flow_obstacles.size() > 96:
+		_local_flow_obstacles = _local_flow_obstacles.slice(_local_flow_obstacles.size() - 96)
+
+
+func _sample_local_flow_delta(world_pos: Vector3) -> Vector3:
+	if _local_flow_obstacles.is_empty():
+		return Vector3.ZERO
+	var now := Time.get_ticks_msec()
+	var world_xz := Vector2(world_pos.x, world_pos.z)
+	var delta := Vector2.ZERO
+	var kept: Array[Dictionary] = []
+	for obstacle: Dictionary in _local_flow_obstacles:
+		if int(obstacle.get("expires_msec", 0)) < now:
+			continue
+		kept.append(obstacle)
+		var center: Vector2 = obstacle.get("position", Vector2.ZERO)
+		var base_velocity: Vector2 = obstacle.get("base_velocity", Vector2.ZERO)
+		var base_speed := base_velocity.length()
+		if base_speed <= 0.001:
+			continue
+		var radius := maxf(float(obstacle.get("radius", 0.1)), 0.08)
+		var to_sample := world_xz - center
+		var dist := to_sample.length()
+		var support := radius * 5.0
+		if dist > support:
+			continue
+		var dir := base_velocity / base_speed
+		var side := Vector2(-dir.y, dir.x)
+		var along := to_sample.dot(dir)
+		var lateral := to_sample.dot(side)
+		var core := exp(-pow(dist / radius, 2.0))
+		var downstream := smoothstep(-radius * 0.5, radius * 2.0, along) * (1.0 - smoothstep(radius * 2.0, support, along))
+		var side_gate := smoothstep(0.0, radius * 0.95, absf(lateral)) * (1.0 - smoothstep(radius * 0.95, radius * 2.8, absf(lateral)))
+		var block := float(obstacle.get("block_strength", 0.0))
+		var wake := float(obstacle.get("wake_strength", 0.0))
+		var slow := -base_velocity * block * core
+		var deflect := side * (1.0 if lateral >= 0.0 else -1.0) * base_speed * wake * side_gate * downstream * 0.55
+		delta += slow + deflect
+	_local_flow_obstacles = kept
+	if delta.length() > 8.0:
+		delta = delta.normalized() * 8.0
+	return Vector3(delta.x, 0.0, delta.y)
+
+
+func register_water_interactor(node: Node, options: Dictionary = {}) -> void:
+	if node == null or _water_interactors.has(node):
+		return
+	_water_interactors.append(node)
+	if not options.is_empty() and node.has_method("apply_water_interaction_options"):
+		node.call("apply_water_interaction_options", options)
+
+
+func unregister_water_interactor(node: Node) -> void:
+	var idx := _water_interactors.find(node)
+	if idx >= 0:
+		_water_interactors.remove_at(idx)
+
+
+func register_water_interaction_renderer(node: Node) -> void:
+	if node == null or _water_interaction_renderers.has(node):
+		return
+	_water_interaction_renderers.append(node)
+	_sync_one_water_interaction_renderer(node)
+
+
+func unregister_water_interaction_renderer(node: Node) -> void:
+	var idx := _water_interaction_renderers.find(node)
+	if idx >= 0:
+		_water_interaction_renderers.remove_at(idx)
+
+
+func _sync_one_water_interaction_renderer(node: Node) -> void:
+	if not is_instance_valid(node) or not node.has_method("sync_water_interaction_texture"):
+		return
+	var texture: Texture2D = null
+	var dynamic_flow_texture: Texture2D = null
+	var bounds := Vector4.ZERO
+	var active := false
+	if _water_interaction_sim != null:
+		var stats := _water_interaction_sim.get_stats()
+		texture = _water_interaction_sim.get_texture()
+		dynamic_flow_texture = _water_interaction_sim.get_flow_texture()
+		bounds = _water_interaction_sim.get_bounds()
+		active = bool(stats.get("enabled", false)) and texture != null
+	node.call(
+		"sync_water_interaction_texture",
+		texture,
+		bounds,
+		active,
+		_water_interaction_debug_enabled,
+		get_water_body_atlas_texture(),
+		get_water_body_atlas_bounds(),
+		has_water_body_atlas(),
+		dynamic_flow_texture,
+		bounds,
+		active and dynamic_flow_texture != null
+	)
+	_water_interaction_renderer_sync_count += 1
+
+
+func get_water_interaction_texture() -> Texture2D:
+	if _water_interaction_sim == null:
+		return null
+	return _water_interaction_sim.get_texture()
+
+
+func get_water_dynamic_flow_texture() -> Texture2D:
+	if _water_interaction_sim == null:
+		return null
+	return _water_interaction_sim.get_flow_texture()
+
+
+func get_water_interaction_bounds() -> Vector4:
+	if _water_interaction_sim == null:
+		return Vector4.ZERO
+	return _water_interaction_sim.get_bounds()
+
+
+func get_water_interaction_stats() -> Dictionary:
+	if _water_interaction_sim == null:
+		return {
+			"enabled": false,
+			"debug_enabled": _water_interaction_debug_enabled,
+			"atlas_size": 0,
+			"dispatch_count": 0,
+			"last_impulse_count": 0,
+			"pending_impulse_count": 0,
+			"gpu_ms": -1.0,
+			"cpu_upload_us": 0,
+			"culled_impulses_total": 0,
+			"active_dispatch": false,
+			"atlas_scroll_px": Vector2i.ZERO,
+			"renderer_sync_count": _water_interaction_renderer_sync_count,
+		}
+	var stats := _water_interaction_sim.get_stats()
+	stats["debug_enabled"] = _water_interaction_debug_enabled
+	stats["renderer_sync_count"] = _water_interaction_renderer_sync_count
+	return stats
+
+
+func set_water_interaction_debug_enabled(enabled: bool) -> void:
+	_water_interaction_debug_enabled = enabled
+	_sync_water_interaction_to_renderers()
+
+
+func is_water_interaction_debug_enabled() -> bool:
+	return _water_interaction_debug_enabled
+
+
 func get_water_coverage(world_pos: Vector3) -> float:
 	if not _system_enabled or not _enabled:
 		return 0.0
@@ -1023,7 +1792,13 @@ func is_in_ocean(world_pos: Vector3) -> bool:
 ## Check if the camera is currently submerged
 func is_camera_submerged() -> bool:
 	if _camera:
-		return _camera.global_position.y < sea_level + 2.0
+		var state := get_water_surface_state()
+		if state == null or not state.has_camera_water():
+			return false
+		var water_level := state.get_camera_water_level(NAN)
+		if is_nan(water_level) or water_level <= -1.0e20:
+			return false
+		return _camera.global_position.y < water_level + 0.02
 	return false
 
 
@@ -1189,6 +1964,8 @@ func set_gpu_wave_readback_enabled(enabled: bool) -> void:
 
 
 func get_water_query_source() -> StringName:
+	if _water_body_registry.has_sources():
+		return &"water_body_registry"
 	if not _system_enabled or not _enabled:
 		return &"disabled"
 	var is_flat := _ocean_mesh != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.FLAT
@@ -1220,10 +1997,30 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.cascade_count = _cascade_parameters.size()
 	state.displacement_texture_rd = displacement_rd
 	state.normal_texture_rd = normal_rd
-	state.water_body_id = WaterSurfaceState.WATER_BODY_OCEAN if _system_enabled and _enabled else WaterSurfaceState.WATER_BODY_NONE
+	if _water_interaction_sim != null:
+		state.interaction_texture_rd = _water_interaction_sim.get_texture_rd()
+		state.interaction_bounds = _water_interaction_sim.get_bounds()
+		state.interaction_ready = state.interaction_texture_rd.is_valid()
+	var has_registered_water: bool = _water_body_registry.has_sources()
+	if _system_enabled and _enabled:
+		state.water_body_id = WaterSurfaceState.WATER_BODY_OCEAN
+	elif has_registered_water:
+		state.water_body_id = WaterSurfaceState.WATER_BODY_REGISTERED
+	else:
+		state.water_body_id = WaterSurfaceState.WATER_BODY_NONE
 	state.water_body_index = 1 if _system_enabled and _enabled else 0
-	state.coverage_available = _system_enabled and _enabled
-	if _active_shore_mask_image != null:
+	state.coverage_available = (_system_enabled and _enabled) or has_registered_water
+	if _camera != null and is_instance_valid(_camera):
+		var camera_pos := _camera.global_position
+		state.camera_water_coverage = sample_water_coverage(camera_pos)
+		state.camera_water_body_id = sample_water_body_id_at(camera_pos)
+		if state.camera_water_coverage > WaterSurfaceState.COVERAGE_GATE_START and state.camera_water_body_id != WaterSurfaceState.WATER_BODY_NONE:
+			state.camera_water_level = sample_water_height(camera_pos)
+		else:
+			state.camera_water_level = NAN
+	if has_registered_water:
+		state.coverage_source = &"water_body_registry"
+	elif _active_shore_mask_image != null:
 		state.coverage_source = &"shore_mask"
 	elif _shore_mask != null:
 		state.coverage_source = &"runtime_shore_mask"
@@ -1241,6 +2038,13 @@ func get_water_surface_state() -> WaterSurfaceState:
 		_active_shore_mask_bounds.size.y
 	)
 	state.shore_fade_distance = _active_shore_fade_distance
+	if has_water_body_atlas():
+		state.water_body_atlas_texture = _water_body_atlas_texture
+		state.water_body_atlas_image = _water_body_atlas_image
+		state.water_body_atlas_rd = _water_body_atlas_rd
+		state.water_body_atlas_bounds = get_water_body_atlas_bounds()
+		state.water_body_atlas_resolution = Vector2i(WATER_BODY_ATLAS_RESOLUTION, WATER_BODY_ATLAS_RESOLUTION)
+		state.water_body_atlas_available = true
 	state.shore_wave_amplitude = _current_shore_wave_amplitude
 	state.shore_wave_frequency = _current_shore_wave_frequency
 	state.shore_wave_speed = _current_shore_wave_speed
@@ -1258,7 +2062,7 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.readback_ready = use_gpu_wave_readback and _displacement_cpu_per_cascade.size() > 0
 	state.gpu_cascade_ready_mask = _cascade_ready_mask(_cascade_parameters.size()) if state.fft_ready else 0
 	state.cpu_cascade_ready_mask = _readback_cascade_ready_mask()
-	state.cpu_query_available = _system_enabled and _enabled
+	state.cpu_query_available = (_system_enabled and _enabled) or has_registered_water
 	state.cpu_query_source = get_water_query_source()
 	state.cpu_readback_bytes_per_frame = get_water_query_readback_bytes_per_frame()
 	state.displacement_texture_size = _displacement_size
@@ -1271,14 +2075,17 @@ func get_water_surface_state() -> WaterSurfaceState:
 		state.render_clipmap_ring_count = _ocean_mesh.get_clipmap_ring_count()
 		state.render_projected_grid_dim = _ocean_mesh.get_projected_grid_dim()
 		state.render_projected_grid_overscan = _ocean_mesh.get_projected_grid_overscan()
-	state.height_query = Callable(self, "get_wave_height")
-	state.displacement_query = Callable(self, "get_wave_displacement")
-	state.normal_query = Callable(self, "get_wave_normal")
-	state.gradient_query = Callable(self, "get_wave_gradient")
-	state.coverage_query = Callable(self, "get_water_coverage")
-	state.signed_shore_distance_query = Callable(self, "get_signed_shore_distance")
-	state.shore_side_query = Callable(self, "get_shore_side")
-	state.water_body_id_query = Callable(self, "get_water_body_id_at")
+	state.height_query = Callable(self, "sample_water_height")
+	state.displacement_query = Callable(self, "sample_water_displacement")
+	state.normal_query = Callable(self, "sample_water_normal")
+	state.gradient_query = Callable(self, "sample_water_gradient")
+	state.velocity_query = Callable(self, "sample_water_velocity")
+	state.base_velocity_query = Callable(self, "sample_base_water_velocity")
+	state.coverage_query = Callable(self, "sample_water_coverage")
+	state.signed_shore_distance_query = Callable(self, "sample_signed_water_shore_distance")
+	state.shore_side_query = Callable(self, "sample_water_shore_side")
+	state.water_body_id_query = Callable(self, "sample_water_body_id_at")
+	state.surface_query = Callable(self, "sample_water_surface_query")
 	state.shore_mask_rd = _active_shore_mask_rd
 	return state
 
@@ -1312,6 +2119,7 @@ func set_enabled(enabled: bool) -> void:
 		_system_enabled = true
 		_enabled = true
 		set_process(true)
+		set_physics_process(true)
 		if not _system_initialized:
 			force_initialize()
 			return
@@ -1321,6 +2129,7 @@ func set_enabled(enabled: bool) -> void:
 		_enabled = false
 		_system_enabled = false
 		set_process(false)
+		set_physics_process(false)
 		release_runtime_resources()
 
 
@@ -1556,6 +2365,7 @@ func release_runtime_resources() -> void:
 	set_process(false)
 	_dispose_spray_layer()
 	_dispose_underwater_particulates_layer()
+	_dispose_water_interaction_layer()
 	_shutdown_fft_pipeline()
 	_dispose_ocean_mesh()
 	if _shore_mask:
@@ -1621,6 +2431,8 @@ func rebuild_mesh_with_mode(new_mode: int) -> void:
 		_update_cascade_scales()
 	_setup_spray_layer()
 	_setup_underwater_particulates_layer()
+	_setup_water_interaction_layer()
+	_sync_water_interaction_to_renderers()
 	if _ocean_spray:
 		_ocean_spray.set_fft_available(_wave_generator != null and _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH)
 	reset_weather()
@@ -1669,6 +2481,7 @@ func set_surface_shader_mode(mode: int) -> void:
 	_push_surface_ssr_to_material()
 	_push_surface_motion_uniforms()
 	_push_ocean_time_uniform()
+	_sync_water_interaction_to_renderers()
 	_update_sun_uniform()
 
 
@@ -1701,6 +2514,7 @@ func set_water_quality(quality: int) -> void:
 	_load_shore_mask()
 	if _ocean_mesh.get_quality() == OceanMesh.QualityMode.HIGH and _wave_generator:
 		_update_cascade_scales()
+	_sync_water_interaction_to_renderers()
 	reset_weather()
 
 	Log.info("water", "OceanManager: Quality changed to: %s" % get_water_quality_name())
@@ -2077,6 +2891,7 @@ func _update_spray_weather(wind_t: float, wind_dir_xz: Vector2) -> void:
 func _exit_tree() -> void:
 	if Engine.has_meta("_quitting"):
 		return
+	set_world_water_provider(null)
 	_dispose_spray_layer()
 	_dispose_underwater_particulates_layer()
 	# Clean up FFT RIDs to avoid exit-time leaks

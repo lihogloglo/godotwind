@@ -13,6 +13,7 @@ layout(set = 0, binding = 7) uniform sampler2D scene_color_tex;
 layout(set = 0, binding = 8) uniform sampler2D caustics_noise_tex;
 layout(set = 0, binding = 9) uniform sampler2DArray normal_tex;
 layout(set = 0, binding = 10) uniform sampler2D occlusion_depth_tex;
+layout(set = 0, binding = 11) uniform sampler2D water_body_atlas_tex;
 
 #define MAX_CASCADES 8
 
@@ -23,11 +24,12 @@ layout(std430, set = 0, binding = 4) readonly buffer WaterlineState {
 	vec4 shore_mask_bounds;
 	vec4 shore_params0; // x=fade, y=amp, z=freq, w=speed
 	vec4 shore_params1; // x=steep, yzw=medium asymptote
+	vec4 water_body_atlas_bounds; // x=min_x, y=min_z, z=size_x, w=size_z
 	vec4 optical_params; // xyz=sigma, w=caustics strength
 	vec4 sun_params; // xyz=toward sun, w=visibility
 	vec4 render_surface0; // x=mesh_mode, y=clipmap_origin_x, z=clipmap_origin_z, w=clipmap_base_quad
 	vec4 render_surface1; // x=clipmap_ring_vertices, y=clipmap_ring_count, z=projected_grid_dim, w=projected_overscan
-	vec4 receiver_optics; // x=max path, y=surface visual depth, z=debug depth scale, w=reserved
+	vec4 receiver_optics; // x=max path, y=surface visual depth, z=debug depth scale, w=water body atlas available
 	mat4 projection;
 	mat4 view;
 } state;
@@ -141,6 +143,11 @@ const int RENDER_MESH_PROJECTED = 1;
 const float RENDERED_SURFACE_NEAR_BAND_M = 0.90;
 
 #include "res://src/core/shaders/compute/water_surface_contract.glslinc"
+
+vec4 sample_water_body_atlas(vec2 world_xz);
+float water_body_atlas_gate(vec2 world_xz);
+float water_level_with_body_atlas(vec2 final_xz, vec3 cam_pos, bool include_fft, bool include_shore_waves);
+WaterSurfaceContractSample water_surface_query_with_body_atlas(vec3 world_pos, vec3 cam_pos, bool include_fft, bool include_shore_waves);
 
 struct SnellSample {
 	float window;
@@ -339,6 +346,10 @@ float get_occlusion_depth(vec2 uv) {
 
 
 float receiver_ownership_water_level(vec2 xz, vec3 cam_pos) {
+	vec4 atlas = sample_water_body_atlas(xz);
+	if (water_surface_body_gate(clamp(atlas.r, 0.0, 1.0)) > 0.001) {
+		return atlas.g;
+	}
 	return max(get_dynamic_water_level(xz, cam_pos, true, true), sea_level);
 }
 
@@ -535,6 +546,48 @@ bool uv_in_screen(vec2 uv) {
 float get_dynamic_water_level(vec2 final_xz, vec3 cam_pos, bool include_fft, bool include_shore_waves);
 
 
+vec4 sample_water_body_atlas(vec2 world_xz) {
+	if (state.receiver_optics.w <= 0.5 || state.water_body_atlas_bounds.z <= 0.0 || state.water_body_atlas_bounds.w <= 0.0) {
+		return vec4(0.0);
+	}
+	vec2 atlas_uv = (world_xz - state.water_body_atlas_bounds.xy) / state.water_body_atlas_bounds.zw;
+	if (atlas_uv.x < 0.0 || atlas_uv.x > 1.0 || atlas_uv.y < 0.0 || atlas_uv.y > 1.0) {
+		return vec4(0.0);
+	}
+	return textureLod(water_body_atlas_tex, atlas_uv, 0.0);
+}
+
+
+float water_body_atlas_gate(vec2 world_xz) {
+	return smoothstep(0.015, 0.12, clamp(sample_water_body_atlas(world_xz).r, 0.0, 1.0));
+}
+
+
+float water_level_with_body_atlas(vec2 final_xz, vec3 cam_pos, bool include_fft, bool include_shore_waves) {
+	vec4 atlas = sample_water_body_atlas(final_xz);
+	float atlas_gate = smoothstep(0.015, 0.12, clamp(atlas.r, 0.0, 1.0));
+	if (atlas_gate > 0.001) {
+		return atlas.g;
+	}
+	return get_dynamic_water_level(final_xz, cam_pos, include_fft, include_shore_waves);
+}
+
+
+WaterSurfaceContractSample water_surface_query_with_body_atlas(vec3 world_pos, vec3 cam_pos, bool include_fft, bool include_shore_waves) {
+	WaterSurfaceContractSample result = water_surface_query(world_pos, cam_pos, include_fft, include_shore_waves);
+	vec4 atlas = sample_water_body_atlas(world_pos.xz);
+	float atlas_coverage = clamp(atlas.r, 0.0, 1.0);
+	float atlas_gate = water_surface_body_gate(atlas_coverage);
+	if (atlas_gate > result.body_gate) {
+		result.y = atlas.g;
+		result.depth = result.y - world_pos.y;
+	}
+	result.coverage = max(result.coverage, atlas_coverage);
+	result.body_gate = max(result.body_gate, atlas_gate);
+	return result;
+}
+
+
 vec3 get_world_ray_dir(vec2 uv) {
 	vec4 clip_pos = vec4(uv * 2.0 - 1.0, 1.0, 1.0);
 	vec4 view_pos = state.inv_projection * clip_pos;
@@ -556,7 +609,7 @@ bool scene_sample_is_above_water(vec2 sample_uv, vec3 cam_pos) {
 		return true;
 	}
 	vec3 sample_world = get_world_position(sample_uv, depth);
-	float sample_water_level = get_dynamic_water_level(sample_world.xz, cam_pos, true, true);
+	float sample_water_level = water_level_with_body_atlas(sample_world.xz, cam_pos, true, true);
 	return sample_world.y >= sample_water_level + 0.080;
 }
 
@@ -690,7 +743,7 @@ bool barycentric_surface_y(vec2 p, vec3 a, vec3 b, vec3 c, out float y) {
 
 RenderedSurfaceSample rendered_clipmap_surface(vec2 final_xz, vec3 cam_pos) {
 	RenderedSurfaceSample result;
-	result.y = get_dynamic_water_level(final_xz, cam_pos, true, true);
+	result.y = water_level_with_body_atlas(final_xz, cam_pos, true, true);
 	result.valid = 0.0;
 
 	float quad_size = state.render_surface0.w;
@@ -767,7 +820,7 @@ RenderedSurfaceSample rendered_projected_surface(vec2 uv, vec3 cam_pos) {
 	RenderedSurfaceSample result;
 	vec3 ray_dir = get_world_ray_dir(uv);
 	vec3 fallback = cam_pos + ray_dir * 2.0;
-	result.y = get_dynamic_water_level(fallback.xz, cam_pos, true, true);
+	result.y = water_level_with_body_atlas(fallback.xz, cam_pos, true, true);
 	result.valid = 0.0;
 
 	float dim_f = state.render_surface1.z;
@@ -815,7 +868,7 @@ RenderedSurfaceSample rendered_surface_sample(vec2 final_xz, vec2 uv, vec3 cam_p
 	int mesh_mode = int(state.render_surface0.x + 0.5);
 	if (mesh_mode == RENDER_MESH_PROJECTED) {
 		RenderedSurfaceSample fallback;
-		fallback.y = get_dynamic_water_level(final_xz, cam_pos, true, true);
+		fallback.y = water_level_with_body_atlas(final_xz, cam_pos, true, true);
 		fallback.valid = 0.0;
 		return fallback;
 	}
@@ -838,11 +891,11 @@ float find_water_entry_t(vec3 cam_pos, vec3 scene_pos) {
 		return 1.0;
 	}
 
-	float water_y = get_dynamic_water_level(scene_pos.xz, cam_pos, true, true);
+	float water_y = water_level_with_body_atlas(scene_pos.xz, cam_pos, true, true);
 	float t = clamp((water_y - cam_pos.y) / denom, 0.0, 1.0);
 	for (int i = 0; i < 3; i++) {
 		vec3 entry = mix(cam_pos, scene_pos, t);
-		water_y = get_dynamic_water_level(entry.xz, cam_pos, true, true);
+		water_y = water_level_with_body_atlas(entry.xz, cam_pos, true, true);
 		t = clamp((water_y - cam_pos.y) / denom, 0.0, 1.0);
 	}
 	return t;
@@ -851,10 +904,10 @@ float find_water_entry_t(vec3 cam_pos, vec3 scene_pos) {
 
 vec3 water_normal_at(vec2 xz, vec3 cam_pos) {
 	const float normal_eps = 0.75;
-	float water_x0 = get_dynamic_water_level(xz - vec2(normal_eps, 0.0), cam_pos, true, true);
-	float water_x1 = get_dynamic_water_level(xz + vec2(normal_eps, 0.0), cam_pos, true, true);
-	float water_z0 = get_dynamic_water_level(xz - vec2(0.0, normal_eps), cam_pos, true, true);
-	float water_z1 = get_dynamic_water_level(xz + vec2(0.0, normal_eps), cam_pos, true, true);
+	float water_x0 = water_level_with_body_atlas(xz - vec2(normal_eps, 0.0), cam_pos, true, true);
+	float water_x1 = water_level_with_body_atlas(xz + vec2(normal_eps, 0.0), cam_pos, true, true);
+	float water_z0 = water_level_with_body_atlas(xz - vec2(0.0, normal_eps), cam_pos, true, true);
+	float water_z1 = water_level_with_body_atlas(xz + vec2(0.0, normal_eps), cam_pos, true, true);
 	vec2 slope = vec2(water_x1 - water_x0, water_z1 - water_z0) / (2.0 * normal_eps);
 	return normalize(vec3(-slope.x, 1.0, -slope.y));
 }
@@ -896,7 +949,8 @@ bool trace_water_surface(vec2 uv, vec3 cam_pos, out vec3 water_world, out float 
 		return false;
 	}
 
-	float plane_t = (sea_level - cam_pos.y) / ray_dir.y;
+	float seed_water_level = water_level_with_body_atlas(cam_pos.xz, cam_pos, true, true);
+	float plane_t = (seed_water_level - cam_pos.y) / ray_dir.y;
 	if (plane_t <= 0.0 || plane_t > WATER_RAY_MAX_DISTANCE) {
 		water_world = cam_pos + ray_dir * clamp(plane_t, 0.0, WATER_RAY_MAX_DISTANCE);
 		water_gate = 0.0;
@@ -904,7 +958,10 @@ bool trace_water_surface(vec2 uv, vec3 cam_pos, out vec3 water_world, out float 
 	}
 
 	vec3 plane_world = cam_pos + ray_dir * plane_t;
-	float stable_gate = water_surface_body_gate(stable_water_body_coverage(plane_world.xz));
+	float stable_gate = max(
+		water_surface_body_gate(stable_water_body_coverage(plane_world.xz)),
+		water_body_atlas_gate(plane_world.xz)
+	);
 	if (stable_gate <= 0.001) {
 		water_world = plane_world;
 		water_gate = 0.0;
@@ -919,7 +976,7 @@ bool trace_water_surface(vec2 uv, vec3 cam_pos, out vec3 water_world, out float 
 			return true;
 		}
 		vec3 p = cam_pos + ray_dir * t;
-		float water_y = get_dynamic_water_level(p.xz, cam_pos, true, true);
+		float water_y = water_level_with_body_atlas(p.xz, cam_pos, true, true);
 		water_y = get_near_rendered_water_level(p.xz, uv, cam_pos, water_y, p.y);
 		t = (water_y - cam_pos.y) / ray_dir.y;
 	}
@@ -930,7 +987,7 @@ bool trace_water_surface(vec2 uv, vec3 cam_pos, out vec3 water_world, out float 
 	}
 
 	water_world = cam_pos + ray_dir * t;
-	float coverage = max(water_coverage_at(water_world.xz, cam_pos), stable_water_body_coverage(plane_world.xz));
+	float coverage = max(max(water_coverage_at(water_world.xz, cam_pos), stable_water_body_coverage(plane_world.xz)), sample_water_body_atlas(water_world.xz).r);
 	water_gate = smoothstep(0.015, 0.12, coverage);
 	return water_gate > 0.001;
 }
@@ -1068,8 +1125,8 @@ OpticalSegment compute_optical_segment(vec3 ray_start, vec3 ray_end, vec3 surfac
 		return result;
 	}
 
-	WaterSurfaceContractSample start_surface = water_surface_query(ray_start, surface_cam_pos, true, true);
-	WaterSurfaceContractSample end_surface = water_surface_query(ray_end, surface_cam_pos, true, true);
+	WaterSurfaceContractSample start_surface = water_surface_query_with_body_atlas(ray_start, surface_cam_pos, true, true);
+	WaterSurfaceContractSample end_surface = water_surface_query_with_body_atlas(ray_end, surface_cam_pos, true, true);
 	result.vertical_depth_m = max(end_surface.depth, 0.0);
 	result.body_gate = max(start_surface.body_gate, end_surface.body_gate);
 	if (result.body_gate <= 0.001) {
@@ -1317,7 +1374,7 @@ WobbleSceneSample guarded_underwater_scene_sample(
 		}
 
 		vec3 sample_world = get_world_position(sample_uv, sample_depth);
-		float sample_water_depth = get_dynamic_water_level(sample_world.xz, cam_pos, true, true) - sample_world.y;
+		float sample_water_depth = water_level_with_body_atlas(sample_world.xz, cam_pos, true, true) - sample_world.y;
 		float sample_underwater_gate = smoothstep(0.02, 0.35, sample_water_depth);
 		if (sample_underwater_gate <= 0.001) {
 			reject_status = 4.0;
@@ -1440,7 +1497,7 @@ RefractSample refracted_receiver_from_water_pixel(
 		float step_t = (float(i) + 0.5) / float(RECEIVER_RAY_STEPS);
 		float ray_t = mix(RECEIVER_RAY_START_M, max_path, pow(step_t, 1.25));
 		vec3 ray_world = water_world_pos + water_ray * ray_t;
-		float ray_water_level = get_dynamic_water_level(ray_world.xz, cam_pos, true, true);
+		float ray_water_level = water_level_with_body_atlas(ray_world.xz, cam_pos, true, true);
 		if (ray_world.y > ray_water_level + 0.10) {
 			reject_status = 7.0;
 			continue;
@@ -1460,7 +1517,7 @@ RefractSample refracted_receiver_from_water_pixel(
 		}
 
 		vec3 sample_world = get_world_position(receiver_uv, receiver_depth);
-		float sample_water_level = get_dynamic_water_level(sample_world.xz, cam_pos, true, true);
+		float sample_water_level = water_level_with_body_atlas(sample_world.xz, cam_pos, true, true);
 		if (sample_world.y >= sample_water_level + 0.015) {
 			reject_status = 7.0;
 			continue;
@@ -1517,7 +1574,7 @@ void main() {
 	bool phase2_debug = debug_mode >= 10 && debug_mode <= 14;
 	vec4 scene_color = imageLoad(color_image, pixel);
 	vec3 cam_pos = state.inv_view[3].xyz;
-	float camera_water_level = get_dynamic_water_level(cam_pos.xz, cam_pos, true, true);
+	float camera_water_level = water_level_with_body_atlas(cam_pos.xz, cam_pos, true, true);
 	bool camera_underwater = cam_pos.y < camera_water_level - 0.02;
 	vec3 view_dir = get_world_ray_dir(uv);
 	bool absorption_enabled = feature_enabled(FEATURE_ABSORPTION_FOG);
@@ -1562,15 +1619,15 @@ void main() {
 	vec3 fallback_world_pos = water_ray_hit ? analytic_water_pos : cam_pos + view_dir * 200.0;
 	vec3 main_world_pos = main_depth_present ? get_world_position(uv, main_depth) : fallback_world_pos;
 	vec3 world_pos = receiver_depth_present ? get_world_position(uv, raw_depth) : main_world_pos;
-	WaterSurfaceContractSample receiver_surface = water_surface_query(world_pos, cam_pos, true, true);
-	WaterSurfaceContractSample main_surface = water_surface_query(main_world_pos, cam_pos, true, true);
-	WaterSurfaceContractSample camera_surface = water_surface_query(cam_pos, cam_pos, true, true);
+	WaterSurfaceContractSample receiver_surface = water_surface_query_with_body_atlas(world_pos, cam_pos, true, true);
+	WaterSurfaceContractSample main_surface = water_surface_query_with_body_atlas(main_world_pos, cam_pos, true, true);
+	WaterSurfaceContractSample camera_surface = water_surface_query_with_body_atlas(cam_pos, cam_pos, true, true);
 	float receiver_ownership_level = receiver_ownership_water_level(world_pos.xz, cam_pos);
 	float water_level = receiver_ownership_level;
 	if (debug_mode == 1) {
 		water_level = sea_level;
 	} else if (debug_mode == 2) {
-		water_level = get_dynamic_water_level(world_pos.xz, cam_pos, true, false);
+		water_level = water_level_with_body_atlas(world_pos.xz, cam_pos, true, false);
 	}
 	float water_depth = water_level - world_pos.y;
 	float main_water_level = main_surface.y;
@@ -1632,7 +1689,7 @@ void main() {
 	OpticalSegment refracted_segment = compute_optical_segment(receiver_surface_pos, refr_sample.world_pos, cam_pos);
 	if (refr_sample.valid > 0.001 && refracted_segment.valid <= 0.001 && refr_sample.path_length > 0.001) {
 		refracted_segment.path_length_m = refr_sample.path_length;
-		refracted_segment.vertical_depth_m = max(get_dynamic_water_level(refr_sample.world_pos.xz, cam_pos, true, true) - refr_sample.world_pos.y, 0.0);
+		refracted_segment.vertical_depth_m = max(water_level_with_body_atlas(refr_sample.world_pos.xz, cam_pos, true, true) - refr_sample.world_pos.y, 0.0);
 		refracted_segment.entry_pos = receiver_surface_pos;
 		refracted_segment.entry_valid = 1.0;
 		refracted_segment.exit_pos = refr_sample.world_pos;
@@ -1840,7 +1897,7 @@ void main() {
 			? underwater_segment.path_length_m
 			: max(camera_depth, 0.0);
 		if (underwater_segment.valid <= 0.001 && main_depth_present) {
-			WaterSurfaceContractSample target_surface = water_surface_query(underwater_target, cam_pos, true, true);
+			WaterSurfaceContractSample target_surface = water_surface_query_with_body_atlas(underwater_target, cam_pos, true, true);
 			if (target_surface.body_gate > 0.001 && target_surface.depth > OPTICAL_SURFACE_EPS) {
 				water_travel = length(underwater_target - cam_pos);
 			}
@@ -1857,7 +1914,7 @@ void main() {
 		float particles = particles_enabled ? compute_underwater_particles(uv, cam_pos, view_dir, max(scene_dist, surface_dist + 12.0), max(camera_depth, 0.0)) : 0.0;
 		underwater_color += particles * mix(vec3(0.58, 0.82, 0.78), vec3(0.95, 1.0, 0.92), underwater_fog) * 0.58;
 		float underwater_caustic_depth = main_depth_present
-			? max(get_dynamic_water_level(main_world_pos.xz, cam_pos, true, true) - main_world_pos.y, 0.0)
+			? max(water_level_with_body_atlas(main_world_pos.xz, cam_pos, true, true) - main_world_pos.y, 0.0)
 			: 0.0;
 		float underwater_caustic_gate = (main_depth_present ? water_body_gate : 0.0) * underwater_view_mask;
 		underwater_color += caustics_enabled

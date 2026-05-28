@@ -18,10 +18,10 @@ extends WaterVolume
 		if is_inside_tree():
 			_update_volume()
 
-## Mesh subdivision level for water surface (higher = more detail)
-@export_range(1, 64) var mesh_subdivisions: int = 16:
-	set(value):
-		mesh_subdivisions = value
+## Reserved for future tessellation. Polygon surfaces currently use authored vertices only.
+@export_range(1, 1) var mesh_subdivisions: int = 1:
+	set(_value):
+		mesh_subdivisions = 1
 		if is_inside_tree():
 			_update_volume()
 
@@ -37,16 +37,18 @@ var _debug_boundary: Node3D = null
 
 
 func _ready() -> void:
-	# Override parent's _setup_nodes to use polygon collision
-	if not Engine.is_editor_hint():
-		_area.body_entered.connect(_on_body_entered)
-		_area.body_exited.connect(_on_body_exited)
-
 	# Don't call parent _ready, we handle setup ourselves
 	_setup_polygon_nodes()
 	_create_shader()
 	_create_material()
 	_update_volume()
+
+	if not Engine.is_editor_hint():
+		_area.body_entered.connect(_on_body_entered)
+		_area.body_exited.connect(_on_body_exited)
+		if register_with_water_registry:
+			_register_with_water_registry()
+		_register_water_interaction_renderer()
 
 
 func _setup_polygon_nodes() -> void:
@@ -56,6 +58,8 @@ func _setup_polygon_nodes() -> void:
 		_area.name = "WaterArea"
 		_area.monitoring = true
 		_area.monitorable = false
+		_area.collision_layer = 0
+		_area.collision_mask = detection_collision_mask
 		add_child(_area)
 		if Engine.is_editor_hint():
 			_area.owner = get_tree().edited_scene_root
@@ -84,28 +88,24 @@ func _update_volume() -> void:
 	_create_polygon_collision()
 	_create_polygon_mesh()
 	_update_debug_visualization()
+	_update_body_descriptor()
 
 
 func _create_polygon_collision() -> void:
 	if not _collision_shape or polygon_points.size() < 3:
 		return
 
-	# Create extruded 3D shape from 2D polygon
-	# We'll create a ConvexPolygonShape3D by extruding the polygon vertically
-	var shape = ConvexPolygonShape3D.new()
-	var points_3d: PackedVector3Array = []
-
-	# Bottom vertices (at depth)
-	for point in polygon_points:
-		points_3d.append(Vector3(point.x, -size.y, point.y))
-
-	# Top vertices (at water surface)
-	for point in polygon_points:
-		points_3d.append(Vector3(point.x, 0.0, point.y))
-
-	shape.points = points_3d
+	# Broadphase only. Exact water coverage is the point-in-polygon query below,
+	# which handles concave river shapes without pretending they are convex.
+	var polygon_bounds := _calculate_polygon_bounds(polygon_points)
+	var shape := BoxShape3D.new()
+	shape.size = Vector3(maxf(polygon_bounds.size.x, 0.1), size.y, maxf(polygon_bounds.size.y, 0.1))
 	_collision_shape.shape = shape
-	_collision_shape.position.y = water_surface_height
+	_collision_shape.position = Vector3(
+		polygon_bounds.position.x + polygon_bounds.size.x * 0.5,
+		water_surface_height - size.y * 0.5,
+		polygon_bounds.position.y + polygon_bounds.size.y * 0.5
+	)
 
 
 func _create_polygon_mesh() -> void:
@@ -120,34 +120,27 @@ func _create_polygon_mesh() -> void:
 	var uvs := PackedVector2Array()
 	var indices := PackedInt32Array()
 
-	# Triangulate the polygon using ear clipping algorithm
 	var triangles := _triangulate_polygon(polygon_points)
+	if triangles.is_empty():
+		_water_mesh.mesh = null
+		Log.warn("water", "PolygonWaterVolume: Invalid polygon could not be triangulated")
+		return
 
 	# Calculate polygon bounds for UV mapping
 	var bounds := _calculate_polygon_bounds(polygon_points)
-	var bounds_size := Vector2(bounds.size.x, bounds.size.y)
+	var bounds_size := Vector2(maxf(bounds.size.x, 0.001), maxf(bounds.size.y, 0.001))
 
-	# Create vertices for each triangle
-	for tri_indices in triangles:
-		for idx in tri_indices:
-			var point := polygon_points[idx]
-			vertices.append(Vector3(point.x, 0.0, point.y))
-			normals.append(Vector3.UP)
+	# Create one vertex per polygon point; Geometry2D supplies triangle indices
+	# and normalizes clockwise contours to counter-clockwise output.
+	for point in polygon_points:
+		vertices.append(Vector3(point.x, 0.0, point.y))
+		normals.append(Vector3.UP)
 
-			# UV coordinates based on polygon bounds
-			var uv := (point - bounds.position) / bounds_size
-			uvs.append(uv)
+		# UV coordinates based on polygon bounds
+		var uv := (point - bounds.position) / bounds_size
+		uvs.append(uv)
 
-			indices.append(vertices.size() - 1)
-
-	# Optionally subdivide for wave detail
-	if mesh_subdivisions > 1:
-		var subdivided := _subdivide_mesh(vertices, uvs, indices, mesh_subdivisions)
-		vertices = subdivided.vertices
-		uvs = subdivided.uvs
-		indices = subdivided.indices
-		normals.resize(vertices.size())
-		normals.fill(Vector3.UP)
+	indices = triangles
 
 	arrays[Mesh.ARRAY_VERTEX] = vertices
 	arrays[Mesh.ARRAY_NORMAL] = normals
@@ -165,96 +158,12 @@ func _create_polygon_mesh() -> void:
 		vertices.size(), indices.size() / 3])
 
 
-## Triangulate polygon using ear clipping algorithm
-## Returns array of triangle indices (each element is [i1, i2, i3])
-func _triangulate_polygon(points: PackedVector2Array) -> Array:
+## Triangulate polygon using Godot's Geometry2D helper.
+## Returns flat triangle indices into the source points.
+func _triangulate_polygon(points: PackedVector2Array) -> PackedInt32Array:
 	if points.size() < 3:
-		return []
-
-	var triangles: Array = []
-	var remaining_indices: Array = []
-	for i in range(points.size()):
-		remaining_indices.append(i)
-
-	# Ear clipping algorithm
-	while remaining_indices.size() > 3:
-		var ear_found := false
-
-		for i in range(remaining_indices.size()):
-			var prev_idx: int = remaining_indices[(i - 1 + remaining_indices.size()) % remaining_indices.size()]
-			var curr_idx: int = remaining_indices[i]
-			var next_idx: int = remaining_indices[(i + 1) % remaining_indices.size()]
-
-			var p1 := points[prev_idx]
-			var p2 := points[curr_idx]
-			var p3 := points[next_idx]
-
-			# Check if this forms a valid ear
-			if _is_ear(p1, p2, p3, points, remaining_indices):
-				triangles.append([prev_idx, curr_idx, next_idx])
-				remaining_indices.remove_at(i)
-				ear_found = true
-				break
-
-		if not ear_found:
-			# Fallback: force create triangle if stuck
-			if remaining_indices.size() >= 3:
-				triangles.append([
-					remaining_indices[0],
-					remaining_indices[1],
-					remaining_indices[2]
-				])
-				remaining_indices.remove_at(1)
-			else:
-				break
-
-	# Add final triangle
-	if remaining_indices.size() == 3:
-		triangles.append([
-			remaining_indices[0],
-			remaining_indices[1],
-			remaining_indices[2]
-		])
-
-	return triangles
-
-
-## Check if three points form a valid ear (convex and contains no other points)
-func _is_ear(p1: Vector2, p2: Vector2, p3: Vector2, all_points: PackedVector2Array, indices: Array) -> bool:
-	# Check if triangle is counter-clockwise (convex)
-	var cross := (p2.x - p1.x) * (p3.y - p1.y) - (p2.y - p1.y) * (p3.x - p1.x)
-	if cross <= 0:
-		return false
-
-	# Check if any other point is inside this triangle
-	for idx in indices:
-		var point := all_points[idx]
-		if point == p1 or point == p2 or point == p3:
-			continue
-
-		if _point_in_triangle(point, p1, p2, p3):
-			return false
-
-	return true
-
-
-## Check if point is inside triangle
-func _point_in_triangle(p: Vector2, a: Vector2, b: Vector2, c: Vector2) -> bool:
-	var v0 := c - a
-	var v1 := b - a
-	var v2 := p - a
-
-	var dot00 := v0.dot(v0)
-	var dot01 := v0.dot(v1)
-	var dot02 := v0.dot(v2)
-	var dot11 := v1.dot(v1)
-	var dot12 := v1.dot(v2)
-
-	var inv_denom := 1.0 / (dot00 * dot11 - dot01 * dot01)
-	var u := (dot11 * dot02 - dot01 * dot12) * inv_denom
-	var v := (dot00 * dot12 - dot01 * dot02) * inv_denom
-
-	return (u >= 0) and (v >= 0) and (u + v <= 1)
+		return PackedInt32Array()
+	return Geometry2D.triangulate_polygon(points)
 
 
 ## Calculate bounding rectangle of polygon
@@ -276,15 +185,45 @@ func _calculate_polygon_bounds(points: PackedVector2Array) -> Rect2:
 	return Rect2(min_x, min_y, max_x - min_x, max_y - min_y)
 
 
-## Subdivide mesh for more detail (optional - for wave animation)
-func _subdivide_mesh(verts: PackedVector3Array, uvs_in: PackedVector2Array, inds: PackedInt32Array, level: int) -> Dictionary:
-	# Simple subdivision: just return original for now
-	# Could implement Catmull-Clark or loop subdivision for smoother meshes
-	return {
-		"vertices": verts,
-		"uvs": uvs_in,
-		"indices": inds
-	}
+func _update_body_descriptor() -> void:
+	if _body_descriptor == null:
+		return
+	super._update_body_descriptor()
+	if polygon_points.size() < 3:
+		_body_descriptor.bounds_valid = false
+		return
+	var polygon_bounds := _calculate_polygon_bounds(polygon_points)
+	var min_local := Vector3(
+		polygon_bounds.position.x,
+		water_surface_height - size.y,
+		polygon_bounds.position.y
+	)
+	var max_local := Vector3(
+		polygon_bounds.position.x + polygon_bounds.size.x,
+		water_surface_height,
+		polygon_bounds.position.y + polygon_bounds.size.y
+	)
+	var global_bounds := _aabb_from_transformed_box(min_local, max_local)
+	_body_descriptor.bounds = global_bounds
+	_body_descriptor.bounds_valid = true
+
+
+func _aabb_from_transformed_box(min_local: Vector3, max_local: Vector3) -> AABB:
+	var corners: Array[Vector3] = [
+		Vector3(min_local.x, min_local.y, min_local.z),
+		Vector3(max_local.x, min_local.y, min_local.z),
+		Vector3(min_local.x, max_local.y, min_local.z),
+		Vector3(max_local.x, max_local.y, min_local.z),
+		Vector3(min_local.x, min_local.y, max_local.z),
+		Vector3(max_local.x, min_local.y, max_local.z),
+		Vector3(min_local.x, max_local.y, max_local.z),
+		Vector3(max_local.x, max_local.y, max_local.z),
+	]
+	var first: Vector3 = global_transform * corners[0]
+	var bounds := AABB(first, Vector3.ZERO)
+	for i in range(1, corners.size()):
+		bounds = bounds.expand(global_transform * corners[i])
+	return bounds
 
 
 ## Override: Check if position is in polygon (2D check)
@@ -301,6 +240,16 @@ func is_position_in_water(pos: Vector3) -> bool:
 	# Check if point is inside 2D polygon using ray casting
 	var point_2d := Vector2(local_pos.x, local_pos.z)
 	return _point_in_polygon(point_2d, polygon_points)
+
+
+func sample_water_coverage(pos: Vector3) -> float:
+	if polygon_points.size() < 3:
+		return 0.0
+	var local_pos := to_local(pos)
+	if local_pos.y < water_surface_height - size.y:
+		return 0.0
+	var point_2d := Vector2(local_pos.x, local_pos.z)
+	return 1.0 if _point_in_polygon(point_2d, polygon_points) else 0.0
 
 
 ## Ray casting algorithm for point-in-polygon test
@@ -404,8 +353,8 @@ func import_from_json(data: Dictionary) -> void:
 	if "flow_direction" in data and data["flow_direction"]:
 		var f = data["flow_direction"]
 		flow_direction = Vector2(f[0], f[1])
-	if "flow_speed" in data and data["flow_speed"]:
-		flow_speed = data["flow_speed"]
+	if "flow_speed" in data and data["flow_speed"] != null:
+		flow_speed = float(data["flow_speed"])
 
 
 func _polygon_to_array(polygon: PackedVector2Array) -> Array:

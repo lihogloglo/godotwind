@@ -322,15 +322,18 @@ func _sync_main_scene_underwater() -> void:
 		_apply_underwater_particle_defaults()
 		return
 
-	effect.effect_enabled = underwater_medium_enabled
-	effect.blend_factor = 1.0 if underwater_medium_enabled else 0.0
 	_configure_underwater_effect(effect)
 
 	var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	var camera_water := _get_camera_water_query(state)
+	var local_water_level := float(camera_water.get("height", _get_fallback_water_level(state)))
+	var underwater_active := underwater_medium_enabled and _is_camera_underwater(camera_water)
+	effect.effect_enabled = underwater_active
+	effect.blend_factor = 1.0 if underwater_active else 0.0
 	if effect.has_method("sync_from_water_state"):
 		effect.call("sync_from_water_state", state)
 	if effect.has_method("set_camera_water_level"):
-		effect.call("set_camera_water_level", _get_camera_water_level(state))
+		effect.call("set_camera_water_level", local_water_level)
 
 
 func _set_main_scene_underwater_enabled(enabled: bool) -> void:
@@ -406,12 +409,41 @@ func _get_underwater_effect() -> PostProcessEffect:
 
 
 func _get_camera_water_level(state: WaterSurfaceState) -> float:
+	return float(_get_camera_water_query(state).get("height", _get_fallback_water_level(state)))
+
+
+func _get_camera_water_query(state: WaterSurfaceState) -> Dictionary:
 	var camera := _get_active_camera()
 	if camera == null:
-		return OceanManager.sea_level
-	if state != null and state.can_sample_height():
-		return state.sample_height(camera.global_position, state.sea_level)
-	return OceanManager.sea_level
+		return {
+			"has_water_body": false,
+			"height": _get_fallback_water_level(state),
+			"depth": 0.0,
+		}
+	if state != null:
+		var query := state.sample_surface_query(camera.global_position)
+		var water_y := float(query.get("height", _get_fallback_water_level(state)))
+		var has_body := bool(query.get("has_water_body", false)) and not is_nan(water_y) and water_y > -1.0e20
+		return {
+			"has_water_body": has_body,
+			"height": water_y if has_body else _get_fallback_water_level(state),
+			"depth": water_y - camera.global_position.y if has_body else 0.0,
+		}
+	return {
+		"has_water_body": false,
+		"height": _get_fallback_water_level(state),
+		"depth": 0.0,
+	}
+
+
+func _is_camera_underwater(camera_water: Dictionary) -> bool:
+	return bool(camera_water.get("has_water_body", false)) and float(camera_water.get("depth", 0.0)) >= -0.02
+
+
+func _get_fallback_water_level(state: WaterSurfaceState) -> float:
+	if state != null:
+		return state.sea_level
+	return OceanManager.sea_level if OceanManager else ProjectSettings.get_setting("ocean/sea_level", 0.0)
 
 
 func _get_active_world_environment() -> WorldEnvironment:

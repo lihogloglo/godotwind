@@ -3,6 +3,7 @@ extends RefCounted
 
 const WATER_BODY_NONE := &"none"
 const WATER_BODY_OCEAN := &"ocean"
+const WATER_BODY_REGISTERED := &"registered_water"
 const SHORE_SIDE_LAND := -1
 const SHORE_SIDE_UNKNOWN := 0
 const SHORE_SIDE_WATER := 1
@@ -16,16 +17,30 @@ var map_scales: PackedVector4Array = PackedVector4Array()
 var cascade_count: int = 0
 var displacement_texture_rd: RID = RID()
 var normal_texture_rd: RID = RID()
+var interaction_texture_rd: RID = RID()
+var interaction_bounds: Vector4 = Vector4.ZERO
+var interaction_ready: bool = false
 
+## Global capability marker for the snapshot. Use sample_water_body_id() or
+## sample_has_water_body() for local camera/object activation decisions.
 var water_body_id: StringName = WATER_BODY_NONE
 var water_body_index: int = 0
 var coverage_source: StringName = &"none"
 var coverage_available: bool = false
+var camera_water_level: float = NAN
+var camera_water_coverage: float = 0.0
+var camera_water_body_id: StringName = WATER_BODY_NONE
 
 var shore_mask_texture: Texture2D = null
 var shore_mask_rd: RID = RID()
 var shore_mask_bounds: Vector4 = Vector4(-8000.0, -8000.0, 16000.0, 16000.0)
 var shore_fade_distance: float = 50.0
+var water_body_atlas_texture: Texture2D = null
+var water_body_atlas_image: Image = null
+var water_body_atlas_rd: RID = RID()
+var water_body_atlas_bounds: Vector4 = Vector4.ZERO
+var water_body_atlas_resolution: Vector2i = Vector2i.ZERO
+var water_body_atlas_available: bool = false
 var shore_wave_amplitude: float = 0.18
 var shore_wave_frequency: float = 0.1
 var shore_wave_speed: float = 0.4
@@ -63,10 +78,12 @@ var displacement_query: Callable = Callable()
 var normal_query: Callable = Callable()
 var gradient_query: Callable = Callable()
 var velocity_query: Callable = Callable()
+var base_velocity_query: Callable = Callable()
 var coverage_query: Callable = Callable()
 var signed_shore_distance_query: Callable = Callable()
 var shore_side_query: Callable = Callable()
 var water_body_id_query: Callable = Callable()
+var surface_query: Callable = Callable()
 
 
 func has_fft() -> bool:
@@ -77,8 +94,20 @@ func has_shore_mask() -> bool:
 	return shore_mask_rd.is_valid()
 
 
+func has_water_body_atlas() -> bool:
+	return water_body_atlas_available \
+		and water_body_atlas_texture != null \
+		and water_body_atlas_rd.is_valid() \
+		and water_body_atlas_bounds.z > 0.0 \
+		and water_body_atlas_bounds.w > 0.0
+
+
 func has_normal_data() -> bool:
 	return normal_data_ready and normal_texture_rd.is_valid()
+
+
+func has_interaction_data() -> bool:
+	return interaction_ready and interaction_texture_rd.is_valid()
 
 
 func gpu_cascade_ready(index: int) -> bool:
@@ -115,6 +144,10 @@ func can_sample_gradient() -> bool:
 
 func can_sample_velocity() -> bool:
 	return cpu_query_available and velocity_query.is_valid()
+
+
+func can_sample_base_velocity() -> bool:
+	return cpu_query_available and base_velocity_query.is_valid()
 
 
 func can_sample_coverage() -> bool:
@@ -171,6 +204,14 @@ func sample_velocity(world_pos: Vector3, fallback: Vector3 = Vector3.ZERO) -> Ve
 	return fallback
 
 
+func sample_base_velocity(world_pos: Vector3, fallback: Vector3 = Vector3.ZERO) -> Vector3:
+	if can_sample_base_velocity():
+		var result: Variant = base_velocity_query.call(world_pos)
+		if result is Vector3:
+			return result
+	return sample_velocity(world_pos, fallback)
+
+
 func sample_coverage(world_pos: Vector3, fallback: float = 0.0) -> float:
 	if can_sample_coverage():
 		return float(coverage_query.call(world_pos))
@@ -178,6 +219,10 @@ func sample_coverage(world_pos: Vector3, fallback: float = 0.0) -> float:
 
 
 func coverage_to_body_gate(coverage: float) -> float:
+	return coverage_to_body_gate_static(coverage)
+
+
+static func coverage_to_body_gate_static(coverage: float) -> float:
 	return smoothstep(COVERAGE_GATE_START, COVERAGE_GATE_END, clampf(coverage, 0.0, 1.0))
 
 
@@ -185,21 +230,68 @@ func sample_body_gate(world_pos: Vector3, fallback: float = 0.0) -> float:
 	return coverage_to_body_gate(sample_coverage(world_pos, fallback))
 
 
+func sample_water_body_atlas(world_pos: Vector3) -> Dictionary:
+	if water_body_atlas_image == null or water_body_atlas_bounds.z <= 0.0 or water_body_atlas_bounds.w <= 0.0:
+		return {}
+	var uv := Vector2(
+		(world_pos.x - water_body_atlas_bounds.x) / water_body_atlas_bounds.z,
+		(world_pos.z - water_body_atlas_bounds.y) / water_body_atlas_bounds.w
+	)
+	if uv.x < 0.0 or uv.x > 1.0 or uv.y < 0.0 or uv.y > 1.0:
+		return {}
+	var size := water_body_atlas_image.get_size()
+	var px := clampi(floori(uv.x * float(size.x)), 0, size.x - 1)
+	var py := clampi(floori(uv.y * float(size.y)), 0, size.y - 1)
+	var sample := water_body_atlas_image.get_pixel(px, py)
+	var coverage := clampf(sample.r, 0.0, 1.0)
+	return {
+		"coverage": coverage,
+		"height": sample.g,
+		"body_gate": coverage_to_body_gate(coverage),
+	}
+
+
+func sample_has_water_body(world_pos: Vector3, min_body_gate: float = 0.0) -> bool:
+	if not coverage_available:
+		return false
+	if sample_water_body_id(world_pos, WATER_BODY_NONE) == WATER_BODY_NONE:
+		return false
+	if can_sample_coverage():
+		return sample_body_gate(world_pos, 0.0) > min_body_gate
+	return true
+
+
+func sample_local_water_height(world_pos: Vector3, fallback: float = NAN, min_body_gate: float = 0.0) -> float:
+	if not sample_has_water_body(world_pos, min_body_gate):
+		return fallback
+	return sample_height(world_pos, fallback)
+
+
 func sample_water_depth(world_pos: Vector3, fallback: float = 0.0) -> float:
 	return sample_height(world_pos, sea_level) - world_pos.y if can_sample_height() else fallback
 
 
 func sample_surface_query(world_pos: Vector3) -> Dictionary:
+	if surface_query.is_valid():
+		var result: Variant = surface_query.call(world_pos)
+		if result is Dictionary:
+			return result
 	var coverage := sample_coverage(world_pos)
-	var water_y := sample_height(world_pos, sea_level)
+	var body_id := sample_water_body_id(world_pos)
+	var body_gate := coverage_to_body_gate(coverage)
+	var has_body := coverage_available and body_id != WATER_BODY_NONE and body_gate > 0.0
+	var water_y := sample_height(world_pos, sea_level) if has_body else sea_level
 	return {
 		"height": water_y,
 		"displacement": sample_displacement(world_pos),
 		"normal": sample_normal(world_pos),
+		"gradient": sample_gradient(world_pos),
+		"velocity": sample_velocity(world_pos),
 		"coverage": coverage,
-		"body_gate": coverage_to_body_gate(coverage),
+		"body_gate": body_gate,
 		"depth": water_y - world_pos.y,
-		"water_body_id": sample_water_body_id(world_pos),
+		"water_body_id": body_id,
+		"has_water_body": has_body,
 		"coverage_source": coverage_source,
 	}
 
@@ -224,3 +316,17 @@ func sample_water_body_id(world_pos: Vector3, fallback: StringName = WATER_BODY_
 		if result is String:
 			return StringName(result)
 	return fallback
+
+
+func has_water_at(world_pos: Vector3, min_coverage: float = COVERAGE_GATE_START) -> bool:
+	if not can_sample_coverage():
+		return false
+	return sample_coverage(world_pos, 0.0) > min_coverage
+
+
+func get_camera_water_level(fallback: float = NAN) -> float:
+	return camera_water_level if not is_nan(camera_water_level) else fallback
+
+
+func has_camera_water(min_coverage: float = COVERAGE_GATE_START) -> bool:
+	return camera_water_coverage > min_coverage and camera_water_body_id != WATER_BODY_NONE

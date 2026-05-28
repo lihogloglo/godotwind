@@ -6,6 +6,15 @@
 class_name WaterVolume
 extends Node3D
 
+const WaterBodyDescriptorScript := preload("res://src/core/water/water_body_descriptor.gd")
+const DefaultNormalTexture := preload("res://assets/water/water_normal.png")
+const DefaultFoamTexture := preload("res://src/core/water/textures/foam_albedo.png")
+const WaterVolumeShader := preload("res://src/core/water/shaders/water_volume.gdshader")
+const WATER_DETECT_ENVIRONMENT_LAYER := 1 << 0
+const WATER_DETECT_PLAYER_LAYER := 1 << 1
+const WATER_DETECT_INTERACTABLE_LAYER := 1 << 2
+const DEFAULT_DETECTION_COLLISION_MASK := WATER_DETECT_ENVIRONMENT_LAYER | WATER_DETECT_PLAYER_LAYER | WATER_DETECT_INTERACTABLE_LAYER
+
 ## Water volume types
 enum WaterType {
 	LAKE,      ## Still water body - no flow
@@ -50,6 +59,16 @@ enum WaterType {
 		refraction_strength = clamp(value, 0.0, 0.3)
 		_update_material()
 
+@export var depth_fade_distance: float = 5.0:
+	set(value):
+		depth_fade_distance = maxf(value, 0.0)
+		_update_material()
+
+@export var water_normal_uv_scale: float = 0.18:
+	set(value):
+		water_normal_uv_scale = maxf(value, 0.001)
+		_update_material()
+
 @export_group("Reflection Settings")
 @export var use_ssr: bool = true:
 	set(value):
@@ -89,10 +108,19 @@ enum WaterType {
 		_update_material()
 
 @export_group("Swimming & Buoyancy")
+@export var register_with_water_registry: bool = true
 @export var enable_swimming: bool = true
 @export var enable_buoyancy: bool = true
+@export_flags_3d_physics var detection_collision_mask: int = DEFAULT_DETECTION_COLLISION_MASK:
+	set(value):
+		detection_collision_mask = value
+		_apply_area_collision_mask()
 @export var swim_speed_multiplier: float = 0.6  ## How much swimming slows movement
 @export var current_strength: float = 1.0  ## For rivers - how strong the current pushes
+@export_enum("Off", "Flow Direction", "Speed", "Depth Edge", "Coverage", "Interaction Ripples") var debug_display_mode: int = 0:
+	set(value):
+		debug_display_mode = clampi(value, 0, 5)
+		_update_material()
 
 # Internal nodes
 var _area: Area3D = null
@@ -100,6 +128,10 @@ var _collision_shape: CollisionShape3D = null
 var _water_mesh: MeshInstance3D = null
 var _material: ShaderMaterial = null
 var _shader: Shader = null
+var _body_descriptor: RefCounted = null
+var _water_interaction_fallback_texture: Texture2D = null
+var _water_body_atlas_fallback_texture: Texture2D = null
+var _registered_with_water_registry: bool = false
 
 # State
 var _time: float = 0.0
@@ -125,6 +157,16 @@ func _ready() -> void:
 	if not Engine.is_editor_hint():
 		_area.body_entered.connect(_on_body_entered)
 		_area.body_exited.connect(_on_body_exited)
+		if register_with_water_registry:
+			_register_with_water_registry()
+		_register_water_interaction_renderer()
+
+
+func _exit_tree() -> void:
+	if Engine.is_editor_hint():
+		return
+	_unregister_water_interaction_renderer()
+	_unregister_from_water_registry()
 
 
 func _process(delta: float) -> void:
@@ -134,6 +176,12 @@ func _process(delta: float) -> void:
 	_time += delta * wave_speed
 	if _material:
 		_material.set_shader_parameter("time", _time)
+		_material.set_shader_parameter("water_surface_time", _time)
+
+
+func _physics_process(delta: float) -> void:
+	if Engine.is_editor_hint():
+		return
 
 	# Update bodies in water
 	for body in _bodies_in_water:
@@ -147,6 +195,8 @@ func _setup_nodes() -> void:
 	_area.name = "WaterArea"
 	_area.monitoring = true
 	_area.monitorable = false
+	_area.collision_layer = 0
+	_area.collision_mask = detection_collision_mask
 	add_child(_area)
 	_area.owner = self
 
@@ -167,128 +217,7 @@ func _setup_nodes() -> void:
 
 
 func _create_shader() -> void:
-	_shader = Shader.new()
-
-	# Create water shader for volumes
-	# This is a simpler shader than ocean - designed for smaller water bodies
-	_shader.code = """
-shader_type spatial;
-render_mode blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_schlick_ggx;
-
-#define REFLECTANCE 0.02
-
-uniform vec4 water_color : source_color = vec4(0.02, 0.15, 0.22, 1.0);
-uniform float roughness : hint_range(0.0, 1.0) = 0.1;
-uniform float clarity : hint_range(0.0, 1.0) = 0.5;
-uniform float refraction_strength : hint_range(0.0, 0.3) = 0.05;
-uniform float depth_fade_distance : hint_range(0.0, 100.0) = 5.0;
-
-uniform bool enable_waves = true;
-uniform float wave_scale : hint_range(0.0, 2.0) = 0.3;
-uniform float time = 0.0;
-
-// River flow
-uniform vec2 flow_direction = vec2(1.0, 0.0);
-uniform float flow_speed = 0.0;
-
-varying float wave_height;
-varying float fresnel;
-
-// Simple wave function for small water bodies
-vec3 simple_wave(vec2 pos, float time_val) {
-	if (!enable_waves) {
-		return vec3(0.0);
-	}
-
-	// Combine two sine waves for variety
-	float wave1 = sin(pos.x * 0.5 + time_val * 1.5) * cos(pos.y * 0.3 + time_val * 1.2);
-	float wave2 = sin(pos.x * 0.8 - pos.y * 0.5 + time_val * 1.8) * 0.5;
-	float height = (wave1 + wave2) * wave_scale * 0.1;
-
-	return vec3(0.0, height, 0.0);
-}
-
-// Calculate normal from wave function
-vec3 calculate_wave_normal(vec2 pos, float time_val) {
-	if (!enable_waves) {
-		return vec3(0.0, 1.0, 0.0);
-	}
-
-	const float eps = 0.1;
-	vec3 p = simple_wave(pos, time_val);
-	vec3 px = simple_wave(pos + vec2(eps, 0.0), time_val);
-	vec3 py = simple_wave(pos + vec2(0.0, eps), time_val);
-
-	vec3 tangent = normalize(vec3(eps, px.y - p.y, 0.0));
-	vec3 binormal = normalize(vec3(0.0, py.y - p.y, eps));
-
-	return normalize(cross(binormal, tangent));
-}
-
-void vertex() {
-	vec2 pos = VERTEX.xz;
-
-	// Apply river flow offset to UV for scrolling effect
-	vec2 flow_offset = flow_direction * time * flow_speed * 0.1;
-	UV = (pos + flow_offset) * 0.1;
-
-	// Apply wave displacement
-	vec3 wave_disp = simple_wave(pos, time);
-	VERTEX += wave_disp;
-	wave_height = wave_disp.y;
-
-	// Calculate normal from waves
-	if (enable_waves) {
-		NORMAL = calculate_wave_normal(pos, time);
-	}
-}
-
-void fragment() {
-	float NdotV = max(dot(VIEW, NORMAL), 0.001);
-	fresnel = REFLECTANCE + (1.0 - REFLECTANCE) * pow(1.0 - NdotV, 5.0);
-
-	// Refraction
-	vec2 refraction_offset = NORMAL.xy * refraction_strength;
-	vec3 refracted_color = textureLod(SCREEN_TEXTURE, SCREEN_UV + refraction_offset, 0.0).rgb;
-
-	// Depth-based transparency
-	float depth = texture(DEPTH_TEXTURE, SCREEN_UV).r;
-	vec4 world_pos = INV_PROJECTION_MATRIX * vec4(SCREEN_UV * 2.0 - 1.0, depth, 1.0);
-	float depth_diff = world_pos.z / world_pos.w - VERTEX.z;
-	float water_depth_fade = 1.0 - exp(-depth_diff / depth_fade_distance);
-
-	// Mix refracted color with water color
-	vec3 water_with_refraction = mix(refracted_color, water_color.rgb, water_depth_fade * (1.0 - clarity));
-	ALBEDO = water_with_refraction;
-
-	// Transparency
-	ALPHA = mix(clarity, 1.0, fresnel * 0.5);
-
-	ROUGHNESS = roughness;
-	METALLIC = 0.0;
-	SPECULAR = 0.5;
-	SSS_STRENGTH = 0.05;
-}
-
-void light() {
-	// Simple PBR lighting
-	vec3 halfway = normalize(LIGHT + VIEW);
-	float dot_nl = max(dot(NORMAL, LIGHT), 0.001);
-	float dot_nh = max(dot(NORMAL, halfway), 0.001);
-
-	// Specular (simplified GGX)
-	float a_sq = roughness * roughness;
-	float d = 1.0 + (a_sq - 1.0) * dot_nh * dot_nh;
-	float D = a_sq / (PI * d * d);
-	float spec = fresnel * D * 0.25;
-	SPECULAR_LIGHT += spec * ATTENUATION * LIGHT_COLOR;
-
-	// Diffuse with subtle SSS
-	float sss = pow(max(dot(LIGHT, -VIEW), 0.0), 3.0) * 0.3;
-	vec3 diff_color = mix(water_color.rgb, vec3(0.1, 0.4, 0.3), sss);
-	DIFFUSE_LIGHT += diff_color * dot_nl * (1.0 - fresnel) * ATTENUATION * LIGHT_COLOR;
-}
-"""
+	_shader = WaterVolumeShader
 
 
 func _create_material() -> void:
@@ -322,6 +251,12 @@ func _update_volume() -> void:
 	if _water_mesh and _water_mesh.mesh:
 		(_water_mesh.mesh as PlaneMesh).size = Vector2(size.x, size.z)
 		_water_mesh.position.y = water_surface_height
+	_update_body_descriptor()
+
+
+func _apply_area_collision_mask() -> void:
+	if _area != null:
+		_area.collision_mask = detection_collision_mask
 
 
 func _update_material() -> void:
@@ -332,10 +267,216 @@ func _update_material() -> void:
 	_material.set_shader_parameter("roughness", roughness)
 	_material.set_shader_parameter("clarity", clarity)
 	_material.set_shader_parameter("refraction_strength", refraction_strength)
+	_material.set_shader_parameter("water_surface_shallow_color", Vector3(water_color.r, water_color.g, water_color.b))
+	_material.set_shader_parameter("water_surface_deep_color", Vector3(water_color.r * 0.42, water_color.g * 0.58, water_color.b * 0.72))
+	_material.set_shader_parameter("water_surface_medium_color", Vector3(water_color.r * 0.65, water_color.g * 0.72, water_color.b * 0.78))
+	_material.set_shader_parameter("water_surface_foam_color", Vector3(0.82, 0.90, 0.88))
+	_material.set_shader_parameter("water_surface_visibility_distance_m", maxf(depth_fade_distance * 7.0, 12.0))
+	_material.set_shader_parameter("water_surface_absorption_density", 0.24)
+	_material.set_shader_parameter("water_surface_refraction_strength", refraction_strength)
+	_material.set_shader_parameter("water_surface_roughness", roughness)
+	_material.set_shader_parameter("water_surface_clarity", clarity)
+	_material.set_shader_parameter("water_surface_normal_strength", 0.65)
+	_material.set_shader_parameter("water_surface_normal_uv_scale", water_normal_uv_scale)
+	_material.set_shader_parameter("water_surface_foam_intensity", 0.45)
+	_material.set_shader_parameter("water_surface_foam_texture", DefaultFoamTexture)
 	_material.set_shader_parameter("enable_waves", enable_waves and water_type != WaterType.POOL)
 	_material.set_shader_parameter("wave_scale", wave_scale)
 	_material.set_shader_parameter("flow_direction", flow_direction)
 	_material.set_shader_parameter("flow_speed", flow_speed if water_type == WaterType.RIVER else 0.0)
+	_material.set_shader_parameter("flow_visual_strength", 0.42 if water_type == WaterType.RIVER else 0.0)
+	_material.set_shader_parameter("debug_display_mode", debug_display_mode)
+	_material.set_shader_parameter("water_surface_normal_texture", DefaultNormalTexture)
+	_sync_water_interaction_material()
+	_update_body_descriptor()
+
+
+func _sync_water_interaction_material() -> void:
+	if _material == null:
+		return
+	if not is_instance_valid(OceanManager):
+		sync_water_interaction_texture(null, Vector4.ZERO, false, false)
+		return
+	var texture := OceanManager.get_water_interaction_texture()
+	var stats: Dictionary = OceanManager.get_water_interaction_stats()
+	var active := bool(stats.get("enabled", false)) and texture != null
+	sync_water_interaction_texture(
+		texture,
+		OceanManager.get_water_interaction_bounds(),
+		active,
+		OceanManager.is_water_interaction_debug_enabled(),
+		OceanManager.get_water_body_atlas_texture(),
+		OceanManager.get_water_body_atlas_bounds(),
+		OceanManager.has_water_body_atlas()
+	)
+
+
+func sync_water_interaction_texture(
+	texture: Texture2D,
+	bounds: Vector4,
+	enabled: bool,
+	debug_enabled: bool = false,
+	body_atlas_texture: Texture2D = null,
+	body_atlas_bounds: Vector4 = Vector4.ZERO,
+	body_atlas_available: bool = false,
+	_dynamic_flow_texture: Texture2D = null,
+	_dynamic_flow_bounds: Vector4 = Vector4.ZERO,
+	_dynamic_flow_enabled: bool = false
+) -> void:
+	if _material == null:
+		return
+	_material.set_shader_parameter("water_interaction_map", texture if texture != null else _get_water_interaction_fallback_texture())
+	_material.set_shader_parameter("water_interaction_bounds", bounds)
+	_material.set_shader_parameter("water_interaction_enabled", enabled and texture != null)
+	_material.set_shader_parameter("water_interaction_debug_enabled", debug_enabled)
+	_material.set_shader_parameter("water_body_atlas_map", body_atlas_texture if body_atlas_texture != null else _get_water_body_atlas_fallback_texture())
+	_material.set_shader_parameter("water_body_atlas_bounds", body_atlas_bounds)
+	_material.set_shader_parameter("water_body_atlas_available", body_atlas_available and body_atlas_texture != null)
+	_material.set_shader_parameter("water_interaction_surface_height", global_position.y + water_surface_height)
+	_material.set_shader_parameter("water_interaction_body_filter_mode", 1)
+
+
+func _get_water_interaction_fallback_texture() -> Texture2D:
+	if _water_interaction_fallback_texture != null:
+		return _water_interaction_fallback_texture
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(0.0, 0.0, 0.0, 0.0))
+	_water_interaction_fallback_texture = ImageTexture.create_from_image(img)
+	return _water_interaction_fallback_texture
+
+
+func _get_water_body_atlas_fallback_texture() -> Texture2D:
+	if _water_body_atlas_fallback_texture != null:
+		return _water_body_atlas_fallback_texture
+	var img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	img.set_pixel(0, 0, Color(0.0, 0.0, 0.0, 0.0))
+	_water_body_atlas_fallback_texture = ImageTexture.create_from_image(img)
+	return _water_body_atlas_fallback_texture
+
+
+func get_water_body_descriptor() -> RefCounted:
+	if _body_descriptor == null:
+		_body_descriptor = WaterBodyDescriptorScript.new()
+		_body_descriptor.body_id = _make_water_body_id()
+		_body_descriptor.coverage_query = Callable(self, "sample_water_coverage")
+		_body_descriptor.height_query = Callable(self, "sample_water_height")
+		_body_descriptor.normal_query = Callable(self, "sample_water_normal")
+		_body_descriptor.gradient_query = Callable(self, "sample_water_gradient")
+		_body_descriptor.velocity_query = Callable(self, "sample_water_velocity")
+		_body_descriptor.water_body_id_query = Callable(self, "sample_water_body_id")
+	_update_body_descriptor()
+	return _body_descriptor
+
+
+func sample_water_coverage(pos: Vector3) -> float:
+	var local_pos := to_local(pos)
+	var half_size := size * 0.5
+	if abs(local_pos.x) > half_size.x or abs(local_pos.z) > half_size.z:
+		return 0.0
+	var bottom := water_surface_height - size.y
+	return 1.0 if local_pos.y >= bottom else 0.0
+
+
+func sample_water_height(pos: Vector3) -> float:
+	return global_position.y + water_surface_height if sample_water_coverage(pos) > 0.0 else -INF
+
+
+func sample_water_normal(_pos: Vector3) -> Vector3:
+	return Vector3.UP
+
+
+func sample_water_gradient(_pos: Vector3) -> Vector2:
+	return Vector2.ZERO
+
+
+func sample_water_velocity(pos: Vector3) -> Vector3:
+	if water_type != WaterType.RIVER or sample_water_coverage(pos) <= 0.0:
+		return Vector3.ZERO
+	var dir := flow_direction.normalized()
+	return Vector3(dir.x, 0.0, dir.y) * flow_speed * current_strength
+
+
+func sample_water_body_id(pos: Vector3) -> StringName:
+	return _body_descriptor.body_id if _body_descriptor != null and sample_water_coverage(pos) > 0.0 else WaterSurfaceState.WATER_BODY_NONE
+
+
+func _register_with_water_registry() -> void:
+	if _registered_with_water_registry:
+		return
+	if not register_with_water_registry:
+		return
+	if not is_instance_valid(OceanManager):
+		return
+	if OceanManager.has_method("register_water_body"):
+		OceanManager.call("register_water_body", get_water_body_descriptor())
+		_registered_with_water_registry = true
+
+
+func _register_water_interaction_renderer() -> void:
+	if is_instance_valid(OceanManager) and OceanManager.has_method("register_water_interaction_renderer"):
+		OceanManager.call("register_water_interaction_renderer", self)
+
+
+func _unregister_water_interaction_renderer() -> void:
+	if is_instance_valid(OceanManager) and OceanManager.has_method("unregister_water_interaction_renderer"):
+		OceanManager.call("unregister_water_interaction_renderer", self)
+
+
+func _unregister_from_water_registry() -> void:
+	if not _registered_with_water_registry:
+		return
+	if _body_descriptor == null or not is_instance_valid(OceanManager):
+		return
+	if OceanManager.has_method("unregister_water_body"):
+		OceanManager.call("unregister_water_body", _body_descriptor)
+	_registered_with_water_registry = false
+
+
+func _update_body_descriptor() -> void:
+	if _body_descriptor == null:
+		return
+	_body_descriptor.body_type = _water_type_to_body_type()
+	_body_descriptor.priority = _water_body_priority()
+	_body_descriptor.surface_height = global_position.y + water_surface_height
+	_body_descriptor.depth = size.y
+	_body_descriptor.flow_direction = flow_direction
+	_body_descriptor.flow_speed = flow_speed * current_strength if water_type == WaterType.RIVER else 0.0
+	var global_center := global_position + Vector3(0.0, water_surface_height - size.y * 0.5, 0.0)
+	_body_descriptor.bounds = AABB(global_center - size * 0.5, size)
+	_body_descriptor.bounds_valid = true
+	_body_descriptor.metadata["render_only"] = not register_with_water_registry
+
+
+func _water_type_to_body_type() -> StringName:
+	match water_type:
+		WaterType.LAKE:
+			return &"lake"
+		WaterType.RIVER:
+			return &"river"
+		WaterType.POOL:
+			return &"pool"
+		WaterType.OCEAN:
+			return &"ocean"
+		_:
+			return &"unknown"
+
+
+func _water_body_priority() -> int:
+	match water_type:
+		WaterType.RIVER:
+			return 220
+		WaterType.LAKE, WaterType.POOL:
+			return 200
+		WaterType.OCEAN:
+			return 10
+		_:
+			return 100
+
+
+func _make_water_body_id() -> StringName:
+	if is_inside_tree():
+		return StringName(str(get_path()))
+	return StringName("%s_%d" % [name, get_instance_id()])
 
 
 func _on_body_entered(body: Node3D) -> void:
@@ -354,6 +495,9 @@ func _on_body_exited(body: Node3D) -> void:
 
 
 func _process_body_in_water(body: Node3D, delta: float) -> void:
+	if sample_water_coverage(body.global_position) <= 0.0:
+		return
+
 	# Check if body is actually swimming (head underwater)
 	var body_pos := body.global_position
 	var water_level := global_position.y + water_surface_height
@@ -368,7 +512,7 @@ func _process_body_in_water(body: Node3D, delta: float) -> void:
 			# You can apply current force here if you have access to the body's movement system
 
 	# Apply buoyancy if enabled
-	if enable_buoyancy and body is RigidBody3D:
+	if enable_buoyancy and body is RigidBody3D and not body is BuoyancyBody3D:
 		var submersion := _calculate_submersion(body, water_level)
 		if submersion > 0.0:
 			_apply_buoyancy_force(body, submersion)
@@ -411,7 +555,7 @@ func is_position_in_water(pos: Vector3) -> bool:
 
 ## Get water height at a horizontal position (for swimming/buoyancy)
 func get_water_height(world_pos: Vector3) -> float:
-	if is_position_in_water(world_pos):
+	if sample_water_coverage(world_pos) > 0.0:
 		return global_position.y + water_surface_height
 	return -1000.0  # Not in water
 

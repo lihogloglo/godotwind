@@ -9,6 +9,7 @@
 // include. Imported GLSL compute shaders intentionally do not include this file.
 
 #include "res://src/core/water/shaders/ocean_shore_common.gdshaderinc"
+#include "res://src/core/water/shaders/water_interaction_common.gdshaderinc"
 
 struct WaterSurfaceContractSample {
 	float y;

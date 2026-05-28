@@ -141,12 +141,9 @@ func process_stack(_delta: float, main_viewport_size: Vector2i = Vector2i.ZERO) 
 	_apply_receiver_layer_contract()
 
 	var state: WaterSurfaceState = _get_water_state()
-	var active_water: bool = (
-		state != null
-		and state.water_body_id != WaterSurfaceState.WATER_BODY_NONE
-		and state.coverage_available
-	)
-	var activation_water_level := _get_activation_water_level(state)
+	var camera_water := _get_camera_water_query(state)
+	var active_water: bool = bool(camera_water.get("has_water_body", false))
+	var activation_water_level := float(camera_water.get("height", _get_fallback_water_level(state)))
 
 	_prewater_capture.configure(_camera, _get_environment(), receiver_layer_mask, occlusion_exclusion_layer_mask)
 	_prewater_capture.near_water_capture_fade_start_m = DEFAULT_NEAR_WATER_FADE_START_M
@@ -274,10 +271,27 @@ func _get_water_state() -> WaterSurfaceState:
 
 
 func _get_activation_water_level(state: WaterSurfaceState) -> float:
-	var fallback: float = state.sea_level if state != null else ProjectSettings.get_setting("ocean/sea_level", 0.0)
-	if state != null and _camera != null and is_instance_valid(_camera) and state.can_sample_height():
-		return state.sample_height(_camera.global_position, fallback)
-	return fallback
+	return float(_get_camera_water_query(state).get("height", _get_fallback_water_level(state)))
+
+
+func _get_camera_water_query(state: WaterSurfaceState) -> Dictionary:
+	var fallback := _get_fallback_water_level(state)
+	if state == null or _camera == null or not is_instance_valid(_camera):
+		return {
+			"has_water_body": false,
+			"height": fallback,
+		}
+	var query := state.sample_surface_query(_camera.global_position)
+	var water_y := float(query.get("height", fallback))
+	var has_body := bool(query.get("has_water_body", false)) and not is_nan(water_y) and water_y > -1.0e20
+	return {
+		"has_water_body": has_body,
+		"height": water_y if has_body else fallback,
+	}
+
+
+func _get_fallback_water_level(state: WaterSurfaceState) -> float:
+	return state.sea_level if state != null else ProjectSettings.get_setting("ocean/sea_level", 0.0)
 
 
 func _get_environment() -> Environment:

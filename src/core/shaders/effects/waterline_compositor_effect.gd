@@ -43,14 +43,18 @@ var _state_buffer: RID
 var _displacement_rid: RID
 var _normal_rid: RID
 var _shore_mask_rid: RID
+var _water_body_atlas_rid: RID
 var _caustics_noise_rid: RID
 var _fallback_shore_rid: RID
+var _fallback_water_body_atlas_rid: RID
 var _map_scales: PackedVector4Array = PackedVector4Array()
 var _state_buffer_size: int = 0
 var _sea_level: float = 0.0
 var _wave_scale: float = 1.0
 var _shore_mask_bounds: Vector4 = Vector4(-8000.0, -8000.0, 16000.0, 16000.0)
 var _shore_fade_distance: float = 50.0
+var _water_body_atlas_bounds: Vector4 = Vector4.ZERO
+var _water_body_atlas_available: bool = false
 var _shore_wave_amplitude: float = 0.0
 var _shore_wave_frequency: float = 0.1
 var _shore_wave_speed: float = 0.4
@@ -196,6 +200,10 @@ func _create_fallback_shore_mask() -> void:
 	img.set_pixel(0, 0, Color(1.0, 0.5, 0.5, 1.0))
 	_fallback_shore_rid = _create_rd_rgba8_texture(img)
 	_shore_mask_rid = _fallback_shore_rid
+	var atlas_img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	atlas_img.set_pixel(0, 0, Color(0.0, 0.0, 0.0, 0.0))
+	_fallback_water_body_atlas_rid = _create_rd_rgba8_texture(atlas_img)
+	_water_body_atlas_rid = _fallback_water_body_atlas_rid
 
 
 func _load_caustics_textures() -> void:
@@ -253,6 +261,9 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	_wave_scale = state.wave_scale
 	_shore_mask_bounds = state.shore_mask_bounds
 	_shore_fade_distance = state.shore_fade_distance
+	_water_body_atlas_bounds = state.water_body_atlas_bounds
+	_water_body_atlas_available = state.has_water_body_atlas()
+	_water_body_atlas_rid = state.water_body_atlas_rd if _water_body_atlas_available else _fallback_water_body_atlas_rid
 	_shore_wave_amplitude = state.shore_wave_amplitude
 	_shore_wave_frequency = state.shore_wave_frequency
 	_shore_wave_speed = state.shore_wave_speed
@@ -282,7 +293,9 @@ func set_debug_mode(value: int) -> void:
 
 
 ## Sets the water-body datum used only for whole-pass activation. The compute
-## shader samples the animated wave surface for per-pixel optics.
+## shader samples the animated ocean surface for per-pixel optics. Registered
+## rivers/lakes remain camera-query activated until a real screen-space
+## coverage/height texture is available.
 func set_activation_water_level(value: float) -> void:
 	_camera_water_level = value
 
@@ -637,6 +650,13 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_occlusion_depth.add_id(occlusion_depth_rid if occlusion_depth_rid.is_valid() else depth_texture)
 	uniforms.append(u_occlusion_depth)
 
+	var u_water_body_atlas := RDUniform.new()
+	u_water_body_atlas.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_water_body_atlas.binding = 11
+	u_water_body_atlas.add_id(_linear_clamp_sampler)
+	u_water_body_atlas.add_id(_water_body_atlas_rid if _water_body_atlas_rid.is_valid() else _fallback_water_body_atlas_rid)
+	uniforms.append(u_water_body_atlas)
+
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
 		return
@@ -793,6 +813,10 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_medium_color.x)
 	data.append(_medium_color.y)
 	data.append(_medium_color.z)
+	data.append(_water_body_atlas_bounds.x)
+	data.append(_water_body_atlas_bounds.y)
+	data.append(_water_body_atlas_bounds.z)
+	data.append(_water_body_atlas_bounds.w)
 	data.append(_absorption_sigma.x)
 	data.append(_absorption_sigma.y)
 	data.append(_absorption_sigma.z)
@@ -812,7 +836,7 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_receiver_optical_max_path_m)
 	data.append(_receiver_surface_visual_depth_m)
 	data.append(_receiver_debug_depth_scale_m)
-	data.append(0.0)
+	data.append(1.0 if _water_body_atlas_available else 0.0)
 
 	var projection: Projection = scene_data.get_cam_projection()
 	for col in 4:
@@ -946,6 +970,9 @@ func on_effect_removed() -> void:
 		if _fallback_shore_rid.is_valid():
 			rd.free_rid(_fallback_shore_rid)
 			_fallback_shore_rid = RID()
+		if _fallback_water_body_atlas_rid.is_valid():
+			rd.free_rid(_fallback_water_body_atlas_rid)
+			_fallback_water_body_atlas_rid = RID()
 		if _caustics_noise_rid.is_valid():
 			rd.free_rid(_caustics_noise_rid)
 			_caustics_noise_rid = RID()
@@ -956,4 +983,5 @@ func on_effect_removed() -> void:
 	_displacement_rid = RID()
 	_normal_rid = RID()
 	_shore_mask_rid = RID()
+	_water_body_atlas_rid = RID()
 	super.on_effect_removed()

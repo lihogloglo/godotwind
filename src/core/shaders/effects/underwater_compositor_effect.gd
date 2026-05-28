@@ -31,7 +31,9 @@ var _state_buffer: RID
 var _state_buffer_size: int = 0
 var _displacement_rid: RID
 var _shore_mask_rid: RID
+var _water_body_atlas_rid: RID
 var _fallback_shore_rid: RID
+var _fallback_water_body_atlas_rid: RID
 var _dummy_displacement_rid: RID
 var _caustics_noise_rid: RID
 
@@ -42,6 +44,8 @@ var _ocean_time: float = 0.0
 var _map_scales: PackedVector4Array = PackedVector4Array()
 var _shore_mask_bounds: Vector4 = Vector4(-8000.0, -8000.0, 16000.0, 16000.0)
 var _shore_fade_distance: float = 50.0
+var _water_body_atlas_bounds: Vector4 = Vector4.ZERO
+var _water_body_atlas_available: bool = false
 var _shore_wave_amplitude: float = 0.0
 var _shore_wave_frequency: float = 0.1
 var _shore_wave_speed: float = 0.4
@@ -112,6 +116,7 @@ func on_effect_removed() -> void:
 			_scene_copy_shader_rid,
 			_state_buffer,
 			_fallback_shore_rid,
+			_fallback_water_body_atlas_rid,
 			_dummy_displacement_rid,
 			_caustics_noise_rid,
 		]:
@@ -126,7 +131,9 @@ func on_effect_removed() -> void:
 		_state_buffer = RID()
 		_displacement_rid = RID()
 		_shore_mask_rid = RID()
+		_water_body_atlas_rid = RID()
 		_fallback_shore_rid = RID()
+		_fallback_water_body_atlas_rid = RID()
 		_dummy_displacement_rid = RID()
 		_caustics_noise_rid = RID()
 	_source_copy_size = Vector2i.ZERO
@@ -145,6 +152,9 @@ func sync_from_water_state(state: WaterSurfaceState) -> void:
 	_map_scales = state.map_scales
 	_shore_mask_bounds = state.shore_mask_bounds
 	_shore_fade_distance = state.shore_fade_distance
+	_water_body_atlas_bounds = state.water_body_atlas_bounds
+	_water_body_atlas_available = state.has_water_body_atlas()
+	_water_body_atlas_rid = state.water_body_atlas_rd if _water_body_atlas_available else _fallback_water_body_atlas_rid
 	_shore_wave_amplitude = state.shore_wave_amplitude
 	_shore_wave_frequency = state.shore_wave_frequency
 	_shore_wave_speed = state.shore_wave_speed
@@ -168,6 +178,9 @@ func set_debug_mode(value: int) -> void:
 	_debug_mode = clampi(value, 0, 5)
 
 
+## Registered water bodies currently drive this whole-pass camera datum only.
+## True per-pixel river/lake optics need a future screen-space coverage/height
+## texture path; do not fake that by treating the global water_body_id as local.
 func set_camera_water_level(value: float) -> void:
 	_camera_water_level = value
 
@@ -291,6 +304,10 @@ func _create_fallback_textures() -> void:
 	shore_img.set_pixel(0, 0, Color(1.0, 0.5, 0.5, 1.0))
 	_fallback_shore_rid = _create_rd_rgba8_texture(shore_img)
 	_shore_mask_rid = _fallback_shore_rid
+	var atlas_img := Image.create(1, 1, false, Image.FORMAT_RGBA8)
+	atlas_img.set_pixel(0, 0, Color(0.0, 0.0, 0.0, 0.0))
+	_fallback_water_body_atlas_rid = _create_rd_rgba8_texture(atlas_img)
+	_water_body_atlas_rid = _fallback_water_body_atlas_rid
 	_create_dummy_displacement_texture()
 	_displacement_rid = _dummy_displacement_rid
 
@@ -474,6 +491,13 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	u_caustics.add_id(_caustics_noise_rid if _caustics_noise_rid.is_valid() else _fallback_shore_rid)
 	uniforms.append(u_caustics)
 
+	var u_water_body_atlas := RDUniform.new()
+	u_water_body_atlas.uniform_type = RenderingDevice.UNIFORM_TYPE_SAMPLER_WITH_TEXTURE
+	u_water_body_atlas.binding = 7
+	u_water_body_atlas.add_id(_linear_sampler)
+	u_water_body_atlas.add_id(_water_body_atlas_rid if _water_body_atlas_rid.is_valid() else _fallback_water_body_atlas_rid)
+	uniforms.append(u_water_body_atlas)
+
 	var uniform_set := rd.uniform_set_create(uniforms, shader_rid, 0)
 	if not uniform_set.is_valid():
 		return
@@ -626,6 +650,14 @@ func _build_state_buffer_data(scene_data: RenderSceneDataRD) -> PackedFloat32Arr
 	data.append(_medium_color.y)
 	data.append(_medium_color.z)
 	data.append(_caustics_strength)
+	data.append(_water_body_atlas_bounds.x)
+	data.append(_water_body_atlas_bounds.y)
+	data.append(_water_body_atlas_bounds.z)
+	data.append(_water_body_atlas_bounds.w)
+	data.append(1.0 if _water_body_atlas_available else 0.0)
+	data.append(0.0)
+	data.append(0.0)
+	data.append(0.0)
 	return data
 
 

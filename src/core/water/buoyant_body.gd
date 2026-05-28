@@ -144,9 +144,10 @@ func _apply_drag_forces(_delta: float) -> void:
 
 
 func _get_water_height(world_pos: Vector3) -> float:
-	# Use OceanManager if available
 	if is_instance_valid(OceanManager):
-		return OceanManager.get_wave_height(world_pos)
+		var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+		if state != null and state.can_sample_height():
+			return state.sample_height(world_pos, 0.0)
 
 	# Fallback to sea level
 	return 0.0

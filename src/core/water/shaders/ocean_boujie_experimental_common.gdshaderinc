@@ -117,6 +117,7 @@ varying float v_vertex_dist;
 varying float v_choppiness;
 varying vec2 v_shore_slope;
 varying float v_shore_choppiness;
+varying float v_interaction_foam;
 varying vec3 v_boujie_uv_tri;
 varying vec3 v_boujie_uv_power_normal;
 varying vec3 v_boujie_refraction_uv_tri;
@@ -199,6 +200,7 @@ vec3 boujie_surface_gradient(vec2 world_xz, float water_thickness) {
 	}
 	gradient *= smoothstep(0.0, 1.0, water_thickness);
 	gradient.xy += v_shore_slope;
+	gradient.xy += water_surface_interaction_gradient(world_xz);
 	return gradient;
 }
 
@@ -271,7 +273,9 @@ void fragment() {
 	float jacobian_foam = smoothstep(0.0, 1.0, gradient.z * 0.75) * foam_dist_fade * foam_intensity;
 	jacobian_foam *= mix(0.6, 1.0, foam_detail) * foam_fade_alpha;
 	float shore_foam = contact_factor * foam_detail * shore_fade_alpha;
+	float interaction_foam = water_surface_interaction_foam(v_world_pos.xz) * mix(0.45, 1.0, foam_detail);
 	foam_factor = max(jacobian_foam, shore_foam);
+	foam_factor = max(foam_factor, interaction_foam);
 	float transmission_visibility = 1.0 - clamp(max(foam_factor, contact_factor), 0.0, 1.0);
 
 	vec4 ref_tex = boujie_triplanar_texture(
@@ -420,6 +424,15 @@ void fragment() {
 	}
 	ROUGHNESS = (1.0 - fresnel) * foam_factor * 0.6 + roughness;
 	ALPHA = alpha_fade;
+	if (water_interaction_debug_enabled) {
+		vec3 interaction_debug_color = water_surface_interaction_debug_color(v_world_pos.xz);
+		ALBEDO = interaction_debug_color;
+		EMISSION = interaction_debug_color * 1.5;
+		ALPHA = 1.0;
+		ROUGHNESS = 1.0;
+		METALLIC = 0.0;
+		SPECULAR = 0.0;
+	}
 }
 
 void light() {

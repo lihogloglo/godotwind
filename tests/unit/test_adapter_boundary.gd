@@ -110,6 +110,7 @@ const BASELINE_MORROWIND_PRELOAD_COUNTS: Dictionary = {
 const BASELINE_TEXT_FORBIDDEN_COUNTS: Dictionary = {
 	"docs/ARCHITECTURE.md": 31,
 	"docs/plans/fixing_hlod.md": 6,
+	"docs/plans/flowing_rivers_architecture.md": 8,
 	"docs/plans/groundcover.md": 44,
 	"docs/plans/impostor_rebuild.md": 9,
 	"docs/plans/lighting_roadmap.md": 1,

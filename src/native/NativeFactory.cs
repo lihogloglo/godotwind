@@ -293,6 +293,24 @@ public partial class NativeFactory : RefCounted
         return new NativeShoreMaskBaker();
     }
 
+    /// <summary>
+    /// Create a river flow-map baker.
+    /// Source adapters provide terrain samples; this class only handles generic
+    /// water-mask segmentation and flow-vector encoding.
+    /// </summary>
+    public NativeRiverFlowBaker CreateRiverFlowBaker()
+    {
+        return new NativeRiverFlowBaker();
+    }
+
+    /// <summary>
+    /// Create a generic curved river surface mesh builder.
+    /// </summary>
+    public NativeRiverMeshBuilder CreateRiverMeshBuilder()
+    {
+        return new NativeRiverMeshBuilder();
+    }
+
     // =========================================================================
     // Object Paging (chunk merge kernel)
     // =========================================================================

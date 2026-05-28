@@ -165,8 +165,11 @@ void vertex() {
 	world_pos.y += shore_offset.z;
 	v_shore_slope = shore_slope;
 	v_shore_choppiness = shore_offset.w;
+	float interaction_height = water_surface_interaction_height(world_pos.xz) * projected_coverage;
+	world_pos.y += interaction_height;
+	v_interaction_foam = water_surface_interaction_foam(world_pos.xz) * projected_coverage;
 
-	wave_height = displacement.y * shore * projected_coverage + shore_offset.z;
+	wave_height = displacement.y * shore * projected_coverage + shore_offset.z + interaction_height;
 	v_world_pos = world_pos;
 	v_choppiness = chop_accum * wave_scale * shore * projected_coverage;
 	v_projected_coverage = projected_coverage;

@@ -10,6 +10,8 @@
 class_name PlayerController
 extends CharacterBody3D
 
+const WaterInteractorScript := preload("res://src/core/water/water_interactor.gd")
+
 
 #region Signals
 
@@ -221,6 +223,7 @@ var _interaction_raycaster: Node = null
 ## `interact_release` → `release()`. Held-body state lives entirely in
 ## CarryController per `INTERACTION_SYSTEM.md` §6.2 MF1.
 var _carry_controller: Node = null
+var _water_interactor: WaterInteractor = null
 
 ## Tracks the previous frame's modal gate state so we can edge-detect
 ## open→closed and re-capture the mouse automatically. Without this the
@@ -239,6 +242,7 @@ func _ready() -> void:
 	_ensure_input_actions()
 	_setup_collision()
 	_setup_camera()
+	_setup_water_interactor()
 
 	_tilt_limit_rad = deg_to_rad(tilt_limit_degrees)
 	_target_camera_distance = 0.0 if camera_mode == CameraMode.FIRST_PERSON else camera_distance
@@ -246,6 +250,23 @@ func _ready() -> void:
 
 	set_physics_process(true)
 	set_process_input(true)
+
+
+func _setup_water_interactor() -> void:
+	if _water_interactor != null:
+		return
+	_water_interactor = WaterInteractorScript.new()
+	_water_interactor.name = "WaterInteractor"
+	_water_interactor.radius_m = player_radius
+	_water_interactor.impact_strength = 1.15
+	_water_interactor.wake_strength = 0.32
+	_water_interactor.surface_band_m = 0.55
+	_water_interactor.probe_offsets = PackedVector3Array([
+		Vector3(-player_radius * 0.45, 0.08, 0.0),
+		Vector3(player_radius * 0.45, 0.08, 0.0),
+		Vector3(0.0, player_height * 0.45, 0.0),
+	])
+	add_child(_water_interactor)
 
 
 func _physics_process(delta: float) -> void:
@@ -859,19 +880,23 @@ func _find_nearest_poi() -> Vector3:
 # =============================================================================
 
 ## Check ocean/water height at player position each frame.
-## Uses OceanManager's shared water surface, or static water volumes (Area3D).
+## Uses OceanManager's unified water surface. Legacy WaterVolume callbacks remain
+## as a compatibility fallback for old scenes that have not registered bodies.
 func _update_water_state() -> void:
 	var pos := global_position
+	var queried_surface_y := -INF
 
-	# Static water volumes take priority (set by Area3D body_entered/exited)
-	if _in_water_volume:
+	if OceanManager != null and OceanManager.has_method("get_water_surface_state"):
+		var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+		if state != null and state.can_sample_height():
+			queried_surface_y = state.sample_height(pos, -INF)
+	elif OceanManager != null and OceanManager.is_system_enabled():
+		queried_surface_y = OceanManager.get_wave_height(pos)
+
+	if _in_water_volume and _water_volume_surface_y > queried_surface_y:
 		_water_surface_y = _water_volume_surface_y
-	elif OceanManager.is_system_enabled():
-		# Same water-height contract used by buoyant objects; character response
-		# remains controller-specific instead of RigidBody buoyancy.
-		_water_surface_y = OceanManager.get_wave_height(pos)
 	else:
-		_water_surface_y = -INF
+		_water_surface_y = queried_surface_y
 
 	var was_in_water := in_water
 	# Player is "in water" when their feet are below the surface
