@@ -256,9 +256,9 @@ func _setup_ocean() -> void:
 	# Initialize ocean — sea level well below platform so FFT waves don't reach ground
 	# Platform ground is at Y=0. FFT waves have ~1-2m amplitude around sea_level.
 	# Setting sea_level=-3 gives 1-2m clearance even at wave peaks.
-	OceanManager.force_initialize()
-	OceanManager.set_sea_level(-3.0)
-	OceanManager.set_enabled(true)
+	WaterSystem.force_initialize()
+	WaterSystem.set_sea_level(-3.0)
+	WaterSystem.set_enabled(true)
 
 
 func _create_terrain() -> void:

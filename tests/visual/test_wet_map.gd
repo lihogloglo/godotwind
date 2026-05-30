@@ -90,11 +90,11 @@ func _ready() -> void:
 	_camera.rotation_degrees = Vector3(_pitch, _yaw, 0)
 
 	# Ocean sea level
-	if OceanManager and not OceanManager.is_initialized():
-		OceanManager.force_initialize()
-	if OceanManager and OceanManager.is_initialized():
-		OceanManager.set_camera(_camera)
-		_sea_level = OceanManager.sea_level
+	if WaterSystem and not WaterSystem.is_initialized():
+		WaterSystem.force_initialize()
+	if WaterSystem and WaterSystem.is_initialized():
+		WaterSystem.set_camera(_camera)
+		_sea_level = WaterSystem.sea_level
 
 	# UI (before shader override so user sees diagnostics)
 	_create_ui()

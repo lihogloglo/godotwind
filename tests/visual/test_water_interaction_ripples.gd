@@ -153,30 +153,30 @@ func _build_camera() -> void:
 
 
 func _setup_ocean() -> void:
-	if OceanManager == null:
-		push_error("[WaterInteractionRipples] OceanManager missing")
+	if WaterSystem == null:
+		push_error("[WaterInteractionRipples] WaterSystem missing")
 		return
 	ProjectSettings.set_setting("ocean/quality", 0)
 	ProjectSettings.set_setting("ocean/radius", TEST_OCEAN_RADIUS_M)
-	OceanManager.water_quality = 0
-	OceanManager.ocean_radius = TEST_OCEAN_RADIUS_M
-	OceanManager.sea_spray_enabled = false
-	OceanManager.underwater_particles_enabled = false
-	OceanManager.force_initialize()
-	OceanManager.set_process(false)
-	OceanManager.set_physics_process(false)
-	OceanManager.set_camera(_camera)
-	OceanManager.set_sea_level(-2.0)
-	OceanManager.set_water_quality(0)
-	if OceanManager.has_method("_dispose_spray_layer"):
-		OceanManager.call("_dispose_spray_layer")
-	if OceanManager.has_method("_dispose_underwater_particulates_layer"):
-		OceanManager.call("_dispose_underwater_particulates_layer")
-	var ocean_mesh := OceanManager.get("_ocean_mesh") as Node3D
+	WaterSystem.water_quality = 0
+	WaterSystem.ocean_radius = TEST_OCEAN_RADIUS_M
+	WaterSystem.sea_spray_enabled = false
+	WaterSystem.underwater_particles_enabled = false
+	WaterSystem.force_initialize()
+	WaterSystem.set_process(false)
+	WaterSystem.set_physics_process(false)
+	WaterSystem.set_camera(_camera)
+	WaterSystem.set_sea_level(-2.0)
+	WaterSystem.set_water_quality(0)
+	if WaterSystem.has_method("_dispose_spray_layer"):
+		WaterSystem.call("_dispose_spray_layer")
+	if WaterSystem.has_method("_dispose_underwater_particulates_layer"):
+		WaterSystem.call("_dispose_underwater_particulates_layer")
+	var ocean_mesh := WaterSystem.get("_ocean_mesh") as Node3D
 	if ocean_mesh != null:
 		ocean_mesh.visible = false
-	OceanManager.set_wave_scale(0.08)
-	OceanManager.set_water_interaction_debug_enabled(_debug_enabled)
+	WaterSystem.set_wave_scale(0.08)
+	WaterSystem.set_water_interaction_debug_enabled(_debug_enabled)
 
 
 func _make_volume(volume_name: String, type_id: int, dimensions: Vector3, pos: Vector3, flow: Vector2, speed: float) -> void:
@@ -192,10 +192,10 @@ func _make_volume(volume_name: String, type_id: int, dimensions: Vector3, pos: V
 	volume.position = pos
 	add_child(volume)
 	_water_volumes.append(volume)
-	if is_instance_valid(OceanManager):
-		var register_err: Error = OceanManager.register_water_body(volume.get_water_body_descriptor())
-		OceanManager.register_water_interaction_renderer(volume)
-		var stats: Dictionary = OceanManager.get_water_body_runtime_status()
+	if is_instance_valid(WaterSystem):
+		var register_err: Error = WaterSystem.register_water_body(volume.get_water_body_descriptor())
+		WaterSystem.register_water_interaction_renderer(volume)
+		var stats: Dictionary = WaterSystem.get_water_body_runtime_status()
 		var registry_stats := stats.get("registry", {}) as Dictionary
 		Log.info("water", "[WaterInteractionRipples] registered %s err=%d bodies=%d" % [
 			volume.name,
@@ -347,8 +347,8 @@ func _build_ui() -> void:
 
 
 func _apply_debug_mode() -> void:
-	if OceanManager != null:
-		OceanManager.set_water_interaction_debug_enabled(_debug_enabled)
+	if WaterSystem != null:
+		WaterSystem.set_water_interaction_debug_enabled(_debug_enabled)
 
 
 func _update_movers(_delta: float) -> void:
@@ -370,7 +370,7 @@ func _emit_debug_impulses() -> void:
 
 
 func _emit_debug_impulse_burst(count: int) -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
 	var positions := [
 		Vector3(-17.0 + sin(_time) * 2.0, 0.0, cos(_time * 0.8) * 1.3),
@@ -383,11 +383,11 @@ func _emit_debug_impulse_burst(count: int) -> void:
 		var row := float(i / positions.size())
 		var offset := Vector3(sin(float(i) * 1.37) * 0.85, 0.0, cos(float(i) * 0.91) * 0.85 + row * 0.015)
 		if _smoke_mode:
-			var sim := OceanManager.get("_water_interaction_sim") as WaterInteractionSim
+			var sim := WaterSystem.get("_water_interaction_sim") as WaterInteractionSim
 			if sim != null:
 				sim.queue_impulse(base + offset, 0.55 + float(i % positions.size()) * 0.05, 2.0, -2.0, 1.0, false)
 			continue
-		OceanManager.emit_water_impulse(
+		WaterSystem.emit_water_impulse(
 			base + offset,
 			0.55 + float(i % positions.size()) * 0.05,
 			2.0,
@@ -397,10 +397,10 @@ func _emit_debug_impulse_burst(count: int) -> void:
 
 
 func _update_debug_label() -> void:
-	if _debug_label == null or OceanManager == null:
+	if _debug_label == null or WaterSystem == null:
 		return
-	var stats: Dictionary = OceanManager.get_water_interaction_stats()
-	var body_stats: Dictionary = OceanManager.get_water_body_runtime_status() if OceanManager.has_method("get_water_body_runtime_status") else {}
+	var stats: Dictionary = WaterSystem.get_water_interaction_stats()
+	var body_stats: Dictionary = WaterSystem.get_water_body_runtime_status() if WaterSystem.has_method("get_water_body_runtime_status") else {}
 	var fps := int(Engine.get_frames_per_second())
 	var frame_ms := _average_frame_ms()
 	_debug_label.text = "\n".join([
@@ -482,11 +482,11 @@ func _update_held_ball() -> void:
 
 
 func _emit_ball_interactions(delta: float) -> void:
-	if _play_ball_interactor == null or OceanManager == null:
+	if _play_ball_interactor == null or WaterSystem == null:
 		return
-	var state := OceanManager.get_water_surface_state()
+	var state := WaterSystem.get_water_surface_state()
 	for impulse: Dictionary in _play_ball_interactor.gather_impulses(delta, state):
-		OceanManager.emit_water_impulse(
+		WaterSystem.emit_water_impulse(
 			impulse["position"],
 			float(impulse["radius_m"]),
 			float(impulse["strength"]),
@@ -498,9 +498,9 @@ func _emit_ball_interactions(delta: float) -> void:
 
 
 func _update_water_interaction_manual(delta: float) -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
-	var sim := OceanManager.get("_water_interaction_sim") as WaterInteractionSim
+	var sim := WaterSystem.get("_water_interaction_sim") as WaterInteractionSim
 	if sim == null:
 		return
 	var center := _camera.global_position if _camera != null else Vector3.ZERO
@@ -527,11 +527,11 @@ func _grab_target() -> Vector3:
 
 func _log_perf_periodically(delta: float) -> void:
 	_perf_log_elapsed += delta
-	if _perf_log_elapsed < 3.0 or OceanManager == null:
+	if _perf_log_elapsed < 3.0 or WaterSystem == null:
 		return
 	_perf_log_elapsed = 0.0
-	var stats: Dictionary = OceanManager.get_water_interaction_stats()
-	var body_stats: Dictionary = OceanManager.get_water_body_runtime_status() if OceanManager.has_method("get_water_body_runtime_status") else {}
+	var stats: Dictionary = WaterSystem.get_water_interaction_stats()
+	var body_stats: Dictionary = WaterSystem.get_water_body_runtime_status() if WaterSystem.has_method("get_water_body_runtime_status") else {}
 	var fps := int(Engine.get_frames_per_second())
 	var frame_ms := _average_frame_ms()
 	var registry_stats := body_stats.get("registry", {}) as Dictionary
@@ -573,14 +573,14 @@ func _run_smoke() -> void:
 	for _i in range(30):
 		await get_tree().process_frame
 		_step_smoke_sim()
-		var stats: Dictionary = OceanManager.get_water_interaction_stats()
+		var stats: Dictionary = WaterSystem.get_water_interaction_stats()
 		var gpu_ms := float(stats.get("gpu_ms", -1.0))
 		if gpu_ms >= 0.0 and gpu_ms < 50.0:
 			best_gpu_ms = minf(best_gpu_ms, gpu_ms)
 		best_cpu_us = mini(best_cpu_us, int(stats.get("cpu_prepare_us", stats.get("cpu_upload_us", 0))))
 		max_splats = maxi(max_splats, int(stats.get("splat_dispatch_count", 0)))
 		saw_splats = saw_splats or max_splats > 0
-	var stats: Dictionary = OceanManager.get_water_interaction_stats()
+	var stats: Dictionary = WaterSystem.get_water_interaction_stats()
 	if int(stats.get("dispatch_count", 0)) > 0 and best_gpu_ms < INF:
 		if best_gpu_ms > SMOKE_GPU_MS_LIMIT:
 			push_error("[WaterInteractionRipples] ripple simulation exceeded smoke GPU budget: %.3f ms > %.3f ms" % [
@@ -599,14 +599,14 @@ func _run_smoke() -> void:
 		get_tree().quit(0)
 		return
 
-	push_error("[WaterInteractionRipples] ripple simulation did not dispatch; stats=%s" % str(OceanManager.get_water_interaction_stats() if OceanManager != null else {}))
+	push_error("[WaterInteractionRipples] ripple simulation did not dispatch; stats=%s" % str(WaterSystem.get_water_interaction_stats() if WaterSystem != null else {}))
 	get_tree().quit(1)
 
 
 func _step_smoke_sim() -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
-	var sim := OceanManager.get("_water_interaction_sim") as WaterInteractionSim
+	var sim := WaterSystem.get("_water_interaction_sim") as WaterInteractionSim
 	if sim == null:
 		return
 	var center := _camera.global_position if _camera != null else Vector3.ZERO

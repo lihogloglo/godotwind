@@ -25,15 +25,17 @@ class_name DoorInteractable
 extends Interactable
 
 
-## Emitted when the player triggers door activation. Consumers (e.g. the
-## scene's door_portal driver) listen for this and call into the
-## existing `DoorPortal.activate()` API. Decoupled so this adapter
-## doesn't import the portal directly.
-signal door_activated(record_id: String, door_record: Variant, player: Node3D)
+## Emitted when the player triggers door activation. The first argument is the
+## placed-door key, not the base DOOR record id.
+signal door_activated(door_instance_key: String, door_record: Variant, player: Node3D)
 
 
 ## ESM record_id (lowercase) of the DOOR record this adapter wraps.
 @export var record_id: String = ""
+
+## Stable placed-reference key used by InteriorPocketManager. Base record ids are
+## shared by many placed doors, so gameplay activation must use this key.
+@export var door_instance_key: String = ""
 
 ## Human-readable name shown in the prompt ("Open Iron Door").
 @export var display_name: String = ""
@@ -70,5 +72,6 @@ func interact(player: Node3D) -> void:
 		display_name if not display_name.is_empty() else record_id,
 		(" → " + destination_name) if has_destination else "",
 	])
-	door_activated.emit(record_id, door_record, player)
+	var activation_key := door_instance_key if not door_instance_key.is_empty() else record_id
+	door_activated.emit(activation_key, door_record, player)
 	super.interact(player)

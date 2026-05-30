@@ -1023,20 +1023,20 @@ func _cmd_impostor_show(args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_ocean_debug(args: Dictionary) -> CommandRegistry.CommandResult:
 	var state: String = args.get("state", "toggle")
 
-	# Get OceanManager autoload
+	# Get WaterSystem autoload
 	var ocean: Variant = _context.get("ocean")
 	if not ocean:
 		# Try to find it
-		ocean = get_node_or_null("/root/OceanManager")
+		ocean = get_node_or_null("/root/WaterSystem")
 		if ocean:
 			_context["ocean"] = ocean
 
 	if not ocean or not ocean is Object:
-		return CommandRegistry.CommandResult.error("OceanManager not found")
+		return CommandRegistry.CommandResult.error("WaterSystem not found")
 
 	var ocean_obj: Object = ocean as Object
 	if not ocean_obj.has_method("get_ocean_mesh"):
-		return CommandRegistry.CommandResult.error("OceanManager doesn't have get_ocean_mesh method")
+		return CommandRegistry.CommandResult.error("WaterSystem doesn't have get_ocean_mesh method")
 
 	var ocean_mesh: Variant = ocean_obj.call("get_ocean_mesh")
 	if not ocean_mesh or not ocean_mesh is Object:
@@ -1071,15 +1071,15 @@ func _cmd_ocean_debug(args: Dictionary) -> CommandRegistry.CommandResult:
 
 
 func _cmd_ocean_info(_args: Dictionary) -> CommandRegistry.CommandResult:
-	# Get OceanManager autoload
+	# Get WaterSystem autoload
 	var ocean: Variant = _context.get("ocean")
 	if not ocean:
-		ocean = get_node_or_null("/root/OceanManager")
+		ocean = get_node_or_null("/root/WaterSystem")
 		if ocean:
 			_context["ocean"] = ocean
 
 	if not ocean or not ocean is Object:
-		return CommandRegistry.CommandResult.error("OceanManager not found")
+		return CommandRegistry.CommandResult.error("WaterSystem not found")
 
 	var ocean_obj: Object = ocean as Object
 	var lines: PackedStringArray = ["[b]Ocean System Info[/b]"]
@@ -1144,15 +1144,15 @@ func _cmd_ocean_info(_args: Dictionary) -> CommandRegistry.CommandResult:
 func _cmd_ocean_fade(args: Dictionary) -> CommandRegistry.CommandResult:
 	var distance_str: String = args.get("distance", "")
 
-	# Get OceanManager autoload
+	# Get WaterSystem autoload
 	var ocean: Variant = _context.get("ocean")
 	if not ocean:
-		ocean = get_node_or_null("/root/OceanManager")
+		ocean = get_node_or_null("/root/WaterSystem")
 		if ocean:
 			_context["ocean"] = ocean
 
 	if not ocean or not ocean is Object:
-		return CommandRegistry.CommandResult.error("OceanManager not found")
+		return CommandRegistry.CommandResult.error("WaterSystem not found")
 
 	var ocean_obj: Object = ocean as Object
 

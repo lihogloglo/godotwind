@@ -1,6 +1,6 @@
 ## BuoyancyBody3D — RigidBody3D with probe-based buoyancy physics.
 ## Add BuoyancyProbe3D children to define sampling points.
-## Queries OceanManager's unified water surface; ocean remains the fallback body.
+## Queries WaterSystem's unified water surface; ocean remains the fallback body.
 ##
 ## Two modes:
 ## - Simple probe mode (default): each probe applies buoyancy force proportional to depth.
@@ -65,11 +65,11 @@ func _physics_process(_delta: float) -> void:
 	# With the guard, the cost collapses to one branch per frozen body.
 	if freeze:
 		return
-	if not OceanManager:
+	if not WaterSystem:
 		return
 	if _probes.is_empty():
 		return
-	var water_state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	var water_state: WaterSurfaceState = WaterSystem.get_water_surface_state()
 	if water_state == null or not water_state.can_sample_height():
 		return
 

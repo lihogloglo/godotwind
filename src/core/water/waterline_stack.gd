@@ -2,7 +2,7 @@
 ##
 ## Wrapper for the receiver-only waterline compositor path. It keeps the
 ## pre-water capture viewport, active WorldEnvironment compositor, camera
-## receiver-layer contract, and OceanManager WaterSurfaceState in sync.
+## receiver-layer contract, and WaterSystem WaterSurfaceState in sync.
 class_name WaterlineStack
 extends Node
 

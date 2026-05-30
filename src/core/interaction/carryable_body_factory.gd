@@ -367,15 +367,15 @@ static func _collect_item_aabbs(node: Node, parent_xf: Transform3D, out: Array[A
 ## I.5 — is the ocean system live? Used to decide whether spawned
 ## carryables should be `BuoyancyBody3D` (floats) or plain `RigidBody3D`
 ## (sinks like a brick — fine for inland-only worlds). Reads through
-## the autoload `OceanManager` global. Safe even if the autoload's
+## the autoload `WaterSystem` global. Safe even if the autoload's
 ## `_system_initialized` is false (returns false in that case).
 static func _ocean_active() -> bool:
 	# Autoload is registered in project.godot. If the project ever
 	# removes it, this static parse-time reference will fail and
 	# the spawn path needs a manual `if Engine.has_singleton(...)` guard.
-	if OceanManager == null:
+	if WaterSystem == null:
 		return false
-	return OceanManager.is_initialized()
+	return WaterSystem.is_initialized()
 
 
 ## I.5 — auto-generate buoyancy probes from the body's collision AABB.

@@ -7,21 +7,22 @@ extends RefCounted
 
 ## Find a door node by ref_id prefix (node names are "ref_id_refnum", case-insensitive).
 ## Returns the top-level Node3D matching the ref_id within the given radius.
-static func find_by_ref_id(root: Node, ref_id: StringName, pos: Vector3, radius: float) -> Node3D:
+static func find_by_ref_id(root: Node, ref_id: StringName, pos: Vector3, radius: float, ref_num: int = -1) -> Node3D:
 	var ref_id_lower: String = str(ref_id).to_lower()
-	return _find_by_ref_id_inner(root, ref_id_lower, pos, radius)
+	return _find_by_ref_id_inner(root, ref_id_lower, pos, radius, ref_num)
 
 
-static func _find_by_ref_id_inner(root: Node, ref_id_lower: String, pos: Vector3, radius: float) -> Node3D:
+static func _find_by_ref_id_inner(root: Node, ref_id_lower: String, pos: Vector3, radius: float, ref_num: int) -> Node3D:
 	if root is Node3D:
 		var n3d := root as Node3D
 		var name_match: bool = n3d.name.to_lower().begins_with(ref_id_lower)
 		var meta_match: bool = str(n3d.get_meta("ref_id", "")).to_lower() == ref_id_lower
-		if name_match or meta_match:
+		var ref_num_match: bool = ref_num < 0 or int(n3d.get_meta("ref_num", -1)) == ref_num
+		if (name_match or meta_match) and ref_num_match:
 			if n3d.global_position.distance_to(pos) < radius:
 				return n3d
 	for child in root.get_children():
-		var result: Node3D = _find_by_ref_id_inner(child, ref_id_lower, pos, radius)
+		var result: Node3D = _find_by_ref_id_inner(child, ref_id_lower, pos, radius, ref_num)
 		if result:
 			return result
 	return null
@@ -47,21 +48,22 @@ static func find_near(root: Node, pos: Vector3, radius: float) -> Node3D:
 
 ## Find a door mesh (MeshInstance3D) by ref_id prefix. Falls back to name search.
 ## Used by DoorPortal for stencil plane sizing.
-static func find_door_mesh(root: Node, ref_id: StringName, pos: Vector3, radius: float) -> MeshInstance3D:
+static func find_door_mesh(root: Node, ref_id: StringName, pos: Vector3, radius: float, ref_num: int = -1) -> MeshInstance3D:
 	var ref_id_lower: String = str(ref_id).to_lower()
-	var result: MeshInstance3D = _find_mesh_by_ref_id(root, ref_id_lower, pos, radius)
+	var result: MeshInstance3D = _find_mesh_by_ref_id(root, ref_id_lower, pos, radius, ref_num)
 	if not result:
 		result = _find_mesh_near(root, pos, radius)
 	return result
 
 
-static func _find_mesh_by_ref_id(root: Node, ref_id_lower: String, pos: Vector3, radius: float) -> MeshInstance3D:
+static func _find_mesh_by_ref_id(root: Node, ref_id_lower: String, pos: Vector3, radius: float, ref_num: int) -> MeshInstance3D:
 	if root is Node3D:
 		var n3d := root as Node3D
 		# Match by node name prefix OR by "ref_id" metadata (set by reference_instantiator)
 		var name_match: bool = n3d.name.to_lower().begins_with(ref_id_lower)
 		var meta_match: bool = str(n3d.get_meta("ref_id", "")).to_lower() == ref_id_lower
-		if name_match or meta_match:
+		var ref_num_match: bool = ref_num < 0 or int(n3d.get_meta("ref_num", -1)) == ref_num
+		if (name_match or meta_match) and ref_num_match:
 			if n3d.global_position.distance_to(pos) < radius:
 				if n3d is MeshInstance3D:
 					return n3d as MeshInstance3D
@@ -69,7 +71,7 @@ static func _find_mesh_by_ref_id(root: Node, ref_id_lower: String, pos: Vector3,
 					if child is MeshInstance3D:
 						return child as MeshInstance3D
 	for child in root.get_children():
-		var result: MeshInstance3D = _find_mesh_by_ref_id(child, ref_id_lower, pos, radius)
+		var result: MeshInstance3D = _find_mesh_by_ref_id(child, ref_id_lower, pos, radius, ref_num)
 		if result:
 			return result
 	return null

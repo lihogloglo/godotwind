@@ -1,5 +1,5 @@
 ## WaterInteractionSim - near-field visual ripple atlas for water contacts.
-## Owned by OceanManager. Gameplay emits compact impulses; shaders consume the
+## Owned by WaterSystem. Gameplay emits compact impulses; shaders consume the
 ## resulting player-centered Texture2DRD in world XZ.
 class_name WaterInteractionSim
 extends Node

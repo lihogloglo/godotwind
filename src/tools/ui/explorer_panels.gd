@@ -44,7 +44,10 @@ var panel_vbox: VBoxContainer = null
 
 ## Rendering panel widgets
 var show_characters_toggle: CheckBox = null
+var all_water_toggle: CheckBox = null
 var show_ocean_toggle: CheckBox = null
+var rivers_toggle: CheckBox = null
+var lakes_pools_toggle: CheckBox = null
 var show_sky_toggle: CheckBox = null
 var resolution_btn: OptionButton = null
 
@@ -405,16 +408,19 @@ func _build_clouds_tab(vbox: VBoxContainer) -> void:
 
 
 func _build_water_tab(vbox: VBoxContainer) -> void:
-	_add_section(vbox, "Ocean")
+	_add_section(vbox, "Water Layers")
+	all_water_toggle = _add_checkbox(vbox, "All Water", _initial_state.get("all_water", true), _cb.get("all_water_toggled", Callable()))
 	show_ocean_toggle = CheckBox.new()
-	show_ocean_toggle.text = "Ocean"
+	show_ocean_toggle.text = "Ocean Surface"
 	show_ocean_toggle.button_pressed = _initial_state.get("show_ocean", false)
 	show_ocean_toggle.toggled.connect(_cb.get("show_ocean_toggled", Callable()))
 	vbox.add_child(show_ocean_toggle)
+	rivers_toggle = _add_checkbox(vbox, "Rivers", _initial_state.get("rivers", true), _cb.get("rivers_toggled", Callable()))
+	lakes_pools_toggle = _add_checkbox(vbox, "Lakes/Pools", _initial_state.get("lakes_pools", true), _cb.get("lakes_pools_toggled", Callable()))
 
 	ocean_controls_container = VBoxContainer.new()
 	ocean_controls_container.name = "OceanControls"
-	ocean_controls_container.visible = _initial_state.get("show_ocean", false)
+	ocean_controls_container.visible = _initial_state.get("all_water", true)
 	vbox.add_child(ocean_controls_container)
 
 	_add_section(ocean_controls_container, "Underwater")

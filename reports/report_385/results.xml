@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-30" name="report_385" tests="3" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_interior_transition_phase1" package="tests/unit" timestamp="2026-05-30T07:29:13" hostname="localhost" tests="3" failures="0" errors="0" skipped="0" flaky="0" time="0.016">
+		<testcase name="test_pocket_finalization_preserves_interaction_query_area" classname="test_interior_transition_phase1" time="0.001">
+		</testcase>
+		<testcase name="test_door_handler_reconnect_is_idempotent" classname="test_interior_transition_phase1" time="0.001">
+		</testcase>
+		<testcase name="test_runtime_pocket_load_has_no_sync_fallback" classname="test_interior_transition_phase1" time="0.005">
+		</testcase>
+	</testsuite>
+</testsuites>

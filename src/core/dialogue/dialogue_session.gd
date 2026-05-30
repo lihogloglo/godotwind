@@ -26,7 +26,7 @@
 ##
 ## This is a plain RefCounted — not an autoload — so it follows the existing
 ## Godotwind pattern where autoloads are reserved for long-lived *services*
-## (ESMManager, BSAManager, OceanManager...) and per-session state holders
+## (ESMManager, BSAManager, WaterSystem...) and per-session state holders
 ## are owned by the scene root.
 ##
 ## ## Framework-agnostic

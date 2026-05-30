@@ -137,8 +137,8 @@ func _finish_smoke(exit_code: int) -> void:
 		_wet_effect.blend_factor = 0.0
 		_wet_effect.on_effect_removed()
 		_wet_effect = null
-	if OceanManager != null and OceanManager.has_method("release_runtime_resources"):
-		OceanManager.release_runtime_resources()
+	if WaterSystem != null and WaterSystem.has_method("release_runtime_resources"):
+		WaterSystem.release_runtime_resources()
 	_shutdown_shader_manager_effects()
 	for i in range(6):
 		await get_tree().process_frame

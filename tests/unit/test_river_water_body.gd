@@ -184,7 +184,7 @@ func test_generated_lab_flowmap_uses_constant_speed_and_alpha_only_bank_fade() -
 	var tangent := Vector2(tangent3.x, tangent3.z).normalized()
 	var right := Vector2(tangent.y, -tangent.x).normalized()
 	var center_xz := Vector2(center_local.x, center_local.z) + Vector2(river.position.x, river.position.z)
-	var half_width := 0.5 * lab._river_width_at(river, 0.48)
+	var half_width: float = 0.5 * lab._river_width_at(river, 0.48)
 
 	var center_sample: Color = lab._sample_flowmap_image_bilinear(image, _flowmap_uv_for_world_xz(river, center_xz))
 	var bank_sample: Color = lab._sample_flowmap_image_bilinear(image, _flowmap_uv_for_world_xz(river, center_xz + right * half_width))

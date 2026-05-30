@@ -84,7 +84,7 @@ func _source_postprocess_model_object(
 	if _source_is_carryable(type_name, base_record):
 		_attach_carryable(instance, base_record, type_name, record_id, instantiator)
 	if type_name == "door" and ref != null and bool(ref.get("is_teleport")):
-		_attach_door(instance, ref, base_record, record_id, instantiator)
+		_attach_door(instance, ref, cell_grid, base_record, record_id, instantiator)
 	elif type_name == "container":
 		_attach_container(instance, ref, cell_grid, base_record, record_id, instantiator)
 	elif type_name == "activator":
@@ -344,12 +344,14 @@ func _attach_carryable(
 func _attach_door(
 	door_instance: Node3D,
 	ref: Variant,
+	cell_grid: Vector2i,
 	base_record: Variant,
 	record_id: String,
 	instantiator: RefCounted,
 ) -> void:
 	var display_name := _get_display_name(base_record, record_id)
 	var destination_name := str(ref.get("teleport_cell"))
+	var instance_key := _exterior_door_instance_key(cell_grid, str(ref.get("ref_id")), int(ref.get("ref_num")))
 	var door_script := load(DOOR_INTERACTABLE_PATH) as Script
 	if door_script == null:
 		_log_warn("interaction", "Door %s adapter script unavailable" % record_id)
@@ -359,14 +361,19 @@ func _attach_door(
 		_log_warn("interaction", "Door %s set_script failed; adapter cast null" % record_id)
 		return
 	door_instance.set("record_id", record_id)
+	door_instance.set("door_instance_key", instance_key)
 	door_instance.set("display_name", display_name)
 	door_instance.set("destination_name", destination_name)
 	door_instance.set("has_destination", not destination_name.is_empty())
 	door_instance.set("door_record", base_record)
 	_generate_interaction_area_for(door_instance, base_record, instantiator)
 	var handler: Callable = instantiator.call("get_source_door_activated_handler") if instantiator.has_method("get_source_door_activated_handler") else Callable()
-	if handler.is_valid():
+	if handler.is_valid() and not door_instance.is_connected(&"door_activated", handler):
 		door_instance.connect("door_activated", handler)
+
+
+static func _exterior_door_instance_key(cell_grid: Vector2i, base_ref_id: String, ref_num: int) -> String:
+	return "ext:%d,%d:%s:%d" % [cell_grid.x, cell_grid.y, base_ref_id.to_lower(), ref_num]
 
 
 func _attach_container(

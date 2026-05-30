@@ -302,6 +302,21 @@ func set_door_activated_handler(handler: Callable) -> void:
 	_instantiator.door_activated_handler = handler
 
 
+func reconnect_door_activated_handlers(root: Node, handler: Callable) -> int:
+	if root == null or not handler.is_valid():
+		return 0
+	var connected := 0
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		if node.has_signal("door_activated") and not node.is_connected(&"door_activated", handler):
+			node.connect(&"door_activated", handler)
+			connected += 1
+		for child: Node in node.get_children():
+			stack.push_back(child)
+	return connected
+
+
 # REMOVED: set_object_streamer()
 # Native streaming system uses visibility_range, not a separate ObjectStreamer
 
@@ -1310,6 +1325,7 @@ func set_request_priority(request_id: int, priority: bool) -> void:
 ## the new order takes effect on the next _process_instantiation_queue pass.
 func force_queue_resort() -> void:
 	_sort_queue_by_priority()
+	_sort_model_request_start_queue_by_priority()
 	_queue_sort_frame = Engine.get_frames_drawn()
 
 
@@ -1329,6 +1345,20 @@ func _get_active_async_load_slot_count() -> int:
 		if not _is_request_visual_playable(request):
 			count += 1
 	return count
+
+
+func _request_has_interior_priority(request_id: int) -> bool:
+	if request_id not in _async_requests:
+		return false
+	var request: AsyncCellRequest = _async_requests[request_id]
+	return request != null and request.load_profile != null and request.load_profile.interior_priority
+
+
+func _has_interior_priority_request() -> bool:
+	for request_id: int in _async_requests:
+		if _request_has_interior_priority(request_id):
+			return true
+	return false
 
 
 func _is_request_visual_playable(request: AsyncCellRequest) -> bool:
@@ -1699,6 +1729,43 @@ func _publish_payload_model_callbacks(payload: CellPayloadScript, budget_usec: i
 	return completed
 
 
+## Drive payload-side publication for every active async request.
+##
+## NativeStreamingManager owns the frame-budget slice, but CellManager owns
+## the request table. Keeping this iteration here prevents interior-only
+## requests from starving when no exterior request is present in the streaming
+## manager's grid map.
+func process_async_payloads(budget_usec: int) -> int:
+	if budget_usec <= 0 or _async_requests.is_empty():
+		return 0
+
+	var request_ids: Array[int] = []
+	for request_id: int in _async_requests:
+		request_ids.append(request_id)
+	if request_ids.size() > 1 and _has_interior_priority_request():
+		request_ids.sort_custom(func(a: int, b: int) -> bool:
+			if _request_has_interior_priority(a) != _request_has_interior_priority(b):
+				return _request_has_interior_priority(a)
+			return a < b
+		)
+
+	var start_us := Time.get_ticks_usec()
+	var published := 0
+	for request_id: int in request_ids:
+		if Time.get_ticks_usec() - start_us >= budget_usec:
+			break
+		if request_id not in _async_requests:
+			continue
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request == null or request.payload == null:
+			continue
+		if request.state == CellPayloadScript.State.UNLOADING:
+			continue
+		var remaining_usec := maxi(0, budget_usec - int(Time.get_ticks_usec() - start_us))
+		published += int(request.payload.publish_step(remaining_usec))
+	return published
+
+
 func _process_static_prepare_entry(entry: Dictionary, deadline_usec: int = 0) -> int:
 	var request_id := int(entry.get("request_id", -1))
 	if request_id not in _async_requests:
@@ -1897,8 +1964,18 @@ func _process_request_classification_queue(budget_usec: int, max_refs: int) -> i
 		return 0
 
 	var start_us := Time.get_ticks_usec()
-	var processed := 0
+	var request_ids: Array[int] = []
 	for request_id: int in _async_requests:
+		request_ids.append(request_id)
+	if request_ids.size() > 1 and _has_interior_priority_request():
+		request_ids.sort_custom(func(a: int, b: int) -> bool:
+			if _request_has_interior_priority(a) != _request_has_interior_priority(b):
+				return _request_has_interior_priority(a)
+			return a < b
+		)
+
+	var processed := 0
+	for request_id: int in request_ids:
 		if processed >= max_refs:
 			break
 		if Time.get_ticks_usec() - start_us >= budget_usec:
@@ -2257,6 +2334,8 @@ func _process_model_request_start_queue(budget_usec: int, max_requests: int) -> 
 		return 0
 	if _model_request_start_queue.is_empty():
 		return 0
+	if _has_interior_priority_request():
+		_sort_model_request_start_queue_by_priority()
 
 	var start_us := Time.get_ticks_usec()
 	var started := 0
@@ -3792,6 +3871,18 @@ func _sort_entries_by_priority(entries: Array[InstantiationEntry]) -> void:
 		# LAST KEY: existing distance/frustum priority. Farthest first,
 		# so pop_back() returns nearest/highest-priority within the lane.
 		return priorities[a] > priorities[b]
+	)
+
+
+func _sort_model_request_start_queue_by_priority() -> void:
+	if _model_request_start_queue.size() < 2:
+		return
+	_model_request_start_queue.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var a_priority := _request_has_interior_priority(int(a.get("request_id", -1)))
+		var b_priority := _request_has_interior_priority(int(b.get("request_id", -1)))
+		if a_priority != b_priority:
+			return not a_priority
+		return str(a.get("model_path", "")) > str(b.get("model_path", ""))
 	)
 
 

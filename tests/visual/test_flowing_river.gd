@@ -105,11 +105,11 @@ func _process(delta: float) -> void:
 
 
 func _exit_tree() -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
-	OceanManager.set_process(true)
-	OceanManager.set_physics_process(true)
-	OceanManager.set_camera(null)
+	WaterSystem.set_process(true)
+	WaterSystem.set_physics_process(true)
+	WaterSystem.set_camera(null)
 
 
 func _setup_world() -> void:
@@ -337,27 +337,28 @@ func _setup_camera() -> void:
 
 
 func _setup_water_interaction() -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
-	OceanManager.force_initialize()
-	OceanManager.set_camera(_camera)
-	OceanManager.set_process(false)
-	OceanManager.set_physics_process(false)
-	OceanManager.set_sea_level(-24.0)
-	OceanManager.set_wave_scale(0.08)
-	OceanManager.set_water_interaction_debug_enabled(_debug_mode == 5)
-	OceanManager.force_update_water_body_atlas(LAB_INTERACTION_CENTER)
-	var ocean_mesh := OceanManager.get_ocean_mesh()
+	WaterSystem.force_initialize()
+	WaterSystem.set_camera(_camera)
+	WaterSystem.set_process(false)
+	WaterSystem.set_physics_process(false)
+	WaterSystem.set_sea_level(-24.0)
+	WaterSystem.set_wave_scale(0.08)
+	WaterSystem.set_water_interaction_debug_enabled(_debug_mode == 5)
+	WaterSystem.set_water_body_atlas_enabled(true)
+	WaterSystem.force_update_water_body_atlas(LAB_INTERACTION_CENTER)
+	var ocean_mesh := WaterSystem.get_ocean_mesh()
 	if ocean_mesh != null:
 		ocean_mesh.visible = false
 	_update_water_interaction_manual(0.0)
 
 
 func _update_water_interaction_manual(delta: float) -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
-	OceanManager.set_water_interaction_debug_enabled(_debug_mode == 5)
-	OceanManager.update_local_water_interactions(delta, LAB_INTERACTION_CENTER)
+	WaterSystem.set_water_interaction_debug_enabled(_debug_mode == 5)
+	WaterSystem.update_local_water_interactions(delta, LAB_INTERACTION_CENTER)
 
 
 func _setup_hud() -> void:
@@ -460,7 +461,7 @@ func _update_hud() -> void:
 	if _hud == null or _play_ball == null:
 		return
 	var pos := _play_ball.global_position
-	var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	var state: WaterSurfaceState = WaterSystem.get_water_surface_state()
 	var probe_query := _query_text(state, pos)
 	var camera_query := _query_text(state, _camera.global_position if _camera != null else Vector3.ZERO)
 	var crate_query := _query_text(state, _crate_body.global_position) if _crate_body != null else "no crate"
@@ -491,8 +492,8 @@ func _set_debug_mode(index: int) -> void:
 	for river in [_river, _bend_river, _generated_river]:
 		if river != null:
 			river.debug_display_mode = _debug_mode
-	if OceanManager != null:
-		OceanManager.set_water_interaction_debug_enabled(_debug_mode == 5)
+	if WaterSystem != null:
+		WaterSystem.set_water_interaction_debug_enabled(_debug_mode == 5)
 	_update_flow_arrow_overlay()
 	if _debug_options != null:
 		_debug_options.selected = _debug_mode
@@ -572,9 +573,9 @@ func _update_held_body() -> void:
 
 
 func _emit_ball_interactions(delta: float) -> void:
-	if OceanManager == null:
+	if WaterSystem == null:
 		return
-	var state := OceanManager.get_water_surface_state()
+	var state := WaterSystem.get_water_surface_state()
 	_emit_interactor_events(_play_ball_interactor, delta, state)
 	_emit_interactor_events(_crate_interactor, delta, state)
 
@@ -583,7 +584,7 @@ func _emit_interactor_events(interactor: WaterInteractor, delta: float, state: W
 	if interactor == null:
 		return
 	for impulse: Dictionary in interactor.gather_impulses(delta, state):
-		OceanManager.emit_water_impulse(
+		WaterSystem.emit_water_impulse(
 			impulse["position"],
 			float(impulse["radius_m"]),
 			float(impulse["strength"]),
@@ -593,7 +594,7 @@ func _emit_interactor_events(interactor: WaterInteractor, delta: float, state: W
 			float(impulse.get("wake_length_m", 0.0))
 		)
 	for obstacle: Dictionary in interactor.gather_flow_obstacles(delta, state):
-		OceanManager.emit_water_flow_obstacle(
+		WaterSystem.emit_water_flow_obstacle(
 			obstacle["position"],
 			float(obstacle["radius_m"]),
 			float(obstacle.get("block_strength", 0.0)),

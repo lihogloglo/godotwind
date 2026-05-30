@@ -505,7 +505,7 @@ func _has_controlled_source() -> bool:
 func _sync_effect_from_water_state() -> void:
 	if _effect == null:
 		return
-	var ocean_manager := get_node_or_null("/root/OceanManager")
+	var ocean_manager := get_node_or_null("/root/WaterSystem")
 	if ocean_manager != null and ocean_manager.has_method("get_water_surface_state"):
 		var state := ocean_manager.call("get_water_surface_state") as WaterSurfaceState
 		if state != null:

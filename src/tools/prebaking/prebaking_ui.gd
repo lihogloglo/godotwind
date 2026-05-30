@@ -25,6 +25,7 @@ var _model_section: Dictionary = {}
 # HLOD removed — now runtime-merged by ObjectPaging (no prebake needed)
 var _impostor_section: Dictionary = {}
 var _navmesh_section: Dictionary = {}
+var _hydrology_section: Dictionary = {}
 var _shore_section: Dictionary = {}
 
 # Buttons
@@ -113,6 +114,7 @@ func _build_ui() -> void:
 	# HLOD removed — runtime-merged now, no prebake section
 	_impostor_section = _create_component_section("Impostors", "v6 octahedral albedo + normal/depth impostors for distant landmarks (FAR tier)")
 	_navmesh_section = _create_component_section("Navigation Meshes", "Pathfinding meshes for AI navigation")
+	_hydrology_section = _create_component_section("Hydrology", "GPU water classification flowmaps baked from Terrain3D height regions")
 	_shore_section = _create_component_section("Shore Mask", "Ocean visibility mask based on terrain height")
 
 	# Separator
@@ -254,6 +256,9 @@ func _connect_signals() -> void:
 	(_navmesh_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_navmeshes = pressed
 	)
+	(_hydrology_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
+		manager.enable_hydrology = pressed
+	)
 	(_shore_section.checkbox as CheckBox).toggled.connect(func(pressed: bool) -> void:
 		manager.enable_shore_mask = pressed
 	)
@@ -271,6 +276,9 @@ func _connect_signals() -> void:
 	)
 	(_navmesh_section.bake_button as Button).pressed.connect(func() -> void:
 		manager.bake_component(PrebakingManagerScript.Component.NAVMESHES)
+	)
+	(_hydrology_section.bake_button as Button).pressed.connect(func() -> void:
+		manager.bake_component(PrebakingManagerScript.Component.HYDROLOGY)
 	)
 	(_shore_section.bake_button as Button).pressed.connect(func() -> void:
 		manager.bake_component(PrebakingManagerScript.Component.SHORE_MASK)
@@ -301,6 +309,7 @@ func _update_ui_state() -> void:
 	# HLOD section removed — runtime-merged now
 	_update_component_section(_impostor_section, summary.get("impostors", {}) as Dictionary, is_running)
 	_update_component_section(_navmesh_section, summary.get("navmeshes", {}) as Dictionary, is_running)
+	_update_component_section(_hydrology_section, summary.get("hydrology", {}) as Dictionary, is_running)
 	_update_component_section(_shore_section, summary.get("shore_mask", {}) as Dictionary, is_running)
 
 	# Update overall progress
@@ -397,6 +406,7 @@ func _on_component_progress(component: String, current: int, total: int, item_na
 		# "HLOD" removed — runtime-merged now
 		"Impostors": section = _impostor_section
 		"Navmeshes": section = _navmesh_section
+		"Hydrology": section = _hydrology_section
 		"Shore Mask": section = _shore_section
 
 	if not section.is_empty():

@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-30" name="report_384" tests="3" failures="1" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_interior_transition_phase1" package="tests/unit" timestamp="2026-05-30T07:28:38" hostname="localhost" tests="3" failures="1" errors="1" skipped="0" flaky="0" time="0.028">
+		<testcase name="test_pocket_finalization_preserves_interaction_query_area" classname="test_interior_transition_phase1" time="0.003">
+		</testcase>
+		<testcase name="test_door_handler_reconnect_is_idempotent" classname="test_interior_transition_phase1" time="0.018">
+			<error message="ERROR: res://tests/unit/test_interior_transition_phase1.gd:53" type="ABORT">
+<![CDATA[
+Godot Runtime Error !
+Error: 'Attempted to free a RefCounted object.'
+	at res://tests/unit/test_interior_transition_phase1.gd:53
+]]>
+			</error>
+			<failure message="FAILED: res://tests/unit/test_interior_transition_phase1.gd:50" type="FAILURE">
+<![CDATA[
+Expecting:
+ '1'
+ but was
+ '0'
+]]>
+			</failure>
+		</testcase>
+		<testcase name="test_runtime_pocket_load_has_no_sync_fallback" classname="test_interior_transition_phase1" time="0.003">
+		</testcase>
+	</testsuite>
+</testsuites>

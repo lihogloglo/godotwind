@@ -2,7 +2,7 @@ extends GdUnitTestSuite
 
 const WaterBodyDescriptorScript := preload("res://src/core/water/water_body_descriptor.gd")
 const WaterBodyRegistryScript := preload("res://src/core/water/water_body_registry.gd")
-const OceanManagerScript := preload("res://src/core/water/ocean_manager.gd")
+const WaterSystemScript := preload("res://src/core/water/water_system.gd")
 const WaterVolumeScript := preload("res://src/core/water/water_volume.gd")
 const PolygonWaterVolumeScript := preload("res://src/core/water/polygon_water_volume.gd")
 
@@ -62,7 +62,7 @@ func test_registry_skips_coverage_sampling_outside_valid_source_bounds() -> void
 
 
 func test_ocean_manager_unified_query_does_not_report_sea_level_outside_registered_body_when_ocean_disabled() -> void:
-	var manager: Node = auto_free(OceanManagerScript.new())
+	var manager: Node = auto_free(WaterSystemScript.new())
 	var lake := _descriptor(&"lake", WaterBodyDescriptorScript.TYPE_LAKE, 100, 1.0, Vector3(100.0, 0.0, 100.0), 1.0, Vector3.ZERO)
 
 	assert_int(manager.register_water_body(lake)).is_equal(OK)
@@ -71,11 +71,89 @@ func test_ocean_manager_unified_query_does_not_report_sea_level_outside_register
 	assert_float(manager.sample_water_coverage(Vector3.ZERO)).is_equal_approx(0.0, 0.001)
 
 
-func test_ocean_manager_water_body_atlas_encodes_registered_coverage_and_height() -> void:
-	var manager: Node = auto_free(OceanManagerScript.new())
+func test_ocean_manager_water_body_atlas_is_disabled_by_default() -> void:
+	var manager: Node = auto_free(WaterSystemScript.new())
 	var lake := _descriptor(&"lake", WaterBodyDescriptorScript.TYPE_LAKE, 100, 7.0, Vector3.ZERO, 10.0, Vector3.ZERO)
 	assert_int(manager.register_water_body(lake)).is_equal(OK)
 
+	manager.force_update_water_body_atlas(Vector3.ZERO)
+
+	assert_bool(manager.has_water_body_atlas()).is_false()
+	assert_bool(manager.is_water_body_atlas_enabled()).is_false()
+	var status: Dictionary = manager.get_water_body_runtime_status()
+	assert_bool(bool(status.get("atlas_enabled", true))).is_false()
+	assert_bool(bool(status.get("atlas_available", true))).is_false()
+
+
+func test_ocean_toggle_does_not_enable_water_body_atlas() -> void:
+	var manager: Node = auto_free(WaterSystemScript.new())
+	add_child(manager)
+	var lake := _descriptor(&"lake", WaterBodyDescriptorScript.TYPE_LAKE, 100, 7.0, Vector3.ZERO, 10.0, Vector3.ZERO)
+
+	manager.set_enabled(true)
+	assert_bool(manager.is_system_enabled()).is_true()
+	assert_int(manager.register_water_body(lake)).is_equal(OK)
+	manager.force_update_water_body_atlas(Vector3.ZERO)
+
+	assert_bool(manager.has_water_body_atlas()).is_false()
+	assert_bool(manager.is_water_body_atlas_enabled()).is_false()
+	manager.set_enabled(false)
+	manager.release_runtime_resources()
+	await get_tree().process_frame
+
+
+func test_water_system_generated_water_root_is_owned_by_water_world() -> void:
+	var manager: Node = auto_free(WaterSystemScript.new())
+	add_child(manager)
+	await get_tree().process_frame
+
+	var water_world: Node = manager.get_water_world()
+	var ocean_provider: Node = manager.get_ocean_provider()
+	var generated_root: Node3D = manager.get_generated_water_root()
+
+	assert_object(water_world).is_not_null()
+	assert_object(ocean_provider).is_not_null()
+	assert_object(generated_root).is_not_null()
+	assert_object(generated_root.get_parent()).is_same(water_world)
+	assert_str(generated_root.name).is_equal("GeneratedWaterBodies")
+
+	manager.set_enabled(false)
+	await get_tree().process_frame
+
+	assert_bool(is_instance_valid(generated_root)).is_true()
+	assert_object(generated_root.get_parent()).is_same(water_world)
+
+
+func test_ocean_toggle_disables_ocean_surface_without_disabling_registered_water() -> void:
+	var manager: Node = auto_free(WaterSystemScript.new())
+	add_child(manager)
+	await get_tree().process_frame
+
+	var lake := _descriptor(&"lake", WaterBodyDescriptorScript.TYPE_LAKE, 100, 7.0, Vector3.ZERO, 10.0, Vector3.ZERO)
+	assert_int(manager.register_water_body(lake)).is_equal(OK)
+
+	manager.set_enabled(true)
+	assert_bool(manager.is_system_enabled()).is_true()
+	manager.set_water_layer_enabled(&"ocean_surface", false)
+
+	assert_bool(manager.is_system_enabled()).is_true()
+	assert_bool(manager.is_water_layer_enabled(&"ocean_surface")).is_false()
+	assert_float(manager.sample_water_height(Vector3.ZERO)).is_equal_approx(7.0, 0.001)
+	assert_that(manager.sample_water_body_id_at(Vector3.ZERO)).is_equal(&"lake")
+
+	manager.set_water_layer_enabled(&"all", false)
+
+	assert_bool(manager.is_water_layer_enabled(&"all")).is_false()
+	assert_float(manager.sample_water_height(Vector3.ZERO)).is_equal(-INF)
+	assert_float(manager.sample_water_coverage(Vector3.ZERO)).is_equal_approx(0.0, 0.001)
+
+
+func test_ocean_manager_water_body_atlas_encodes_registered_coverage_and_height() -> void:
+	var manager: Node = auto_free(WaterSystemScript.new())
+	var lake := _descriptor(&"lake", WaterBodyDescriptorScript.TYPE_LAKE, 100, 7.0, Vector3.ZERO, 10.0, Vector3.ZERO)
+	assert_int(manager.register_water_body(lake)).is_equal(OK)
+
+	manager.set_water_body_atlas_enabled(true)
 	manager.force_update_water_body_atlas(Vector3.ZERO)
 
 	assert_bool(manager.has_water_body_atlas()).is_true()
@@ -87,9 +165,10 @@ func test_ocean_manager_water_body_atlas_encodes_registered_coverage_and_height(
 
 
 func test_water_surface_state_exposes_water_body_atlas_cpu_sample() -> void:
-	var manager: Node = auto_free(OceanManagerScript.new())
+	var manager: Node = auto_free(WaterSystemScript.new())
 	var river := _descriptor(&"river", WaterBodyDescriptorScript.TYPE_RIVER, 100, 3.5, Vector3.ZERO, 12.0, Vector3(1.0, 0.0, 0.0))
 	assert_int(manager.register_water_body(river)).is_equal(OK)
+	manager.set_water_body_atlas_enabled(true)
 	manager.force_update_water_body_atlas(Vector3.ZERO)
 
 	var state: WaterSurfaceState = manager.get_water_surface_state()
@@ -102,10 +181,11 @@ func test_water_surface_state_exposes_water_body_atlas_cpu_sample() -> void:
 
 
 func test_public_local_water_update_rebuilds_atlas_before_interaction_step() -> void:
-	var manager: Node = auto_free(OceanManagerScript.new())
+	var manager: Node = auto_free(WaterSystemScript.new())
 	var river := _descriptor(&"river", WaterBodyDescriptorScript.TYPE_RIVER, 100, 1.25, Vector3.ZERO, 12.0, Vector3(2.0, 0.0, 0.0))
 	assert_int(manager.register_water_body(river)).is_equal(OK)
 
+	manager.set_water_body_atlas_enabled(true)
 	manager.update_local_water_interactions(0.0, Vector3.ZERO)
 
 	assert_bool(manager.has_water_body_atlas()).is_true()
@@ -117,7 +197,7 @@ func test_public_local_water_update_rebuilds_atlas_before_interaction_step() -> 
 
 
 func test_ocean_manager_local_flow_obstacle_changes_sampled_registered_velocity() -> void:
-	var manager: Node = auto_free(OceanManagerScript.new())
+	var manager: Node = auto_free(WaterSystemScript.new())
 	var river := _descriptor(&"river", WaterBodyDescriptorScript.TYPE_RIVER, 100, 0.0, Vector3.ZERO, 20.0, Vector3(2.0, 0.0, 0.0))
 	assert_int(manager.register_water_body(river)).is_equal(OK)
 
@@ -166,6 +246,19 @@ func test_water_volume_uses_shared_shader_resource() -> void:
 	assert_str(material.shader.resource_path).is_equal("res://src/core/water/shaders/water_volume.gdshader")
 
 
+func test_water_volume_does_not_own_buoyancy_physics() -> void:
+	var volume: WaterVolume = auto_free(WaterVolumeScript.new())
+	add_child(volume)
+	await get_tree().process_frame
+
+	var source := FileAccess.get_file_as_string("res://src/core/water/water_volume.gd")
+
+	assert_bool(_object_has_property(volume, "enable_buoyancy")).is_false()
+	assert_bool(source.contains("apply_central_force")).is_false()
+	assert_bool(source.contains("_apply_buoyancy_force")).is_false()
+	assert_bool(source.contains("_calculate_submersion")).is_false()
+
+
 func test_water_volume_area_uses_exported_detection_collision_mask() -> void:
 	var volume: WaterVolume = auto_free(WaterVolumeScript.new())
 	volume.detection_collision_mask = 4
@@ -197,13 +290,13 @@ func test_polygon_volume_registers_and_unregisters_water_interaction_renderer() 
 	await get_tree().process_frame
 
 	var volume_id := volume.get_instance_id()
-	var renderers: Array = OceanManager.get("_water_interaction_renderers")
+	var renderers: Array = WaterSystem.get("_water_interaction_renderers")
 	assert_bool(_renderer_list_has_instance(renderers, volume_id)).is_true()
 
 	volume.queue_free()
 	await get_tree().process_frame
 
-	renderers = OceanManager.get("_water_interaction_renderers")
+	renderers = WaterSystem.get("_water_interaction_renderers")
 	assert_bool(_renderer_list_has_instance(renderers, volume_id)).is_false()
 
 
@@ -343,5 +436,12 @@ func _triangle_area_2d(a: Vector2, b: Vector2, c: Vector2) -> float:
 func _renderer_list_has_instance(renderers: Array, instance_id: int) -> bool:
 	for renderer in renderers:
 		if is_instance_valid(renderer) and renderer.get_instance_id() == instance_id:
+			return true
+	return false
+
+
+func _object_has_property(object: Object, property_name: String) -> bool:
+	for property: Dictionary in object.get_property_list():
+		if str(property.get("name", "")) == property_name:
 			return true
 	return false

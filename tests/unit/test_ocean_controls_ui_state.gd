@@ -24,3 +24,18 @@ func test_particle_toggle_uses_ocean_manager_state_not_compositor_feature_flag()
 	assert_bool(status["underwater_particles_enabled"]).is_false()
 	assert_bool(controls.is_underwater_feature_enabled(&"particles")).is_false()
 	assert_bool(controls.underwater_features.has(&"particles")).is_false()
+
+
+func test_show_ocean_toggle_tracks_ocean_surface_without_clearing_water_preferences() -> void:
+	var controls: OceanControls = OceanControlsScript.new({})
+	controls.set_underwater_feature_enabled(&"snell", false)
+	controls.set_underwater_feature_enabled(&"particles", false)
+
+	controls.on_show_ocean_toggled(false)
+	var status := controls.get_runtime_status()
+
+	assert_bool(status["ocean_enabled"]).is_false()
+	assert_bool(status["all_water_enabled"]).is_true()
+	assert_bool(controls.is_underwater_feature_enabled(&"snell")).is_false()
+	assert_bool(controls.is_underwater_feature_enabled(&"particles")).is_false()
+	assert_bool(status["underwater_particles_enabled"]).is_false()

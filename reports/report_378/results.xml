@@ -1,0 +1,12 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-30" name="report_378" tests="3" failures="1" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_interior_door_identity" package="tests/unit" timestamp="2026-05-30T06:05:25" hostname="localhost" tests="3" failures="1" errors="0" skipped="0" flaky="0" time="0.007">
+		<testcase name="test_door_interactable_emits_instance_key" classname="test_interior_door_identity" time="0.000">
+			<failure message="FAILED: res://tests/unit/test_interior_door_identity.gd:19" type="FAILURE">
+<![CDATA[
+Expecting: 'true' but is 'false'
+]]>
+			</failure>
+		</testcase>
+	</testsuite>
+</testsuites>

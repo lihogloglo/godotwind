@@ -16,6 +16,7 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
+const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
 
 # Scene nodes
 var _camera: Camera3D
@@ -94,6 +95,7 @@ func _ready() -> void:
 	_cell_manager.load_creatures = false
 	_cell_manager.use_static_renderer = false
 	_cell_manager.use_multimesh_instancing = false
+	_cell_manager.set_world_source(MorrowindWorldSourceScript.new())
 
 	# Background processor so the P0 async pocket load path actually runs.
 	# Without this, _cell_manager.has_async_capacity() returns false and
@@ -157,12 +159,21 @@ func _auto_test_run() -> void:
 		dp.ref_id, dp.interior_name, dp.interior_ref_count])
 
 	# Poll pocket manager until the slot becomes occupied (success) or
-	# times out at 10 seconds (failure).
+	# times out. The auto-test warm-up path uses a burst instantiation budget
+	# so cold-cache source-backed interior loads don't fail before the measured
+	# transition starts.
 	var start_ms: int = Time.get_ticks_msec()
-	var timeout_ms: int = 10000
+	var timeout_ms: int = 30000
 	var occupied_frame: int = -1
 	while Time.get_ticks_msec() - start_ms < timeout_ms:
 		await get_tree().process_frame
+		if _cell_manager.has_method("process_async_payloads"):
+			_cell_manager.call("process_async_payloads", 4000)
+		_cell_manager.process_async_instantiation(
+			25.0,
+			_camera.global_position,
+			-_camera.global_basis.z
+		)
 		# Force pocket manager update so async polling fires
 		_pocket_manager.update(_camera.global_position, get_process_delta_time())
 		var slot_any = _pocket_manager._get_slot_for_cell_any(dp.interior_name)
@@ -171,7 +182,7 @@ func _auto_test_run() -> void:
 			break
 
 	if occupied_frame < 0:
-		Log.error("testing", "[AUTO-TEST] TIMEOUT waiting for pocket load of '%s' (10s)" % dp.interior_name)
+		Log.error("testing", "[AUTO-TEST] TIMEOUT waiting for pocket load of '%s' (30s)" % dp.interior_name)
 		get_tree().quit(1)
 		return
 

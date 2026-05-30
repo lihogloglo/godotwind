@@ -56,8 +56,8 @@ func _ready() -> void:
 	if _experimental_surface_shader_enabled:
 		_fail("Boujie shader did not toggle off")
 		return
-	if OceanManager.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.DEFAULT:
-		_fail("OceanManager did not return to default shader mode")
+	if WaterSystem.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.DEFAULT:
+		_fail("WaterSystem did not return to default shader mode")
 		return
 	if _surface_refraction_layer == null or not bool(_surface_refraction_layer.call("is_enabled")):
 		_fail("surface refraction layer did not restore after returning to default")
@@ -78,7 +78,7 @@ func _wait_frames(count: int) -> void:
 func _assert_experimental_active(label: String) -> bool:
 	if not _assert_experimental_mode_state(label):
 		return false
-	if OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
+	if WaterSystem.get_water_quality() != OceanMesh.QualityMode.HIGH:
 		return true
 	var mat := _get_ocean_material()
 	if mat == null or mat.shader == null:
@@ -92,11 +92,11 @@ func _assert_experimental_active(label: String) -> bool:
 func _assert_experimental_mode_state(label: String) -> bool:
 	if not _experimental_surface_shader_enabled:
 		return _fail("Boujie flag dropped during %s" % label)
-	if OceanManager.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
-		return _fail("OceanManager shader mode dropped during %s" % label)
-	if OceanManager.has_method("get_surface_shader_mode_name") and OceanManager.get_surface_shader_mode_name() != "Boujie High":
-		return _fail("OceanManager shader mode name was %s during %s" % [
-			OceanManager.get_surface_shader_mode_name(),
+	if WaterSystem.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
+		return _fail("WaterSystem shader mode dropped during %s" % label)
+	if WaterSystem.has_method("get_surface_shader_mode_name") and WaterSystem.get_surface_shader_mode_name() != "Boujie High":
+		return _fail("WaterSystem shader mode name was %s during %s" % [
+			WaterSystem.get_surface_shader_mode_name(),
 			label,
 		])
 	if _surface_shader_button != null and _surface_shader_button.text != "Shader: Boujie High":

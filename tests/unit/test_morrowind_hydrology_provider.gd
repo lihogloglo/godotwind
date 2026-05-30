@@ -1,6 +1,7 @@
 extends GdUnitTestSuite
 
 const MorrowindHydrologyProviderScript := preload("res://src/core/world/morrowind/morrowind_hydrology_provider.gd")
+const HydrologyAtlasPrebakerScript := preload("res://src/tools/prebaking/morrowind_hydrology_atlas_prebaker.gd")
 
 
 func test_generated_flowmap_marks_long_narrow_sea_level_channel_as_river() -> void:
@@ -15,6 +16,61 @@ func test_generated_flowmap_marks_long_narrow_sea_level_channel_as_river() -> vo
 	assert_that(provider.sample_water_body_id(Vector3(16.0, -0.5, -13.0))).is_equal(&"morrowind_generated_river")
 
 
+func test_hydrology_atlas_prebaker_script_loads() -> void:
+	var prebaker: RefCounted = HydrologyAtlasPrebakerScript.new()
+	assert_object(prebaker).is_not_null()
+	assert_bool(prebaker.has_method("bake_from_terrain3d_directory")).is_true()
+
+
+func test_full_resolution_region_uses_gpu_cache_version() -> void:
+	var provider: MorrowindHydrologyProvider = _configured_provider(_heightmap_with_horizontal_channel(128, 128, 60, 66), 2.0)
+
+	assert_int(provider.initialize()).is_equal(OK)
+	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(OK)
+
+	var cached: Dictionary = provider._region_cache.get(Vector2i.ZERO, {})
+	assert_that(cached.get("algorithm")).is_equal("river_flow_gpu_v3")
+	assert_float(provider.sample_coverage(Vector3(128.0, -0.5, -128.0))).is_greater(0.5)
+
+
+func test_runtime_global_build_does_not_write_png_slices_by_default() -> void:
+	var cache_dir := "user://hydrology_provider_runtime_no_slices"
+	_clear_cache_dir(cache_dir)
+	var provider: MorrowindHydrologyProvider = _configured_provider(_heightmap_with_horizontal_channel(32, 32, 24, 27), 2.0)
+	provider.cache_enabled = false
+	provider.cache_directory = cache_dir
+
+	assert_int(provider.initialize()).is_equal(OK)
+	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(OK)
+
+	var native_dir := ProjectSettings.globalize_path(cache_dir)
+	if DirAccess.dir_exists_absolute(native_dir):
+		assert_int(DirAccess.get_files_at(native_dir).size()).is_equal(0)
+	_clear_cache_dir(cache_dir)
+
+
+func test_prepare_region_loads_prebaked_hydrology_without_heightmap_request() -> void:
+	var cache_dir := "user://hydrology_provider_prebaked_atlas"
+	_clear_cache_dir(cache_dir)
+	_write_prebaked_hydrology_region(cache_dir, Vector2i.ZERO)
+	var terrain := FakeLazyTerrainProvider.new(2.0)
+	var provider: MorrowindHydrologyProvider = MorrowindHydrologyProviderScript.new()
+	provider.configure(terrain, null)
+	provider.cache_enabled = false
+	provider.hydrology_atlas_directory = cache_dir
+	provider.allow_runtime_hydrology_bake = false
+
+	assert_int(provider.initialize()).is_equal(OK)
+	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(OK)
+
+	var cached: Dictionary = provider._region_cache.get(Vector2i.ZERO, {})
+	assert_bool(bool(cached.get("prebaked", false))).is_true()
+	assert_that(cached.get("algorithm")).is_equal("morrowind_gpu_hydrology_region_v1")
+	assert_int(terrain.heightmap_requests).is_equal(0)
+	assert_float(provider.sample_coverage(Vector3(16.0, -0.5, -16.0))).is_greater(0.5)
+	_clear_cache_dir(cache_dir)
+
+
 func test_generated_flowmap_leaves_wide_water_component_still() -> void:
 	var provider: MorrowindHydrologyProvider = _configured_provider(_heightmap_with_wide_lake(32, 32), 2.0)
 
@@ -25,6 +81,43 @@ func test_generated_flowmap_leaves_wide_water_component_still() -> void:
 	assert_vector(velocity).is_equal_approx(Vector3.ZERO, Vector3.ONE * 0.001)
 	assert_float(provider.sample_coverage(Vector3(16.0, -0.5, -15.0))).is_greater(0.5)
 	assert_that(provider.sample_water_body_id(Vector3(16.0, -0.5, -15.0))).is_equal(&"morrowind_sea_level_water")
+
+
+func test_generated_flowmap_keeps_narrow_river_when_connected_to_broad_basin() -> void:
+	var provider: MorrowindHydrologyProvider = _configured_provider(_heightmap_with_channel_feeding_broad_basin(64, 64), 2.0)
+
+	assert_int(provider.initialize()).is_equal(OK)
+	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(OK)
+
+	var channel_pos := Vector3(32.0, -0.5, -52.0)
+	var basin_pos := Vector3(96.0, -0.5, -60.0)
+	var land_pos := Vector3(32.0, 2.0, -88.0)
+	var channel_velocity := provider.sample_velocity(channel_pos)
+	var basin_velocity := provider.sample_velocity(basin_pos)
+
+	assert_float(channel_velocity.length()).is_greater(0.1)
+	assert_float(provider.sample_coverage(channel_pos)).is_greater(0.5)
+	assert_that(provider.sample_water_body_id(channel_pos)).is_equal(&"morrowind_generated_river")
+	assert_vector(basin_velocity).is_equal_approx(Vector3.ZERO, Vector3.ONE * 0.001)
+	assert_float(provider.sample_coverage(basin_pos)).is_greater(0.5)
+	assert_that(provider.sample_water_body_id(basin_pos)).is_equal(&"morrowind_sea_level_water")
+	assert_float(provider.sample_coverage(land_pos)).is_equal_approx(0.0, 0.001)
+	assert_that(provider.sample_water_body_id(land_pos)).is_equal(WaterSurfaceState.WATER_BODY_NONE)
+
+
+func test_generated_flowmap_orients_sloped_valley_channel_toward_broad_basin() -> void:
+	var provider: MorrowindHydrologyProvider = _configured_provider(_heightmap_with_sloped_valley_channel_feeding_basin(64, 64), 2.0)
+
+	assert_int(provider.initialize()).is_equal(OK)
+	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(OK)
+
+	var channel_velocity := provider.sample_velocity(Vector3(32.0, -0.5, -52.0))
+	var basin_velocity := provider.sample_velocity(Vector3(96.0, -0.5, -60.0))
+
+	assert_float(channel_velocity.length()).is_greater(0.1)
+	assert_float(channel_velocity.x).is_greater(0.1)
+	assert_float(absf(channel_velocity.z)).is_less(0.6)
+	assert_vector(basin_velocity).is_equal_approx(Vector3.ZERO, Vector3.ONE * 0.001)
 
 
 func test_generated_flowmap_ignores_land() -> void:
@@ -310,6 +403,29 @@ func _heightmap_with_wide_lake(width: int, height: int) -> Image:
 	return image
 
 
+func _heightmap_with_channel_feeding_broad_basin(width: int, height: int) -> Image:
+	var image := Image.create(width, height, false, Image.FORMAT_RF)
+	for y in range(height):
+		for x in range(width):
+			var in_channel := x >= 6 and x <= 31 and y >= 37 and y <= 40
+			var in_basin := x >= 30 and x <= width - 3 and y >= 12 and y <= height - 10
+			image.set_pixel(x, y, Color(-1.0 if in_channel or in_basin else 3.0, 0.0, 0.0, 1.0))
+	return image
+
+
+func _heightmap_with_sloped_valley_channel_feeding_basin(width: int, height: int) -> Image:
+	var image := Image.create(width, height, false, Image.FORMAT_RF)
+	for y in range(height):
+		for x in range(width):
+			var in_channel := x >= 6 and x <= 31 and y >= 37 and y <= 40
+			var in_basin := x >= 30 and x <= width - 3 and y >= 12 and y <= height - 10
+			var distance_from_channel := absf(float(y) - 38.5)
+			var downstream_drop := float(x) / maxf(float(width - 1), 1.0) * 1.6
+			var bank_height := 4.0 + distance_from_channel * 0.08 - downstream_drop
+			image.set_pixel(x, y, Color(-1.0 if in_channel or in_basin else bank_height, 0.0, 0.0, 1.0))
+	return image
+
+
 func _heightmap_with_branch_like_channel(width: int, height: int) -> Image:
 	var image := Image.create(width, height, false, Image.FORMAT_RF)
 	for y in range(height):
@@ -380,6 +496,35 @@ func _clear_cache_dir(cache_dir: String) -> void:
 		return
 	for file_name: String in DirAccess.get_files_at(native_dir):
 		DirAccess.remove_absolute(native_dir.path_join(file_name))
+
+
+func _write_prebaked_hydrology_region(cache_dir: String, region_coord: Vector2i) -> void:
+	var native_dir := ProjectSettings.globalize_path(cache_dir)
+	DirAccess.make_dir_recursive_absolute(native_dir)
+	var image := Image.create(32, 32, false, Image.FORMAT_RGBA8)
+	image.fill(Color(0.5, 0.5, 0.0, 1.0))
+	var key := MorrowindHydrologyProvider.prebaked_region_key(region_coord)
+	assert_int(image.save_png(native_dir.path_join(key + ".png"))).is_equal(OK)
+	var manifest := {
+		"schema": "godotwind.morrowind.hydrology.region_atlas.v1",
+		"algorithm": "morrowind_gpu_hydrology_region_v1",
+		"regions": [{"region": [region_coord.x, region_coord.y], "image": key + ".png", "metadata": key + ".json"}],
+	}
+	var metadata := {
+		"schema": "godotwind.morrowind.hydrology.region_atlas.v1",
+		"algorithm": "morrowind_gpu_hydrology_region_v1",
+		"source": "offline_terrain3d_prebake",
+		"river_count": 0,
+		"components": [],
+	}
+	var manifest_file := FileAccess.open(native_dir.path_join("manifest.json"), FileAccess.WRITE)
+	assert_object(manifest_file).is_not_null()
+	manifest_file.store_string(JSON.stringify(manifest, "\t"))
+	manifest_file.close()
+	var metadata_file := FileAccess.open(native_dir.path_join(key + ".json"), FileAccess.WRITE)
+	assert_object(metadata_file).is_not_null()
+	metadata_file.store_string(JSON.stringify(metadata, "\t"))
+	metadata_file.close()
 
 
 class FakeTerrainProvider:

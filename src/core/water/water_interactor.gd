@@ -1,6 +1,6 @@
 ## WaterInteractor - reusable probe component for visual water contact events.
 ## It is engine/data-source agnostic: it only reads WaterSurfaceState queries and
-## emits impulses through OceanManager when registered.
+## emits impulses through WaterSystem when registered.
 class_name WaterInteractor
 extends Node3D
 
@@ -26,24 +26,24 @@ var _registered_with_ocean_manager: bool = false
 
 func _ready() -> void:
 	_ensure_probe_state()
-	if auto_register and not Engine.is_editor_hint() and is_instance_valid(OceanManager):
-		OceanManager.register_water_interactor(self)
+	if auto_register and not Engine.is_editor_hint() and is_instance_valid(WaterSystem):
+		WaterSystem.register_water_interactor(self)
 		_registered_with_ocean_manager = true
 		set_physics_process(false)
 
 
 func _exit_tree() -> void:
-	if _registered_with_ocean_manager and is_instance_valid(OceanManager):
-		OceanManager.unregister_water_interactor(self)
+	if _registered_with_ocean_manager and is_instance_valid(WaterSystem):
+		WaterSystem.unregister_water_interactor(self)
 	_registered_with_ocean_manager = false
 
 
 func _physics_process(delta: float) -> void:
-	if _registered_with_ocean_manager or not is_instance_valid(OceanManager):
+	if _registered_with_ocean_manager or not is_instance_valid(WaterSystem):
 		return
-	var state := OceanManager.get_water_surface_state()
+	var state := WaterSystem.get_water_surface_state()
 	for impulse: Dictionary in gather_impulses(delta, state):
-		OceanManager.emit_water_impulse(
+		WaterSystem.emit_water_impulse(
 			impulse["position"],
 			float(impulse["radius_m"]),
 			float(impulse["strength"]),
@@ -53,7 +53,7 @@ func _physics_process(delta: float) -> void:
 			float(impulse.get("wake_length_m", 0.0))
 		)
 	for obstacle: Dictionary in gather_flow_obstacles(delta, state):
-		OceanManager.emit_water_flow_obstacle(
+		WaterSystem.emit_water_flow_obstacle(
 			obstacle["position"],
 			float(obstacle["radius_m"]),
 			float(obstacle.get("block_strength", 0.0)),

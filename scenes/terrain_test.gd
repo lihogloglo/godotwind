@@ -265,8 +265,8 @@ func _unhandled_key_input(event: InputEvent) -> void:
 	if event is InputEventKey and event.pressed and not event.echo:
 		if event.keycode == KEY_O:
 			# Toggle ocean
-			if OceanManager:
-				var enabled := OceanManager.toggle_ocean()
+			if WaterSystem:
+				var enabled := WaterSystem.toggle_ocean()
 				_log("Ocean: %s" % ("ON" if enabled else "OFF"))
 			else:
-				_log("OceanManager not available")
+				_log("WaterSystem not available")

@@ -73,6 +73,7 @@ var terrain := ComponentState.new()
 var models := ComponentState.new()  # LODs are embedded in models via NIFConverter
 var impostors := ComponentState.new()
 var navmeshes := ComponentState.new()
+var hydrology := ComponentState.new()
 var shore_mask := ComponentState.new()
 # hlod removed — ObjectPaging handles runtime merging
 
@@ -98,6 +99,7 @@ func load_state() -> bool:
 	_load_component(config, "models", models)
 	_load_component(config, "impostors", impostors)
 	_load_component(config, "navmeshes", navmeshes)
+	_load_component(config, "hydrology", hydrology)
 	_load_component(config, "shore_mask", shore_mask)
 
 	Log.info("prebaking", "Loaded state from %s" % STATE_FILE)
@@ -117,6 +119,7 @@ func save_state() -> bool:
 	_save_component(config, "models", models)
 	_save_component(config, "impostors", impostors)
 	_save_component(config, "navmeshes", navmeshes)
+	_save_component(config, "hydrology", hydrology)
 	_save_component(config, "shore_mask", shore_mask)
 
 	var err := config.save(STATE_FILE)
@@ -134,6 +137,7 @@ func clear_state() -> void:
 	models.reset()
 	impostors.reset()
 	navmeshes.reset()
+	hydrology.reset()
 	shore_mask.reset()
 	is_running = false
 
@@ -151,13 +155,14 @@ func has_pending_work() -> bool:
 		not models.pending.is_empty() or
 		not impostors.pending.is_empty() or
 		not navmeshes.pending.is_empty() or
+		not hydrology.pending.is_empty() or
 		not shore_mask.pending.is_empty()
 	)
 
 
 ## Get overall progress (0.0 - 1.0)
 func get_overall_progress() -> float:
-	var components := [terrain, models, impostors, navmeshes, shore_mask]
+	var components := [terrain, models, impostors, navmeshes, hydrology, shore_mask]
 	var enabled_components := components.filter(func(c: ComponentState) -> bool: return c.enabled)
 
 	if enabled_components.is_empty():
@@ -177,6 +182,7 @@ func get_summary() -> Dictionary:
 		"models": models.to_dict(),
 		"impostors": impostors.to_dict(),
 		"navmeshes": navmeshes.to_dict(),
+		"hydrology": hydrology.to_dict(),
 		"shore_mask": shore_mask.to_dict(),
 		"overall_progress": get_overall_progress(),
 		"has_pending": has_pending_work(),
@@ -218,4 +224,5 @@ func _print_summary() -> void:
 		impostors.completed.size(), impostors.pending.size(), impostors.failed.size()])
 	Log.info("prebaking", "Navmeshes: %d completed, %d pending, %d failed" % [
 		navmeshes.completed.size(), navmeshes.pending.size(), navmeshes.failed.size()])
+	Log.info("prebaking", "Hydrology: %s" % ("complete" if hydrology.is_complete() else "pending"))
 	Log.info("prebaking", "Shore Mask: %s" % ("complete" if shore_mask.is_complete() else "pending"))

@@ -205,10 +205,10 @@ func _setup_weather() -> void:
 
 func _setup_ocean() -> void:
 	# Initialize the ocean via autoload (force-init since it defaults to disabled)
-	if not OceanManager.is_system_enabled():
-		OceanManager.force_initialize()
+	if not WaterSystem.is_system_enabled():
+		WaterSystem.force_initialize()
 
-	OceanManager.set_camera(_camera)
+	WaterSystem.set_camera(_camera)
 
 	# Override shore mask with all-water (white) — the prebaked mask from
 	# Morrowind data dampens waves over "land" areas, but this test scene
@@ -216,7 +216,7 @@ func _setup_ocean() -> void:
 	var white_img := Image.create(1, 1, false, Image.FORMAT_L8)
 	white_img.set_pixel(0, 0, Color.WHITE)
 	var white_tex := ImageTexture.create_from_image(white_img)
-	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
+	var ocean_mesh: OceanMesh = WaterSystem.get_ocean_mesh()
 	if ocean_mesh:
 		ocean_mesh.set_shore_mask(white_tex, Rect2(-50000, -50000, 100000, 100000))
 
@@ -226,9 +226,9 @@ func _setup_ocean() -> void:
 
 func _toggle_ocean() -> void:
 	_ocean_enabled = not _ocean_enabled
-	OceanManager.set_enabled(_ocean_enabled)
+	WaterSystem.set_enabled(_ocean_enabled)
 	if not _ocean_enabled and _weather_enabled:
-		OceanManager.reset_weather()
+		WaterSystem.reset_weather()
 	Log.info("weather", "Ocean: %s" % ("ON" if _ocean_enabled else "OFF"))
 
 
@@ -338,8 +338,8 @@ func _process(delta: float) -> void:
 		if _particles:
 			_particles.update(result)
 		# Drive ocean from weather
-		if _ocean_enabled and OceanManager.is_system_enabled():
-			OceanManager.apply_weather(result)
+		if _ocean_enabled and WaterSystem.is_system_enabled():
+			WaterSystem.apply_weather(result)
 
 	_sync_cloud_ambient()
 	if _time_slider:
@@ -684,8 +684,8 @@ func _update_debug_overlay() -> void:
 
 	# Ocean
 	lines.append("[b]Ocean:[/b] %s" % ("ON" if _ocean_enabled else "OFF"))
-	if _ocean_enabled and OceanManager.is_system_enabled():
-		lines.append("  Mode: %s" % OceanManager.get_water_quality_name())
+	if _ocean_enabled and WaterSystem.is_system_enabled():
+		lines.append("  Mode: %s" % WaterSystem.get_water_quality_name())
 		if _weather_enabled:
 			var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
 			var wind_t: float = clampf(result.wind_speed / 0.9, 0.0, 1.0)

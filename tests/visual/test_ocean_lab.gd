@@ -251,7 +251,7 @@ func _ready() -> void:
 	_playground_origin = _find_shore_playground_center()
 	_place_camera_at_playground()
 	_setup_ocean()
-	_default_wave_scale = OceanManager.wave_scale if OceanManager else 1.0
+	_default_wave_scale = WaterSystem.wave_scale if WaterSystem else 1.0
 	_setup_water_compositor()
 	_setup_reflection_canaries()
 	_setup_waterline_stack()
@@ -267,7 +267,7 @@ func _ready() -> void:
 	Log.info("water", "[Ocean Lab] Ready - terrain regions=%d textures=%d quality=%s" % [
 		_regions_loaded,
 		_textures_loaded,
-		OceanManager.get_water_quality_name() if OceanManager else "none",
+		WaterSystem.get_water_quality_name() if WaterSystem else "none",
 	])
 	_log_refraction_baseline_state("ready")
 
@@ -447,42 +447,42 @@ func _find_shore_playground_center() -> Vector3:
 
 
 func _setup_ocean() -> void:
-	if not OceanManager:
-		Log.error("water", "[Ocean Lab] OceanManager autoload missing")
+	if not WaterSystem:
+		Log.error("water", "[Ocean Lab] WaterSystem autoload missing")
 		return
 
 	ProjectSettings.set_setting("ocean/quality", 1)
-	if not OceanManager.is_initialized():
-		OceanManager.force_initialize()
-	OceanManager.set_enabled(true)
-	OceanManager.set_camera(_camera)
-	OceanManager.set_terrain(_terrain)
-	_sea_level = OceanManager.get_sea_level()
-	_ocean = OceanManager.get_ocean_mesh()
+	if not WaterSystem.is_initialized():
+		WaterSystem.force_initialize()
+	WaterSystem.set_enabled(true)
+	WaterSystem.set_camera(_camera)
+	WaterSystem.set_terrain(_terrain)
+	_sea_level = WaterSystem.get_sea_level()
+	_ocean = WaterSystem.get_ocean_mesh()
 	if _ocean != null:
 		_ocean.layers = WATER_RENDER_LAYER_MASK
-	if OceanManager.has_method("set_sea_spray_render_layers"):
-		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
-	if OceanManager.has_method("set_underwater_particles_render_layers"):
-		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
-	if OceanManager.has_method("set_underwater_particles_enabled"):
-		OceanManager.set_underwater_particles_enabled(_uw_particles_enabled)
-	if OceanManager.has_method("set_underwater_particles_quality"):
-		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
-	if OceanManager.has_method("set_underwater_particles_count"):
-		OceanManager.set_underwater_particles_count(_uw_particle_count)
-	if OceanManager.has_method("set_underwater_particles_size_scale"):
-		OceanManager.set_underwater_particles_size_scale(_uw_particle_size_scale)
-	if OceanManager.has_method("set_underwater_particles_speed_scale"):
-		OceanManager.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
-	if OceanManager.has_method("set_underwater_particles_opacity"):
-		OceanManager.set_underwater_particles_opacity(_uw_particle_density)
-	if OceanManager.has_method("is_sea_spray_enabled"):
-		_spray_enabled = OceanManager.is_sea_spray_enabled()
-	if OceanManager.has_method("get_sea_spray_quality"):
-		_spray_quality = OceanManager.get_sea_spray_quality()
-	if OceanManager.has_method("get_underwater_particles_quality"):
-		_uw_particles_quality = OceanManager.get_underwater_particles_quality()
+	if WaterSystem.has_method("set_sea_spray_render_layers"):
+		WaterSystem.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if WaterSystem.has_method("set_underwater_particles_render_layers"):
+		WaterSystem.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
+	if WaterSystem.has_method("set_underwater_particles_enabled"):
+		WaterSystem.set_underwater_particles_enabled(_uw_particles_enabled)
+	if WaterSystem.has_method("set_underwater_particles_quality"):
+		WaterSystem.set_underwater_particles_quality(_uw_particles_quality)
+	if WaterSystem.has_method("set_underwater_particles_count"):
+		WaterSystem.set_underwater_particles_count(_uw_particle_count)
+	if WaterSystem.has_method("set_underwater_particles_size_scale"):
+		WaterSystem.set_underwater_particles_size_scale(_uw_particle_size_scale)
+	if WaterSystem.has_method("set_underwater_particles_speed_scale"):
+		WaterSystem.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
+	if WaterSystem.has_method("set_underwater_particles_opacity"):
+		WaterSystem.set_underwater_particles_opacity(_uw_particle_density)
+	if WaterSystem.has_method("is_sea_spray_enabled"):
+		_spray_enabled = WaterSystem.is_sea_spray_enabled()
+	if WaterSystem.has_method("get_sea_spray_quality"):
+		_spray_quality = WaterSystem.get_sea_spray_quality()
+	if WaterSystem.has_method("get_underwater_particles_quality"):
+		_uw_particles_quality = WaterSystem.get_underwater_particles_quality()
 	_sync_ocean_optics_from_manager()
 	_setup_surface_refraction_layer()
 	_push_surface_shader_mode()
@@ -490,23 +490,23 @@ func _setup_ocean() -> void:
 
 
 func _sync_ocean_optics_from_manager() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("get_absorption_density"):
-		_absorption_density = float(OceanManager.get_absorption_density())
-	if OceanManager.has_method("get_water_visibility_distance"):
-		_visibility_distance_m = float(OceanManager.get_water_visibility_distance())
-	if OceanManager.has_method("get_water_scattering_strength"):
-		_scattering_strength = float(OceanManager.get_water_scattering_strength())
-	if OceanManager.has_method("get_water_scattering_color"):
-		_absorption_tint = OceanManager.get_water_scattering_color()
-	elif OceanManager.has_method("get_absorption_tint_color"):
-		_absorption_tint = OceanManager.get_absorption_tint_color()
-	elif OceanManager.has_method("get_absorption_tint"):
-		var tint: Vector3 = OceanManager.get_absorption_tint()
+	if WaterSystem.has_method("get_absorption_density"):
+		_absorption_density = float(WaterSystem.get_absorption_density())
+	if WaterSystem.has_method("get_water_visibility_distance"):
+		_visibility_distance_m = float(WaterSystem.get_water_visibility_distance())
+	if WaterSystem.has_method("get_water_scattering_strength"):
+		_scattering_strength = float(WaterSystem.get_water_scattering_strength())
+	if WaterSystem.has_method("get_water_scattering_color"):
+		_absorption_tint = WaterSystem.get_water_scattering_color()
+	elif WaterSystem.has_method("get_absorption_tint_color"):
+		_absorption_tint = WaterSystem.get_absorption_tint_color()
+	elif WaterSystem.has_method("get_absorption_tint"):
+		var tint: Vector3 = WaterSystem.get_absorption_tint()
 		_absorption_tint = Color(tint.x, tint.y, tint.z, 1.0)
-	if OceanManager.has_method("is_surface_ssr_enabled"):
-		_surface_ssr_enabled = OceanManager.is_surface_ssr_enabled()
+	if WaterSystem.has_method("is_surface_ssr_enabled"):
+		_surface_ssr_enabled = WaterSystem.is_surface_ssr_enabled()
 	if _absorption_tint_picker != null:
 		_syncing_ocean_optics_ui = true
 		_absorption_tint_picker.color = _absorption_tint
@@ -514,62 +514,62 @@ func _sync_ocean_optics_from_manager() -> void:
 
 
 func _push_absorption_density_control() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("set_absorption_density"):
-		OceanManager.set_absorption_density(_absorption_density)
+	if WaterSystem.has_method("set_absorption_density"):
+		WaterSystem.set_absorption_density(_absorption_density)
 	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 
 
 func _push_visibility_distance_control() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("set_water_visibility_distance"):
-		OceanManager.set_water_visibility_distance(_visibility_distance_m)
+	if WaterSystem.has_method("set_water_visibility_distance"):
+		WaterSystem.set_water_visibility_distance(_visibility_distance_m)
 	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 
 
 func _push_scattering_strength_control() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("set_water_scattering_strength"):
-		OceanManager.set_water_scattering_strength(_scattering_strength)
+	if WaterSystem.has_method("set_water_scattering_strength"):
+		WaterSystem.set_water_scattering_strength(_scattering_strength)
 	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 
 
 func _push_absorption_tint_control() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("set_water_scattering_color"):
-		OceanManager.set_water_scattering_color(_absorption_tint)
-	elif OceanManager.has_method("set_absorption_tint_color"):
-		OceanManager.set_absorption_tint_color(_absorption_tint)
+	if WaterSystem.has_method("set_water_scattering_color"):
+		WaterSystem.set_water_scattering_color(_absorption_tint)
+	elif WaterSystem.has_method("set_absorption_tint_color"):
+		WaterSystem.set_absorption_tint_color(_absorption_tint)
 	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 
 
 func _push_surface_ssr_control() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("set_surface_ssr_enabled"):
-		OceanManager.set_surface_ssr_enabled(_surface_ssr_enabled)
+	if WaterSystem.has_method("set_surface_ssr_enabled"):
+		WaterSystem.set_surface_ssr_enabled(_surface_ssr_enabled)
 	_refresh_control_labels()
 
 
 func _push_surface_shader_mode() -> void:
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 	var mode := OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL if _experimental_surface_shader_enabled else OceanMesh.SurfaceShaderMode.DEFAULT
-	if OceanManager.has_method("set_surface_shader_mode"):
-		OceanManager.set_surface_shader_mode(mode)
-	_ocean = OceanManager.get_ocean_mesh()
+	if WaterSystem.has_method("set_surface_shader_mode"):
+		WaterSystem.set_surface_shader_mode(mode)
+	_ocean = WaterSystem.get_ocean_mesh()
 	if _ocean != null:
 		_ocean.layers = WATER_RENDER_LAYER_MASK
-	if OceanManager.has_method("set_debug_mode"):
-		OceanManager.set_debug_mode(_debug_mode)
+	if WaterSystem.has_method("set_debug_mode"):
+		WaterSystem.set_debug_mode(_debug_mode)
 	_refresh_control_labels()
 
 
@@ -615,10 +615,10 @@ func _setup_controlled_refraction_source() -> void:
 
 
 func _reset_absorption_tint_control() -> void:
-	if not OceanManager:
+	if not WaterSystem:
 		return
-	if OceanManager.has_method("clear_absorption_tint_override"):
-		OceanManager.clear_absorption_tint_override()
+	if WaterSystem.has_method("clear_absorption_tint_override"):
+		WaterSystem.clear_absorption_tint_override()
 	_current_optical_preset = 0
 	_apply_weather_preset(_current_weather)
 
@@ -659,7 +659,7 @@ func _setup_water_compositor() -> void:
 
 
 func _setup_waterline_stack() -> void:
-	if _camera == null or _world_env == null or OceanManager == null:
+	if _camera == null or _world_env == null or WaterSystem == null:
 		return
 	_waterline_stack = WaterlineStackScript.new()
 	_waterline_stack.name = "ReceiverWaterlineStack"
@@ -668,7 +668,7 @@ func _setup_waterline_stack() -> void:
 	_waterline_stack.configure(
 		_camera,
 		_world_env,
-		OceanManager,
+		WaterSystem,
 		WATERLINE_RECEIVER_LAYER_MASK,
 		_waterline_quality_tier,
 		_sun,
@@ -1070,8 +1070,8 @@ func _refresh_control_labels() -> void:
 		_optical_preset_button.text = "Optics: %s" % preset["name"]
 	if _mesh_button:
 		var mode_text := "Clipmap"
-		if OceanManager and OceanManager.is_initialized() and OceanManager.has_method("get_mesh_mode"):
-			mode_text = "Projected" if OceanManager.get_mesh_mode() == 1 else "Clipmap"
+		if WaterSystem and WaterSystem.is_initialized() and WaterSystem.has_method("get_mesh_mode"):
+			mode_text = "Projected" if WaterSystem.get_mesh_mode() == 1 else "Clipmap"
 		_mesh_button.text = "Mesh: %s" % mode_text
 	if _sun_button:
 		_sun_button.text = "Sun: %s" % ("Low" if _sun_low else "High")
@@ -1080,17 +1080,17 @@ func _refresh_control_labels() -> void:
 	if _wet_debug_button:
 		_wet_debug_button.text = "Wet Debug: %s" % WET_DEBUG_MODE_NAMES[_wet_debug_mode]
 	if _quality_button:
-		var quality := OceanManager.get_water_quality_name() if OceanManager and OceanManager.is_initialized() else "Unknown"
+		var quality := WaterSystem.get_water_quality_name() if WaterSystem and WaterSystem.is_initialized() else "Unknown"
 		_quality_button.text = "Quality: %s" % quality
 	if _spray_button:
 		_spray_button.text = "Spray: %s" % ("On" if _spray_enabled else "Off")
 	if _spray_quality_button:
-		var quality_name := OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown"
+		var quality_name := WaterSystem.get_sea_spray_quality_name() if WaterSystem and WaterSystem.has_method("get_sea_spray_quality_name") else "Unknown"
 		_spray_quality_button.text = "Spray Q: %s" % quality_name
 	if _surface_shader_button:
 		var shader_label := "Boujie High" if _experimental_surface_shader_enabled else "Default"
-		if OceanManager and OceanManager.has_method("get_surface_shader_mode_name"):
-			shader_label = OceanManager.get_surface_shader_mode_name()
+		if WaterSystem and WaterSystem.has_method("get_surface_shader_mode_name"):
+			shader_label = WaterSystem.get_surface_shader_mode_name()
 		_surface_shader_button.text = "Shader: %s" % shader_label
 	if _boujie_full_button:
 		_boujie_full_button.text = "Boujie Full: %s" % ("Disable" if _is_boujie_full_preset_active() else "Enable")
@@ -1328,18 +1328,18 @@ func _push_underwater_effect_controls() -> void:
 		_underwater_effect.call("set_underwater_feature_enabled", &"wobble", _uw_wobble_effect_enabled)
 		_underwater_effect.call("set_underwater_feature_enabled", &"particles", _uw_particles_enabled)
 		_underwater_effect.call("set_underwater_feature_enabled", &"caustics", _uw_caustics_enabled)
-	if OceanManager and OceanManager.has_method("set_underwater_particles_enabled"):
-		OceanManager.set_underwater_particles_enabled(_uw_particles_enabled)
-	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
-		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
-	if OceanManager and OceanManager.has_method("set_underwater_particles_count"):
-		OceanManager.set_underwater_particles_count(_uw_particle_count)
-	if OceanManager and OceanManager.has_method("set_underwater_particles_size_scale"):
-		OceanManager.set_underwater_particles_size_scale(_uw_particle_size_scale)
-	if OceanManager and OceanManager.has_method("set_underwater_particles_speed_scale"):
-		OceanManager.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
-	if OceanManager and OceanManager.has_method("set_underwater_particles_opacity"):
-		OceanManager.set_underwater_particles_opacity(_uw_particle_density)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_enabled"):
+		WaterSystem.set_underwater_particles_enabled(_uw_particles_enabled)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_quality"):
+		WaterSystem.set_underwater_particles_quality(_uw_particles_quality)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_count"):
+		WaterSystem.set_underwater_particles_count(_uw_particle_count)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_size_scale"):
+		WaterSystem.set_underwater_particles_size_scale(_uw_particle_size_scale)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_speed_scale"):
+		WaterSystem.set_underwater_particles_speed_scale(_uw_particle_speed_scale)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_opacity"):
+		WaterSystem.set_underwater_particles_opacity(_uw_particle_density)
 	if _underwater_effect.has_method("set_underwater_particle_params"):
 		_underwater_effect.call(
 			"set_underwater_particle_params",
@@ -1430,8 +1430,8 @@ func _get_underwater_perf_snapshot() -> Dictionary:
 
 
 func _get_underwater_particles_status() -> Dictionary:
-	if OceanManager and OceanManager.has_method("get_underwater_particles_status"):
-		var status: Variant = OceanManager.get_underwater_particles_status()
+	if WaterSystem and WaterSystem.has_method("get_underwater_particles_status"):
+		var status: Variant = WaterSystem.get_underwater_particles_status()
 		if status is Dictionary:
 			return status
 	return {}
@@ -1498,9 +1498,9 @@ func _update_underwater_perf_label() -> void:
 
 
 func _apply_ocean_surface_visibility() -> void:
-	if OceanManager == null or not OceanManager.is_initialized():
+	if WaterSystem == null or not WaterSystem.is_initialized():
 		return
-	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
+	var ocean_mesh: OceanMesh = WaterSystem.get_ocean_mesh()
 	if ocean_mesh:
 		ocean_mesh.layers = WATER_RENDER_LAYER_MASK
 		ocean_mesh.visible = _ocean_surface_visible
@@ -1545,10 +1545,10 @@ func _update_hud() -> void:
 	if _hud_label == null:
 		return
 	var fps := Engine.get_frames_per_second()
-	var quality := OceanManager.get_water_quality_name() if OceanManager and OceanManager.is_initialized() else "not initialized"
+	var quality := WaterSystem.get_water_quality_name() if WaterSystem and WaterSystem.is_initialized() else "not initialized"
 	var mesh_mode := "unknown"
-	if OceanManager and OceanManager.is_initialized() and OceanManager.has_method("get_mesh_mode"):
-		mesh_mode = "Projected" if OceanManager.get_mesh_mode() == 1 else "Clipmap"
+	if WaterSystem and WaterSystem.is_initialized() and WaterSystem.has_method("get_mesh_mode"):
+		mesh_mode = "Projected" if WaterSystem.get_mesh_mode() == 1 else "Clipmap"
 	var state := _get_water_state()
 	var readback_bytes := state.cpu_readback_bytes_per_frame if state != null else 0
 	var cascade_count := state.cascade_count if state != null else 0
@@ -1561,8 +1561,8 @@ func _update_hud() -> void:
 	lines.append("[b]Ocean Lab[/b]  FPS %d  avg %.2f ms" % [fps, _avg_frame_ms])
 	lines.append("quality=%s  mesh=%s  sea=%.2f" % [quality, mesh_mode, _sea_level])
 	var surface_shader_label := "Boujie High" if _experimental_surface_shader_enabled else "Default"
-	if OceanManager and OceanManager.has_method("get_surface_shader_mode_name"):
-		surface_shader_label = OceanManager.get_surface_shader_mode_name()
+	if WaterSystem and WaterSystem.has_method("get_surface_shader_mode_name"):
+		surface_shader_label = WaterSystem.get_surface_shader_mode_name()
 	lines.append("surface_shader=%s  boujie_full=%s" % [
 		surface_shader_label,
 		"on" if _is_boujie_full_preset_active() else "off",
@@ -1594,11 +1594,11 @@ func _update_hud() -> void:
 		"on" if _wet_effect != null and _wet_effect.effect_enabled else "off",
 		_wet_margin,
 	])
-	var spray_energy := OceanManager.get_sea_spray_energy() if OceanManager and OceanManager.has_method("get_sea_spray_energy") else 0.0
-	var spray_status: Dictionary = OceanManager.get_sea_spray_status() if OceanManager and OceanManager.has_method("get_sea_spray_status") else {}
+	var spray_energy := WaterSystem.get_sea_spray_energy() if WaterSystem and WaterSystem.has_method("get_sea_spray_energy") else 0.0
+	var spray_status: Dictionary = WaterSystem.get_sea_spray_status() if WaterSystem and WaterSystem.has_method("get_sea_spray_status") else {}
 	lines.append("spray=%s/%s  emitting=%s  candidates=%d  energy=%.2f" % [
 		"on" if _spray_enabled else "off",
-		OceanManager.get_sea_spray_quality_name() if OceanManager and OceanManager.has_method("get_sea_spray_quality_name") else "Unknown",
+		WaterSystem.get_sea_spray_quality_name() if WaterSystem and WaterSystem.has_method("get_sea_spray_quality_name") else "Unknown",
 		"yes" if bool(spray_status.get("emitting", false)) else "no",
 		int(spray_status.get("particle_candidates", 0)),
 		spray_energy,
@@ -1730,7 +1730,7 @@ func _update_hud() -> void:
 				float(wl_capture.get("activation_fade", 0.0)),
 				str(wl_capture.get("source_size", Vector2i.ZERO)),
 			])
-	var sigma := OceanManager.get_absorption_sigma() if OceanManager and OceanManager.has_method("get_absorption_sigma") else Vector3.ZERO
+	var sigma := WaterSystem.get_absorption_sigma() if WaterSystem and WaterSystem.has_method("get_absorption_sigma") else Vector3.ZERO
 	lines.append("optics vis=%.1fm  turb=%.2f  tint=#%s  sigma=(%.3f %.3f %.3f)" % [
 		_visibility_distance_m,
 		_scattering_strength,
@@ -1827,8 +1827,8 @@ func _update_hud() -> void:
 
 func _cycle_debug_mode() -> void:
 	_debug_mode = (_debug_mode + 1) % DEBUG_MODE_NAMES.size()
-	if OceanManager and OceanManager.has_method("set_debug_mode"):
-		OceanManager.set_debug_mode(_debug_mode)
+	if WaterSystem and WaterSystem.has_method("set_debug_mode"):
+		WaterSystem.set_debug_mode(_debug_mode)
 	_refresh_control_labels()
 	Log.info("water", "[Ocean Lab] debug_mode %d = %s" % [_debug_mode, DEBUG_MODE_NAMES[_debug_mode]])
 	_log_refraction_baseline_state("debug_mode")
@@ -1838,7 +1838,7 @@ func _apply_weather_preset(idx: int) -> void:
 	if idx < 0 or idx >= WEATHER_PRESETS.size():
 		return
 	_current_weather = idx
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 	var preset: Dictionary = WEATHER_PRESETS[idx]
 	var result := WeatherTypesScript.WeatherResult.new()
@@ -1846,7 +1846,7 @@ func _apply_weather_preset(idx: int) -> void:
 	result.cloud_coverage = preset["cloud"]
 	var wind_rad := deg_to_rad(45.0)
 	result.storm_direction = Vector3(sin(wind_rad), 0.0, cos(wind_rad))
-	OceanManager.apply_weather(result)
+	WaterSystem.apply_weather(result)
 	_apply_flat_water_override(bool(preset.get("flat_water", false)))
 	_apply_optical_preset(_current_optical_preset)
 	_sync_ocean_optics_from_manager()
@@ -1858,18 +1858,18 @@ func _apply_optical_preset(idx: int) -> void:
 	if idx < 0 or idx >= OPTICAL_PRESETS.size():
 		return
 	_current_optical_preset = idx
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 	var preset: Dictionary = OPTICAL_PRESETS[idx]
 	_visibility_distance_m = float(preset["visibility"])
 	_scattering_strength = float(preset["scatter"])
 	_absorption_tint = preset["color"]
-	if OceanManager.has_method("set_water_visibility_distance"):
-		OceanManager.set_water_visibility_distance(_visibility_distance_m)
-	if OceanManager.has_method("set_water_scattering_strength"):
-		OceanManager.set_water_scattering_strength(_scattering_strength)
-	if OceanManager.has_method("set_water_scattering_color"):
-		OceanManager.set_water_scattering_color(_absorption_tint)
+	if WaterSystem.has_method("set_water_visibility_distance"):
+		WaterSystem.set_water_visibility_distance(_visibility_distance_m)
+	if WaterSystem.has_method("set_water_scattering_strength"):
+		WaterSystem.set_water_scattering_strength(_scattering_strength)
+	if WaterSystem.has_method("set_water_scattering_color"):
+		WaterSystem.set_water_scattering_color(_absorption_tint)
 	_sync_ocean_optics_from_manager()
 	_refresh_control_labels()
 	Log.info("water", "[Ocean Lab] optics preset %s visibility=%.1fm turbidity=%.2f" % [
@@ -1880,19 +1880,19 @@ func _apply_optical_preset(idx: int) -> void:
 
 
 func _apply_flat_water_override(enabled: bool) -> void:
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 	var target_wave_scale := 0.0 if enabled else _default_wave_scale
-	OceanManager.wave_scale = target_wave_scale
-	if OceanManager.has_method("set_wind_strength"):
-		OceanManager.set_wind_strength(0.0 if enabled else clampf(float(WEATHER_PRESETS[_current_weather]["wind"]) / 0.9, 0.0, 1.0))
-	if OceanManager._ocean_mesh:
-		OceanManager._ocean_mesh.set_wave_scale(target_wave_scale)
-		var mat: ShaderMaterial = OceanManager._ocean_mesh.get_material()
+	WaterSystem.wave_scale = target_wave_scale
+	if WaterSystem.has_method("set_wind_strength"):
+		WaterSystem.set_wind_strength(0.0 if enabled else clampf(float(WEATHER_PRESETS[_current_weather]["wind"]) / 0.9, 0.0, 1.0))
+	if WaterSystem._ocean_mesh:
+		WaterSystem._ocean_mesh.set_wave_scale(target_wave_scale)
+		var mat: ShaderMaterial = WaterSystem._ocean_mesh.get_material()
 		if mat:
-			mat.set_shader_parameter("shore_wave_amplitude", 0.0 if enabled else OceanManager._current_shore_wave_amplitude)
+			mat.set_shader_parameter("shore_wave_amplitude", 0.0 if enabled else WaterSystem._current_shore_wave_amplitude)
 			mat.set_shader_parameter("normal_strength", 0.0 if enabled else lerpf(0.6, 1.6, clampf(float(WEATHER_PRESETS[_current_weather]["wind"]) / 0.9, 0.0, 1.0)))
-	OceanManager._current_shore_wave_amplitude = 0.0 if enabled else OceanManager._current_shore_wave_amplitude
+	WaterSystem._current_shore_wave_amplitude = 0.0 if enabled else WaterSystem._current_shore_wave_amplitude
 
 
 func _toggle_buoy_grid() -> void:
@@ -1902,15 +1902,15 @@ func _toggle_buoy_grid() -> void:
 
 
 func _toggle_mesh_mode() -> void:
-	if not OceanManager or not OceanManager.is_initialized() or not OceanManager.has_method("rebuild_mesh_with_mode"):
+	if not WaterSystem or not WaterSystem.is_initialized() or not WaterSystem.has_method("rebuild_mesh_with_mode"):
 		return
-	var current: int = OceanManager.get_mesh_mode()
+	var current: int = WaterSystem.get_mesh_mode()
 	var next := 1 if current == 0 else 0
-	if next == 1 and OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
-		OceanManager.set_water_quality(1)
-	OceanManager.rebuild_mesh_with_mode(next)
-	OceanManager.set_camera(_camera)
-	_ocean = OceanManager.get_ocean_mesh()
+	if next == 1 and WaterSystem.get_water_quality() != OceanMesh.QualityMode.HIGH:
+		WaterSystem.set_water_quality(1)
+	WaterSystem.rebuild_mesh_with_mode(next)
+	WaterSystem.set_camera(_camera)
+	_ocean = WaterSystem.get_ocean_mesh()
 	_push_surface_shader_mode()
 	if _surface_refraction_layer != null:
 		_surface_refraction_layer.call(
@@ -1920,10 +1920,10 @@ func _toggle_mesh_mode() -> void:
 			_ocean,
 			WATER_RENDER_LAYER_MASK
 		)
-	if OceanManager.has_method("set_sea_spray_render_layers"):
-		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
-	if OceanManager.has_method("set_underwater_particles_render_layers"):
-		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
+	if WaterSystem.has_method("set_sea_spray_render_layers"):
+		WaterSystem.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if WaterSystem.has_method("set_underwater_particles_render_layers"):
+		WaterSystem.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_push_surface_refraction_control()
@@ -2003,24 +2003,24 @@ func _start_waterline_receiver_isolated_view(debug_mode: int, log_context: Strin
 
 
 func _cycle_quality() -> void:
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
-	var current: OceanMesh.QualityMode = OceanManager.get_water_quality()
+	var current: OceanMesh.QualityMode = WaterSystem.get_water_quality()
 	var next := 1
 	if current == OceanMesh.QualityMode.HIGH:
 		next = 0
 	else:
 		next = 1
-	if next == 0 and OceanManager.get_mesh_mode() == 1:
-		OceanManager.rebuild_mesh_with_mode(0)
-	OceanManager.set_water_quality(next)
-	OceanManager.set_camera(_camera)
-	_ocean = OceanManager.get_ocean_mesh()
+	if next == 0 and WaterSystem.get_mesh_mode() == 1:
+		WaterSystem.rebuild_mesh_with_mode(0)
+	WaterSystem.set_water_quality(next)
+	WaterSystem.set_camera(_camera)
+	_ocean = WaterSystem.get_ocean_mesh()
 	_push_surface_shader_mode()
-	if OceanManager.has_method("set_sea_spray_render_layers"):
-		OceanManager.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
-	if OceanManager.has_method("set_underwater_particles_render_layers"):
-		OceanManager.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
+	if WaterSystem.has_method("set_sea_spray_render_layers"):
+		WaterSystem.set_sea_spray_render_layers(WATER_RENDER_LAYER_MASK)
+	if WaterSystem.has_method("set_underwater_particles_render_layers"):
+		WaterSystem.set_underwater_particles_render_layers(WATER_RENDER_LAYER_MASK)
 	_apply_ocean_surface_visibility()
 	_apply_weather_preset(_current_weather)
 	_push_surface_refraction_control()
@@ -2029,8 +2029,8 @@ func _cycle_quality() -> void:
 
 func _toggle_spray() -> void:
 	_spray_enabled = not _spray_enabled
-	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
-		OceanManager.set_sea_spray_enabled(_spray_enabled)
+	if WaterSystem and WaterSystem.has_method("set_sea_spray_enabled"):
+		WaterSystem.set_sea_spray_enabled(_spray_enabled)
 	_refresh_control_labels()
 
 
@@ -2074,7 +2074,7 @@ func _toggle_boujie_full_preset() -> void:
 
 func _capture_boujie_full_previous_state() -> void:
 	_boujie_full_restore_state = {
-		"water_quality": OceanManager.get_water_quality() if OceanManager and OceanManager.is_initialized() else -1,
+		"water_quality": WaterSystem.get_water_quality() if WaterSystem and WaterSystem.is_initialized() else -1,
 		"experimental_surface_shader_enabled": _experimental_surface_shader_enabled,
 		"surface_refraction_enabled": _surface_refraction_enabled,
 		"surface_refraction_debug_mode": _surface_refraction_debug_mode,
@@ -2119,10 +2119,10 @@ func _restore_boujie_full_previous_state() -> void:
 
 	var state := _boujie_full_restore_state
 	var saved_quality := int(state.get("water_quality", -1))
-	if saved_quality >= 0 and OceanManager and OceanManager.is_initialized():
-		OceanManager.set_water_quality(saved_quality)
-		OceanManager.set_camera(_camera)
-		_ocean = OceanManager.get_ocean_mesh()
+	if saved_quality >= 0 and WaterSystem and WaterSystem.is_initialized():
+		WaterSystem.set_water_quality(saved_quality)
+		WaterSystem.set_camera(_camera)
+		_ocean = WaterSystem.get_ocean_mesh()
 		if _ocean != null:
 			_ocean.layers = WATER_RENDER_LAYER_MASK
 
@@ -2154,10 +2154,10 @@ func _restore_boujie_full_previous_state() -> void:
 	_uw_particle_speed_scale = float(state.get("uw_particle_speed_scale", 1.5))
 	_uw_particle_density = float(state.get("uw_particle_density", 1.0))
 
-	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
-		OceanManager.set_sea_spray_enabled(_spray_enabled)
-	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
-		OceanManager.set_sea_spray_quality(_spray_quality)
+	if WaterSystem and WaterSystem.has_method("set_sea_spray_enabled"):
+		WaterSystem.set_sea_spray_enabled(_spray_enabled)
+	if WaterSystem and WaterSystem.has_method("set_sea_spray_quality"):
+		WaterSystem.set_sea_spray_quality(_spray_quality)
 	_push_surface_shader_mode()
 	_apply_weather_preset(_current_weather)
 	_apply_optical_preset(_current_optical_preset)
@@ -2174,11 +2174,11 @@ func _restore_boujie_full_previous_state() -> void:
 
 
 func _apply_boujie_full_preset() -> void:
-	if OceanManager and OceanManager.is_initialized():
-		if OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
-			OceanManager.set_water_quality(OceanMesh.QualityMode.HIGH)
-			OceanManager.set_camera(_camera)
-			_ocean = OceanManager.get_ocean_mesh()
+	if WaterSystem and WaterSystem.is_initialized():
+		if WaterSystem.get_water_quality() != OceanMesh.QualityMode.HIGH:
+			WaterSystem.set_water_quality(OceanMesh.QualityMode.HIGH)
+			WaterSystem.set_camera(_camera)
+			_ocean = WaterSystem.get_ocean_mesh()
 			if _ocean != null:
 				_ocean.layers = WATER_RENDER_LAYER_MASK
 	_set_experimental_surface_shader_enabled(true)
@@ -2208,10 +2208,10 @@ func _apply_boujie_full_preset() -> void:
 	_uw_particle_size_scale = 4.0
 	_uw_particle_speed_scale = 1.5
 	_uw_particle_density = 1.0
-	if OceanManager and OceanManager.has_method("set_sea_spray_enabled"):
-		OceanManager.set_sea_spray_enabled(_spray_enabled)
-	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
-		OceanManager.set_sea_spray_quality(_spray_quality)
+	if WaterSystem and WaterSystem.has_method("set_sea_spray_enabled"):
+		WaterSystem.set_sea_spray_enabled(_spray_enabled)
+	if WaterSystem and WaterSystem.has_method("set_sea_spray_quality"):
+		WaterSystem.set_sea_spray_quality(_spray_quality)
 	_apply_ocean_surface_visibility()
 	_apply_environment_ssr_enabled()
 	_push_surface_refraction_control()
@@ -2250,8 +2250,8 @@ func _is_boujie_full_preset_active() -> bool:
 
 func _cycle_spray_quality() -> void:
 	_spray_quality = (_spray_quality + 1) % 4
-	if OceanManager and OceanManager.has_method("set_sea_spray_quality"):
-		OceanManager.set_sea_spray_quality(_spray_quality)
+	if WaterSystem and WaterSystem.has_method("set_sea_spray_quality"):
+		WaterSystem.set_sea_spray_quality(_spray_quality)
 	_refresh_control_labels()
 
 
@@ -2341,14 +2341,14 @@ func _cycle_underwater_quality() -> void:
 
 func _cycle_underwater_particles_quality() -> void:
 	_uw_particles_quality = (_uw_particles_quality + 1) % 4
-	if OceanManager and OceanManager.has_method("set_underwater_particles_quality"):
-		OceanManager.set_underwater_particles_quality(_uw_particles_quality)
+	if WaterSystem and WaterSystem.has_method("set_underwater_particles_quality"):
+		WaterSystem.set_underwater_particles_quality(_uw_particles_quality)
 	_refresh_control_labels()
 
 
 func _get_underwater_particles_quality_name() -> String:
-	if OceanManager and OceanManager.has_method("get_underwater_particles_quality_name"):
-		return OceanManager.get_underwater_particles_quality_name()
+	if WaterSystem and WaterSystem.has_method("get_underwater_particles_quality_name"):
+		return WaterSystem.get_underwater_particles_quality_name()
 	match _uw_particles_quality:
 		0:
 			return "Off"
@@ -2368,9 +2368,9 @@ func _toggle_wireframe_debug() -> void:
 
 
 func _get_ocean_material() -> ShaderMaterial:
-	if OceanManager == null or not OceanManager.is_initialized():
+	if WaterSystem == null or not WaterSystem.is_initialized():
 		return null
-	var ocean_mesh: OceanMesh = OceanManager.get_ocean_mesh()
+	var ocean_mesh: OceanMesh = WaterSystem.get_ocean_mesh()
 	if ocean_mesh == null:
 		return null
 	return ocean_mesh.get_material()
@@ -2440,11 +2440,11 @@ func _log_refraction_baseline_state(reason: String) -> void:
 	if _current_weather >= 0 and _current_weather < WEATHER_PRESETS.size():
 		weather_name = str(WEATHER_PRESETS[_current_weather].get("name", "Unknown"))
 	var mesh_mode := "Unknown"
-	if OceanManager and OceanManager.is_initialized() and OceanManager.has_method("get_mesh_mode"):
-		mesh_mode = "Projected" if OceanManager.get_mesh_mode() == 1 else "Clipmap"
+	if WaterSystem and WaterSystem.is_initialized() and WaterSystem.has_method("get_mesh_mode"):
+		mesh_mode = "Projected" if WaterSystem.get_mesh_mode() == 1 else "Clipmap"
 	var surface_shader_label := "Boujie High" if _experimental_surface_shader_enabled else "Default"
-	if OceanManager and OceanManager.has_method("get_surface_shader_mode_name"):
-		surface_shader_label = OceanManager.get_surface_shader_mode_name()
+	if WaterSystem and WaterSystem.has_method("get_surface_shader_mode_name"):
+		surface_shader_label = WaterSystem.get_surface_shader_mode_name()
 	var particle_status := _get_underwater_particles_status()
 	var wl_perf := _get_waterline_perf_snapshot()
 	var wl_capture := _get_waterline_capture_snapshot()
@@ -2586,8 +2586,8 @@ func _get_surface_baseline_issues() -> Array[String]:
 
 
 func _get_water_state() -> WaterSurfaceState:
-	if OceanManager != null and OceanManager.has_method("get_water_surface_state"):
-		return OceanManager.get_water_surface_state()
+	if WaterSystem != null and WaterSystem.has_method("get_water_surface_state"):
+		return WaterSystem.get_water_surface_state()
 	return null
 
 

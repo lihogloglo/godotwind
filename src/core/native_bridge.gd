@@ -634,14 +634,6 @@ func create_shore_mask_baker() -> RefCounted:
 	return _factory.call("CreateShoreMaskBaker")
 
 
-## Create a native river flow-map baker.
-## Returns: NativeRiverFlowBaker C# object or null if not available.
-func create_river_flow_baker() -> RefCounted:
-	if _factory == null:
-		return null
-	return _factory.call("CreateRiverFlowBaker")
-
-
 ## Create a native curved river surface mesh builder.
 ## Returns: NativeRiverMeshBuilder C# object or null if not available.
 func create_river_mesh_builder() -> RefCounted:

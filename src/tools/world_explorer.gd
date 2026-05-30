@@ -68,6 +68,7 @@ const MWInventoryServiceScript := preload("res://src/core/interaction/morrowind/
 const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
 const CarryControllerScript := preload("res://src/core/interaction/carry_controller.gd")
 const DoorInteractableScript := preload("res://src/core/interaction/morrowind/door_interactable.gd")
+const DoorUtils := preload("res://src/core/world/door_utils.gd")
 # Dialogue system integration (C.3-C.7)
 const DialogueUIScript := preload("res://src/core/ui/dialogue_panel.gd")
 const BookViewerScript := preload("res://src/core/ui/book_viewer.gd")
@@ -320,8 +321,8 @@ func _cleanup_water_provider() -> void:
 		var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
 		if water_provider != null and water_provider.has_method("drain_async_requests"):
 			water_provider.call("drain_async_requests", true)
-	if OceanManager and OceanManager.has_method("set_world_water_provider"):
-		OceanManager.call("set_world_water_provider", null)
+	if WaterSystem and WaterSystem.has_method("set_world_water_provider"):
+		WaterSystem.call("set_world_water_provider", null)
 
 
 func _ready() -> void:
@@ -366,10 +367,10 @@ func _ready() -> void:
 	cell_manager = CellManagerScript.new()
 	world_source = MorrowindWorldSourceScript.new()
 	world_object_source = world_source.get_object_source()
-	if world_source.has_method("get_water_provider") and OceanManager.has_method("set_world_water_provider"):
+	if world_source.has_method("get_water_provider") and WaterSystem.has_method("set_world_water_provider"):
 		var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
 		if water_provider != null:
-			OceanManager.call("set_world_water_provider", water_provider)
+			WaterSystem.call("set_world_water_provider", water_provider)
 	if cell_manager.has_method("set_world_source"):
 		cell_manager.call("set_world_source", world_source)
 	else:
@@ -574,7 +575,7 @@ func _init_async() -> void:
 	var sun: DirectionalLight3D = _find_sun_light()
 	if terrain_3d and sun:
 		_horizon_map_manager.initialize(terrain_3d, sun)
-		# Push wet map uniforms (sea_level from OceanManager or project settings)
+		# Push wet map uniforms (sea_level from WaterSystem or project settings)
 		var sea_lvl: float = ProjectSettings.get_setting("ocean/sea_level", 0.0)
 		_horizon_map_manager.push_wet_map(sea_lvl)
 		_init_mw_terrain_textures()
@@ -679,7 +680,8 @@ func _init_async() -> void:
 	# High-altitude sustained traversal stress test. This is separate from the
 	# canonical AutoBench because it answers transition stutter directly.
 	_maybe_start_stress_bench()
-	_maybe_start_ready_quit()
+	if not _maybe_start_interior_door_smoke():
+		_maybe_start_ready_quit()
 
 
 func _get_start_cell_arg() -> Vector2i:
@@ -970,6 +972,127 @@ func _maybe_start_ready_quit() -> void:
 	get_tree().create_timer(delay).timeout.connect(func() -> void:
 		_request_fast_quit("READY_QUIT - diagnostic ready quit")
 	)
+
+
+func _maybe_start_interior_door_smoke() -> bool:
+	var args := _runtime_cmdline_args()
+	if not args.has("--interior-door-smoke"):
+		return false
+	var rush := args.has("--interior-door-smoke-rush")
+	Log.info("testing", "[INTERIOR_DOOR_SMOKE] starting rush=%s" % rush)
+	call_deferred("_run_interior_door_smoke", rush)
+	return true
+
+
+func _run_interior_door_smoke(rush: bool) -> void:
+	var deadline_ms := Time.get_ticks_msec() + 45000
+	var prefer_ordinary_deadline_ms := Time.get_ticks_msec() + 15000
+	var door: Variant = null
+	while Time.get_ticks_msec() < deadline_ms:
+		if _pocket_manager:
+			var fallback_door: Variant = null
+			var chargen_fallback: Variant = null
+			for candidate: Variant in _pocket_manager._exterior_doors:
+				if candidate == null or str(candidate.target_cell_name).is_empty():
+					continue
+				var dest: CellRecord = ESMManager.get_cell(candidate.target_cell_name)
+				if dest and dest.is_interior():
+					if fallback_door == null and str(candidate.target_cell_name) != "Imperial Prison Ship":
+						fallback_door = candidate
+					if chargen_fallback == null:
+						chargen_fallback = candidate
+					if str(candidate.target_cell_name).begins_with("Seyda Neen,"):
+						door = candidate
+						break
+			if door == null:
+				door = fallback_door
+			if door == null and Time.get_ticks_msec() >= prefer_ordinary_deadline_ms:
+				door = chargen_fallback
+		if door != null:
+			break
+		await get_tree().process_frame
+
+	if door == null:
+		Log.error("testing", "[INTERIOR_DOOR_SMOKE] no registered exterior travel door")
+		get_tree().quit(1)
+		return
+
+	if camera:
+		camera.global_position = door.world_position + Vector3(0.0, 1.6, 1.5)
+		camera.look_at(door.world_position + Vector3(0.0, 1.0, 0.0), Vector3.UP)
+	if cell_manager:
+		cell_manager.set_camera_position(door.world_position)
+
+	if not rush:
+		var preload_deadline_ms := Time.get_ticks_msec() + 15000
+		while Time.get_ticks_msec() < preload_deadline_ms:
+			var slot: Variant = _pocket_manager._get_slot_for_cell_any(door.target_cell_name)
+			if slot != null and slot.is_occupied:
+				break
+			await get_tree().process_frame
+
+	var door_node: Node3D = null
+	var interactable_deadline_ms := Time.get_ticks_msec() + 10000
+	while Time.get_ticks_msec() < interactable_deadline_ms:
+		door_node = DoorUtils.find_by_ref_id(self, door.ref_id, door.world_position, 10.0, door.ref_num)
+		if door_node != null and door_node.has_method("interact") \
+				and str(door_node.get("door_instance_key")) == str(door.instance_key):
+			break
+		await get_tree().process_frame
+	if door_node == null or not door_node.has_method("interact") \
+			or str(door_node.get("door_instance_key")) != str(door.instance_key):
+		Log.error("testing", "[INTERIOR_DOOR_SMOKE] DoorInteractable not found for key=%s" % door.instance_key)
+		get_tree().quit(1)
+		return
+	Log.info("testing", "[INTERIOR_DOOR_SMOKE] activating DoorInteractable key=%s" % door.instance_key)
+	door_node.call("interact", camera)
+
+	var entered: bool = await _wait_for_interior_smoke_state(true, door.target_cell_name, 45000)
+	if not entered:
+		Log.error("testing", "[INTERIOR_DOOR_SMOKE] failed to enter '%s'" % door.target_cell_name)
+		get_tree().quit(1)
+		return
+
+	var active_slot: Variant = _pocket_manager._active_pocket
+	var exit_door: Variant = null
+	for candidate: Variant in active_slot.doors_inside:
+		var target_name := str(candidate.target_cell_name)
+		var dest: CellRecord = ESMManager.get_cell(target_name) if not target_name.is_empty() else null
+		if target_name.is_empty() or dest == null or not dest.is_interior():
+			exit_door = candidate
+			break
+
+	if exit_door == null:
+		Log.error("testing", "[INTERIOR_DOOR_SMOKE] no exterior exit door in '%s'" % active_slot.cell_name)
+		get_tree().quit(1)
+		return
+
+	Log.info("testing", "[INTERIOR_DOOR_SMOKE] exiting through key=%s" % exit_door.instance_key)
+	await _activate_door(exit_door)
+	var exited: bool = await _wait_for_interior_smoke_state(false, "", 45000)
+	if not exited:
+		Log.error("testing", "[INTERIOR_DOOR_SMOKE] failed to return to exterior")
+		get_tree().quit(1)
+		return
+
+	if world_streaming_manager and world_streaming_manager.has_method("is_world_tracking_frozen"):
+		if bool(world_streaming_manager.call("is_world_tracking_frozen")):
+			Log.error("testing", "[INTERIOR_DOOR_SMOKE] world tracking still frozen after exit")
+			get_tree().quit(1)
+			return
+
+	Log.info("testing", "[INTERIOR_DOOR_SMOKE] PASS exterior->interior->exterior")
+	get_tree().quit(0)
+
+
+func _wait_for_interior_smoke_state(inside: bool, cell_name: String, timeout_ms: int) -> bool:
+	var deadline_ms := Time.get_ticks_msec() + timeout_ms
+	while Time.get_ticks_msec() < deadline_ms:
+		if _pocket_manager and _pocket_manager.is_inside() == inside:
+			if not inside or cell_name.is_empty() or _pocket_manager.get_active_interior_name() == cell_name:
+				return true
+		await get_tree().process_frame
+	return false
 
 
 func _init_terrain3d() -> void:
@@ -1412,8 +1535,8 @@ func _cmd_center_on_cell(args: Dictionary) -> CommandRegistry.CommandResult:
 
 	# Use pocket manager to load and enter
 	if _pocket_manager:
-		# Pause streaming while inside (camera at Y=-500 would unload all cells)
-		_set_streaming_paused(true)
+		# Freeze exterior tracking while inside (camera at Y=-500 would unload all cells)
+		_set_world_tracking_frozen(true)
 		# Create a synthetic door info for direct teleport
 		var door := InteriorPocketManagerScript.DoorInfo.new()
 		door.ref_id = &"console_coc"
@@ -1424,7 +1547,7 @@ func _cmd_center_on_cell(args: Dictionary) -> CommandRegistry.CommandResult:
 		door.teleport_rot_mw = Vector3.ZERO
 		var success: bool = await _pocket_manager.enter_interior(door)
 		if not success:
-			_set_streaming_paused(false)
+			_set_world_tracking_frozen(false)
 			return CommandRegistry.CommandResult.error("Failed to enter: %s" % cell_name)
 		return CommandRegistry.CommandResult.ok("Teleporting to: %s" % cell_name)
 
@@ -1732,7 +1855,10 @@ func _setup_visibility_toggles() -> void:
 	# Build foldable panels via ExplorerPanels
 	var callbacks := {
 		"show_characters_toggled": _on_show_characters_toggled,
+		"all_water_toggled": _ocean_controls.set_all_water_enabled,
 		"show_ocean_toggled": _ocean_controls.on_show_ocean_toggled,
+		"rivers_toggled": _ocean_controls.set_rivers_enabled,
+		"lakes_pools_toggled": _ocean_controls.set_lakes_pools_enabled,
 		"show_sky_toggled": _on_show_sky_toggled,
 		"cirrus_changed": _env_controls.on_cirrus_changed,
 		"cirrus_size_changed": _env_controls.on_cirrus_size_changed,
@@ -1805,6 +1931,9 @@ func _setup_visibility_toggles() -> void:
 	var initial_state := {
 		"show_characters": _show_characters,
 		"show_ocean": _ocean_controls.show_ocean,
+		"all_water": _ocean_controls.all_water_enabled,
+		"rivers": _ocean_controls.rivers_enabled,
+		"lakes_pools": _ocean_controls.lakes_pools_enabled,
 		"show_sky": _env_controls.show_sky,
 		"view_distance": _current_view_distance,
 		"show_chunk_debug": _show_chunk_debug,
@@ -2461,6 +2590,7 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 	add_child(native_streaming_manager)
 	
 	# Connect signals
+	native_streaming_manager.cell_loading.connect(_on_native_cell_loading)
 	native_streaming_manager.cell_loaded.connect(_on_native_cell_loaded)
 	native_streaming_manager.cell_unloaded.connect(_on_native_cell_unloaded)
 	native_streaming_manager.startup_progress.connect(_on_streaming_startup_progress)
@@ -2660,20 +2790,20 @@ func _cmd_toggle_debug(_args: Dictionary) -> String:
 
 
 func _cmd_ocean_spray(args: Dictionary) -> String:
-	if OceanManager == null:
-		return "OceanManager not available"
+	if WaterSystem == null:
+		return "WaterSystem not available"
 
 	var raw := String(args.get("state", "")).to_lower().strip_edges()
 	if raw in ["on", "true", "1", "yes"]:
-		OceanManager.set_sea_spray_enabled(true)
+		WaterSystem.set_sea_spray_enabled(true)
 	elif raw in ["off", "false", "0", "no"]:
-		OceanManager.set_sea_spray_enabled(false)
+		WaterSystem.set_sea_spray_enabled(false)
 	elif raw not in ["", "status"]:
 		return "Usage: ocean_spray [on|off|status]"
 	elif raw == "":
-		OceanManager.toggle_sea_spray()
+		WaterSystem.toggle_sea_spray()
 
-	var status: Dictionary = OceanManager.get_sea_spray_status()
+	var status: Dictionary = WaterSystem.get_sea_spray_status()
 	return "ocean_spray=%s quality=%s emitting=%s candidates=%d energy=%.2f fft=%s" % [
 		"ON" if bool(status.get("enabled", false)) else "off",
 		String(status.get("quality_name", "Unknown")),
@@ -2685,33 +2815,33 @@ func _cmd_ocean_spray(args: Dictionary) -> String:
 
 
 func _cmd_ocean_mesh(args: Dictionary) -> String:
-	if OceanManager == null or not OceanManager.is_initialized():
-		return "OceanManager not initialized"
+	if WaterSystem == null or not WaterSystem.is_initialized():
+		return "WaterSystem not initialized"
 
 	var raw := String(args.get("mode", "status")).to_lower().strip_edges()
 	if raw in ["", "status", "info"]:
 		return _format_ocean_mesh_status()
 	if raw in ["clipmap", "clip", "0"]:
-		OceanManager.rebuild_mesh_with_mode(OceanMesh.MeshMode.CLIPMAP)
+		WaterSystem.rebuild_mesh_with_mode(OceanMesh.MeshMode.CLIPMAP)
 		return _format_ocean_mesh_status()
 	if raw in ["projected", "project", "proj", "1"]:
-		if OceanManager.get_water_quality() != OceanMesh.QualityMode.HIGH:
+		if WaterSystem.get_water_quality() != OceanMesh.QualityMode.HIGH:
 			return "Projected mesh is FFT-only. Switch Water quality to High FFT first, then run: ocean_mesh projected"
-		OceanManager.rebuild_mesh_with_mode(OceanMesh.MeshMode.PROJECTED)
+		WaterSystem.rebuild_mesh_with_mode(OceanMesh.MeshMode.PROJECTED)
 		return _format_ocean_mesh_status()
 	return "Usage: ocean_mesh [status|clipmap|projected]"
 
 
 func _format_ocean_mesh_status() -> String:
 	var mode := "Unknown"
-	if OceanManager.has_method("get_mesh_mode"):
-		mode = "Projected" if OceanManager.get_mesh_mode() == OceanMesh.MeshMode.PROJECTED else "Clipmap"
+	if WaterSystem.has_method("get_mesh_mode"):
+		mode = "Projected" if WaterSystem.get_mesh_mode() == OceanMesh.MeshMode.PROJECTED else "Clipmap"
 	var quality := "Unknown"
-	if OceanManager.has_method("get_water_quality_name"):
-		quality = OceanManager.get_water_quality_name()
+	if WaterSystem.has_method("get_water_quality_name"):
+		quality = WaterSystem.get_water_quality_name()
 	var shader := "Unknown"
-	if OceanManager.has_method("get_surface_shader_mode_name"):
-		shader = OceanManager.get_surface_shader_mode_name()
+	if WaterSystem.has_method("get_surface_shader_mode_name"):
+		shader = WaterSystem.get_surface_shader_mode_name()
 	return "ocean_mesh=%s quality=%s shader=%s" % [mode, quality, shader]
 
 
@@ -3045,17 +3175,29 @@ func _cmd_hlod_stats(_args: Dictionary) -> String:
 	)
 
 
+func _register_exterior_doors_for_grid(grid: Vector2i) -> void:
+	if not _pocket_manager:
+		return
+	var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
+	if cell:
+		_pocket_manager.register_exterior_cell_doors(cell, grid)
+
+
+## Callback for native streaming manager cell activation/request
+func _on_native_cell_loading(grid: Vector2i) -> void:
+	_register_exterior_doors_for_grid(grid)
+
+
 ## Callback for native streaming manager cell loaded
 func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 	_log("Cell loaded: (%d, %d) - %d objects (native)" % [grid.x, grid.y, object_count])
 	_update_stats()
 	_prepare_water_for_loaded_cell(grid)
 
-	# Register doors from newly loaded cell with pocket manager
-	if _pocket_manager:
-		var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
-		if cell:
-			_pocket_manager.register_exterior_cell_doors(cell, grid)
+	# Completion can arrive long after interactive doors were proximity-deferred;
+	# this is an idempotent backup for cells that did not emit through the async
+	# request path.
+	_register_exterior_doors_for_grid(grid)
 
 	# Autoregister collision visualizers on the new cell when the toggle is ON.
 	# No-op when toggle is off. Cell node lookup defers to NativeStreamingManager.
@@ -3066,6 +3208,12 @@ func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 
 
 func _prepare_water_for_loaded_cell(grid: Vector2i) -> void:
+	if WaterSystem and WaterSystem.has_method("is_water_layer_enabled") and not WaterSystem.is_water_layer_enabled(&"all"):
+		return
+	if WaterSystem and WaterSystem.has_method("is_water_layer_enabled") \
+			and not WaterSystem.is_water_layer_enabled(&"rivers") \
+			and not WaterSystem.is_water_layer_enabled(&"lakes_pools"):
+		return
 	if world_source == null or not world_source.has_method("get_water_provider"):
 		return
 	var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
@@ -3084,6 +3232,12 @@ func _prepare_water_for_loaded_cell(grid: Vector2i) -> void:
 
 
 func _process_water_provider_async() -> void:
+	if WaterSystem and WaterSystem.has_method("is_water_layer_enabled") and not WaterSystem.is_water_layer_enabled(&"all"):
+		return
+	if WaterSystem and WaterSystem.has_method("is_water_layer_enabled") \
+			and not WaterSystem.is_water_layer_enabled(&"rivers") \
+			and not WaterSystem.is_water_layer_enabled(&"lakes_pools"):
+		return
 	if world_source == null or not world_source.has_method("get_water_provider"):
 		return
 	var water_provider: RefCounted = world_source.call("get_water_provider") as RefCounted
@@ -3096,9 +3250,12 @@ func _process_water_provider_async() -> void:
 func _ensure_water_render_root() -> Node3D:
 	if _water_render_root != null and is_instance_valid(_water_render_root):
 		return _water_render_root
-	_water_render_root = Node3D.new()
-	_water_render_root.name = "GeneratedWaterBodies"
-	add_child(_water_render_root)
+	if WaterSystem and WaterSystem.has_method("get_generated_water_root"):
+		_water_render_root = WaterSystem.call("get_generated_water_root") as Node3D
+	if _water_render_root == null:
+		_water_render_root = Node3D.new()
+		_water_render_root.name = "GeneratedWaterBodies"
+		add_child(_water_render_root)
 	return _water_render_root
 
 
@@ -3207,7 +3364,7 @@ func _publish_river_render_payloads_for_cell(grid: Vector2i, water_provider: Ref
 			continue
 		var payload: Dictionary = payload_v as Dictionary
 		var body_id_v: Variant = payload.get("body_id", &"")
-		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		var body_id: StringName = body_id_v if body_id_v is StringName else StringName(str(body_id_v))
 		if body_id == &"":
 			continue
 		if next_ids.has(body_id):
@@ -3218,7 +3375,13 @@ func _publish_river_render_payloads_for_cell(grid: Vector2i, water_provider: Ref
 			if water_node == null:
 				continue
 			_set_generated_water_render_only(water_node)
-			_ensure_water_render_root().add_child(water_node)
+			if WaterSystem and WaterSystem.has_method("add_generated_water_node"):
+				var body_type_v: Variant = payload.get("body_type", &"river")
+				var body_type: StringName = body_type_v if body_type_v is StringName else StringName(str(body_type_v))
+				WaterSystem.call("add_generated_water_node", water_node, body_type)
+				_water_render_root = WaterSystem.call("get_generated_water_root") as Node3D
+			else:
+				_ensure_water_render_root().add_child(water_node)
 			_unregister_generated_water_from_water_registry(water_node)
 			_river_render_nodes_by_body_id[body_id] = water_node
 			_river_render_ref_counts[body_id] = 0
@@ -3249,12 +3412,12 @@ func _water_provider_cell_ready_for_publish(grid: Vector2i, water_provider: RefC
 func _apply_river_render_id_diff(grid: Vector2i, next_ids: Array) -> void:
 	var current_ids: Array = _cell_river_body_ids.get(grid, [])
 	for body_id_v: Variant in current_ids:
-		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		var body_id: StringName = body_id_v if body_id_v is StringName else StringName(str(body_id_v))
 		if next_ids.has(body_id):
 			continue
 		_decrement_river_render_ref(body_id)
 	for body_id_v: Variant in next_ids:
-		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		var body_id: StringName = body_id_v if body_id_v is StringName else StringName(str(body_id_v))
 		if current_ids.has(body_id):
 			continue
 		_river_render_ref_counts[body_id] = int(_river_render_ref_counts.get(body_id, 0)) + 1
@@ -3266,7 +3429,7 @@ func _apply_river_render_id_diff(grid: Vector2i, next_ids: Array) -> void:
 
 func _create_generated_water_node(payload: Dictionary) -> Node3D:
 	var body_type_v: Variant = payload.get("body_type", &"river")
-	var body_type := body_type_v if body_type_v is StringName else StringName(str(body_type_v))
+	var body_type: StringName = body_type_v if body_type_v is StringName else StringName(str(body_type_v))
 	if body_type == &"lake" or body_type == &"pool":
 		return _create_generated_still_water_node(payload)
 	return _create_generated_river_node(payload)
@@ -3294,7 +3457,7 @@ func _create_generated_river_node(payload: Dictionary) -> RiverWaterBody3D:
 	var width := maxf(float(payload.get("mean_width_meters", 8.0)), 1.0)
 	for _i in points.size():
 		river.point_widths.append(width)
-	river.global_position = origin
+	river.position = origin
 	river.surface_height = float(payload.get("surface_height", origin.y)) - origin.y
 	river.depth = 3.0
 	river.flow_speed = float(payload.get("flow_speed_meters_per_second", 1.4))
@@ -3330,7 +3493,7 @@ func _create_generated_still_water_node(payload: Dictionary) -> PolygonWaterVolu
 	var local_points := PackedVector2Array()
 	for point: Vector2 in points:
 		local_points.append(Vector2(point.x - origin.x, point.y - origin.z))
-	water.global_position = origin
+	water.position = origin
 	water.polygon_points = local_points
 	water.water_surface_height = 0.0
 	var depth := maxf(float(payload.get("depth", 3.0)), 0.25)
@@ -3351,7 +3514,6 @@ func _create_generated_still_water_node(payload: Dictionary) -> PolygonWaterVolu
 	water.water_color = Color(0.03, 0.16, 0.18, 1.0)
 	water.register_with_water_registry = false
 	water.enable_swimming = false
-	water.enable_buoyancy = false
 	water.detection_collision_mask = 0
 	return water
 
@@ -3367,12 +3529,12 @@ func _set_generated_water_render_only(water_node: Node3D) -> void:
 func _unregister_generated_water_from_water_registry(water_node: Node3D) -> void:
 	if water_node == null or not is_instance_valid(water_node):
 		return
-	if not OceanManager or not OceanManager.has_method("unregister_water_body"):
+	if not WaterSystem or not WaterSystem.has_method("unregister_water_body"):
 		return
 	if water_node.has_method("get_water_body_descriptor"):
 		var descriptor: RefCounted = water_node.call("get_water_body_descriptor") as RefCounted
 		if descriptor != null:
-			OceanManager.call("unregister_water_body", descriptor)
+			WaterSystem.call("unregister_water_body", descriptor)
 
 
 func _decrement_river_render_ref(body_id: StringName) -> void:
@@ -3391,7 +3553,7 @@ func _release_river_render_payloads_for_cell(grid: Vector2i) -> void:
 	var ids: Array = _cell_river_body_ids.get(grid, [])
 	_cell_river_body_ids.erase(grid)
 	for body_id_v: Variant in ids:
-		var body_id := body_id_v if body_id_v is StringName else StringName(str(body_id_v))
+		var body_id: StringName = body_id_v if body_id_v is StringName else StringName(str(body_id_v))
 		_decrement_river_render_ref(body_id)
 	_river_render_publish_queue_set.erase(grid)
 	_river_render_publish_queue.erase(grid)
@@ -3837,7 +3999,11 @@ func _process(delta: float) -> void:
 			var water_status := _ocean_controls.get_runtime_status()
 			var spray_status: Dictionary = water_status.get("sea_spray", {})
 			var optics_status: Dictionary = water_status.get("optics", {})
-			_panels.water_status_label.text = "Water: medium %s | particles %s | spray %s | vis %.0fm | turb %.2f" % [
+			_panels.water_status_label.text = "Water: all %s | ocean %s | rivers %s | lakes %s | medium %s | particles %s | spray %s | vis %.0fm | turb %.2f" % [
+				"ON" if bool(water_status.get("all_water_enabled", true)) else "OFF",
+				"ON" if bool(water_status.get("ocean_enabled", false)) else "OFF",
+				"ON" if bool(water_status.get("rivers_enabled", true)) else "OFF",
+				"ON" if bool(water_status.get("lakes_pools_enabled", true)) else "OFF",
 				"ON" if bool(water_status.get("underwater_medium_enabled", false)) else "OFF",
 				"ON" if bool(water_status.get("underwater_particles_enabled", false)) else "OFF",
 				"ON" if bool(spray_status.get("enabled", false)) else "OFF",
@@ -3904,27 +4070,38 @@ func _setup_pocket_manager() -> void:
 	# Create door prompt label
 	_create_door_prompt()
 
+	# Install the activation handler before registering or reconnecting any
+	# placed doors. Existing doors may have spawned before this setup path.
+	if cell_manager:
+		cell_manager.set_door_activated_handler(_on_door_interactable_activated)
+
 	# Register doors from already-loaded cells
 	if world_streaming_manager:
 		var loaded: Array[Vector2i] = world_streaming_manager.get_loaded_cell_coordinates()
 		for grid: Vector2i in loaded:
-			var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
-			if cell:
-				_pocket_manager.register_exterior_cell_doors(cell, grid)
+			_register_exterior_doors_for_grid(grid)
 
-	# Interaction framework: now that the pocket manager + streaming
-	# manager both exist, install the DoorInteractable.door_activated
-	# callback on the ReferenceInstantiator via CellManager, and hand
-	# the streaming manager reference to the carry controller for I.6
-	# persistent-node registration during carry.
-	if cell_manager:
-		cell_manager.set_door_activated_handler(_on_door_interactable_activated)
+	# Reconnect any DoorInteractable nodes that were published before the
+	# handler existed, then hand the streaming manager reference to carry.
+	_reconnect_existing_door_interactables()
 	if _carry_controller and world_streaming_manager:
 		_carry_controller.set_streaming_manager(world_streaming_manager)
 	if _fly_carry_controller and world_streaming_manager:
 		_fly_carry_controller.set_streaming_manager(world_streaming_manager)
 
 	Log.info("streaming", "Interior pocket manager initialized")
+
+
+func _reconnect_existing_door_interactables() -> void:
+	if not cell_manager or not cell_manager.has_method("reconnect_door_activated_handlers"):
+		return
+	var count: int = int(cell_manager.call(
+		"reconnect_door_activated_handlers",
+		self,
+		Callable(self, "_on_door_interactable_activated")
+	))
+	if count > 0:
+		Log.info("streaming", "Reconnected %d existing DoorInteractable handlers" % count)
 
 
 ## Find the first DirectionalLight3D in the scene tree (sun/moon light)
@@ -3989,26 +4166,18 @@ func _update_door_prompt() -> void:
 
 ## I.7 main-scene integration (2026-04-09) — DoorInteractable callback.
 ##
-## Fires when a ray-cast DoorInteractable's `interact()` method runs
-## (triggered by PlayerController routing `interact_tap` to the
-## raycaster's current target). We receive the authoritative record_id
-## from the adapter, look up the matching DoorInfo in the pocket
-## manager, and hand it to the same enter/exit routing the old
-## proximity path used. That keeps fade-to-black, streaming pause,
-## seamless transition, interior-to-interior all working unchanged.
-##
-## Why look up via ref_id instead of the adapter's position: the
-## DoorInfo owned by the pocket manager is the single source of truth
-## for teleport destinations (DODT data) and building metadata. The
-## adapter only carries what the interaction framework needs. Looking
-## up by ref_id keeps the adapter lean without duplicating authoritative
-## data into it.
-func _on_door_interactable_activated(record_id: String, _door_record: Variant, _player: Node3D) -> void:
+## Fires when a ray-cast DoorInteractable's `interact()` method runs.
+## The adapter emits the placed-door instance key so duplicate base DOOR
+## records route to the correct transition descriptor.
+func _on_door_interactable_activated(door_instance_key: String, _door_record: Variant, _player: Node3D) -> void:
 	if not _pocket_manager:
 		return
-	var door: Variant = _pocket_manager.get_door_info_by_ref_id(StringName(record_id))
+	if _pocket_manager.has_method("is_transitioning") and bool(_pocket_manager.call("is_transitioning")):
+		Log.debug("streaming", "[DOOR_INTERACT] ignoring '%s' while transition is active" % door_instance_key)
+		return
+	var door: Variant = _pocket_manager.get_door_info_by_instance_key(StringName(door_instance_key))
 	if door == null:
-		Log.warn("streaming", "[DOOR_INTERACT] no DoorInfo for ref_id '%s' — ignoring tap" % record_id)
+		Log.warn("streaming", "[DOOR_INTERACT] no DoorInfo for instance key '%s' - ignoring tap" % door_instance_key)
 		return
 	_activate_door(door)
 
@@ -4123,45 +4292,50 @@ func _fly_camera_interact() -> void:
 func _activate_door(door: Variant) -> void:
 	if not _pocket_manager or door == null:
 		return
+	if _pocket_manager.has_method("is_transitioning") and bool(_pocket_manager.call("is_transitioning")):
+		Log.debug("streaming", "[DOOR_ACTIVATE] ignoring '%s' while transition is active" % door.instance_key)
+		return
 
 	Log.info("streaming", "[DOOR_ACTIVATE] Door: '%s' -> '%s', inside=%s" % [
-		door.ref_id, door.target_cell_name, _pocket_manager.is_inside()])
+		door.instance_key, door.target_cell_name, _pocket_manager.is_inside()])
 
 	if _pocket_manager.is_inside():
 		var dest: CellRecord = ESMManager.get_cell(door.target_cell_name)
 		if dest and dest.is_interior():
 			await _pocket_manager.transition_interior_to_interior(door)
 		else:
-			# Exit: teleport back to surface, THEN resume streaming.
-			# Streaming was paused since enter — cells are still loaded (frozen).
+			# Exit: teleport back to surface, then unfreeze exterior tracking.
 			await _pocket_manager.exit_to_exterior(door)
-			_set_streaming_paused(false)
+			_set_world_tracking_frozen(false)
 			_log("[color=cyan]Exited to exterior[/color]")
 	else:
-		# Pause streaming BEFORE enter so cells don't unload when camera goes to Y=-500.
-		# Cells stay frozen in place. Fade-to-black covers the visual transition.
-		_set_streaming_paused(true)
+		# Freeze exterior tracking before enter so cells do not unload when
+		# the camera moves to the pocket. Async work keeps draining.
+		_set_world_tracking_frozen(true)
 		var success: bool = await _pocket_manager.enter_interior(door)
 		if success:
 			_log("[color=cyan]Entered interior: %s[/color]" % door.target_cell_name)
 		else:
-			# Failed — resume streaming
-			_set_streaming_paused(false)
+			# Failed — resume exterior tracking.
+			_set_world_tracking_frozen(false)
 			Log.error("streaming", "[DOOR_ACTIVATE] enter_interior FAILED for '%s'" % door.target_cell_name)
 
 
-## Pause/resume the streaming manager and its children (BackgroundProcessor).
-## CRITICAL: Must be called before interior transitions. Without this, the streaming
-## manager detects the camera at Y=-500 (pocket position), computes a wrong grid cell,
-## and unloads ALL exterior cells mid-transition → use-after-free → segfault.
-func _set_streaming_paused(paused: bool) -> void:
-	if world_streaming_manager:
-		world_streaming_manager.set_process(not paused)
-		# Also pause children (BackgroundProcessor) to prevent async completions
-		# from touching cell data during the transition
-		for child in world_streaming_manager.get_children():
-			child.set_process(not paused)
-	Log.info("streaming", "[STREAMING] Paused=%s" % paused)
+## Freeze/resume exterior tracking while keeping async streaming work alive.
+## CRITICAL: Must be called before classic interior transitions. Without this,
+## the streaming manager would use the pocket camera position as the outdoor
+## anchor and unload the exterior mid-transition.
+func _set_world_tracking_frozen(frozen: bool) -> void:
+	if not world_streaming_manager:
+		return
+	var anchor := camera.global_position if camera else Vector3.INF
+	if frozen and world_streaming_manager.has_method("set_world_tracking_frozen"):
+		world_streaming_manager.call("set_world_tracking_frozen", true, anchor)
+	elif not frozen and world_streaming_manager.has_method("commit_streaming_origin") and anchor != Vector3.INF:
+		world_streaming_manager.call("commit_streaming_origin", anchor)
+	elif world_streaming_manager.has_method("set_world_tracking_frozen"):
+		world_streaming_manager.call("set_world_tracking_frozen", false, anchor)
+	Log.info("streaming", "[STREAMING] world_tracking_frozen=%s" % frozen)
 
 
 ## Tracks whether we were the ones who disabled sky on interior entry, so we

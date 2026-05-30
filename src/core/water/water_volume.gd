@@ -1,5 +1,5 @@
 ## WaterVolume - Volume-based water system for inland water, lakes, rivers, pools
-## Uses Area3D for swimming/buoyancy detection
+## Uses Area3D for swimming detection
 ## Supports SSR + cubemap reflections
 ## Configurable per water type (lake, river, etc.)
 @tool
@@ -20,7 +20,7 @@ enum WaterType {
 	LAKE,      ## Still water body - no flow
 	RIVER,     ## Flowing water - has current direction
 	POOL,      ## Small contained water - no waves
-	OCEAN,     ## Large ocean (use OceanManager instead)
+	OCEAN,     ## Large ocean (use WaterSystem instead)
 }
 
 ## Water configuration
@@ -107,10 +107,9 @@ enum WaterType {
 		flow_speed = value
 		_update_material()
 
-@export_group("Swimming & Buoyancy")
+@export_group("Swimming & Detection")
 @export var register_with_water_registry: bool = true
 @export var enable_swimming: bool = true
-@export var enable_buoyancy: bool = true
 @export_flags_3d_physics var detection_collision_mask: int = DEFAULT_DETECTION_COLLISION_MASK:
 	set(value):
 		detection_collision_mask = value
@@ -294,20 +293,20 @@ func _update_material() -> void:
 func _sync_water_interaction_material() -> void:
 	if _material == null:
 		return
-	if not is_instance_valid(OceanManager):
+	if not is_instance_valid(WaterSystem):
 		sync_water_interaction_texture(null, Vector4.ZERO, false, false)
 		return
-	var texture := OceanManager.get_water_interaction_texture()
-	var stats: Dictionary = OceanManager.get_water_interaction_stats()
+	var texture := WaterSystem.get_water_interaction_texture()
+	var stats: Dictionary = WaterSystem.get_water_interaction_stats()
 	var active := bool(stats.get("enabled", false)) and texture != null
 	sync_water_interaction_texture(
 		texture,
-		OceanManager.get_water_interaction_bounds(),
+		WaterSystem.get_water_interaction_bounds(),
 		active,
-		OceanManager.is_water_interaction_debug_enabled(),
-		OceanManager.get_water_body_atlas_texture(),
-		OceanManager.get_water_body_atlas_bounds(),
-		OceanManager.has_water_body_atlas()
+		WaterSystem.is_water_interaction_debug_enabled(),
+		WaterSystem.get_water_body_atlas_texture(),
+		WaterSystem.get_water_body_atlas_bounds(),
+		WaterSystem.has_water_body_atlas()
 	)
 
 
@@ -405,30 +404,30 @@ func _register_with_water_registry() -> void:
 		return
 	if not register_with_water_registry:
 		return
-	if not is_instance_valid(OceanManager):
+	if not is_instance_valid(WaterSystem):
 		return
-	if OceanManager.has_method("register_water_body"):
-		OceanManager.call("register_water_body", get_water_body_descriptor())
+	if WaterSystem.has_method("register_water_body"):
+		WaterSystem.call("register_water_body", get_water_body_descriptor())
 		_registered_with_water_registry = true
 
 
 func _register_water_interaction_renderer() -> void:
-	if is_instance_valid(OceanManager) and OceanManager.has_method("register_water_interaction_renderer"):
-		OceanManager.call("register_water_interaction_renderer", self)
+	if is_instance_valid(WaterSystem) and WaterSystem.has_method("register_water_interaction_renderer"):
+		WaterSystem.call("register_water_interaction_renderer", self)
 
 
 func _unregister_water_interaction_renderer() -> void:
-	if is_instance_valid(OceanManager) and OceanManager.has_method("unregister_water_interaction_renderer"):
-		OceanManager.call("unregister_water_interaction_renderer", self)
+	if is_instance_valid(WaterSystem) and WaterSystem.has_method("unregister_water_interaction_renderer"):
+		WaterSystem.call("unregister_water_interaction_renderer", self)
 
 
 func _unregister_from_water_registry() -> void:
 	if not _registered_with_water_registry:
 		return
-	if _body_descriptor == null or not is_instance_valid(OceanManager):
+	if _body_descriptor == null or not is_instance_valid(WaterSystem):
 		return
-	if OceanManager.has_method("unregister_water_body"):
-		OceanManager.call("unregister_water_body", _body_descriptor)
+	if WaterSystem.has_method("unregister_water_body"):
+		WaterSystem.call("unregister_water_body", _body_descriptor)
 	_registered_with_water_registry = false
 
 
@@ -494,7 +493,7 @@ func _on_body_exited(body: Node3D) -> void:
 		Log.debug("water", "WaterVolume: Body exited water: %s" % body.name)
 
 
-func _process_body_in_water(body: Node3D, delta: float) -> void:
+func _process_body_in_water(body: Node3D, _delta: float) -> void:
 	if sample_water_coverage(body.global_position) <= 0.0:
 		return
 
@@ -505,40 +504,6 @@ func _process_body_in_water(body: Node3D, delta: float) -> void:
 
 	if is_swimming and enable_swimming:
 		body_swimming.emit(body)
-
-		# Apply river current if this is a river
-		if water_type == WaterType.RIVER and body is CharacterBody3D:
-			var current := Vector3(flow_direction.x, 0.0, flow_direction.y) * flow_speed * current_strength
-			# You can apply current force here if you have access to the body's movement system
-
-	# Apply buoyancy if enabled
-	if enable_buoyancy and body is RigidBody3D and not body is BuoyancyBody3D:
-		var submersion := _calculate_submersion(body, water_level)
-		if submersion > 0.0:
-			_apply_buoyancy_force(body, submersion)
-
-
-func _calculate_submersion(body: RigidBody3D, water_level: float) -> float:
-	# Simple submersion calculation - can be improved with actual collision shapes
-	var body_bottom := body.global_position.y - 1.0  # Approximate
-	var body_top := body.global_position.y + 1.0
-
-	if body_top < water_level:
-		return 1.0  # Fully submerged
-	elif body_bottom < water_level:
-		return (water_level - body_bottom) / (body_top - body_bottom)
-	else:
-		return 0.0
-
-
-func _apply_buoyancy_force(body: RigidBody3D, submersion: float) -> void:
-	# Simple buoyancy force - upward force proportional to submersion
-	var buoyancy_force := Vector3.UP * submersion * 9.81 * 10.0  # 10 kg approximate
-	body.apply_central_force(buoyancy_force)
-
-	# Apply drag
-	var drag := -body.linear_velocity * 0.5 * submersion
-	body.apply_central_force(drag)
 
 
 ## Check if a global position is in this water volume
@@ -553,7 +518,7 @@ func is_position_in_water(pos: Vector3) -> bool:
 	)
 
 
-## Get water height at a horizontal position (for swimming/buoyancy)
+## Get water height at a horizontal position.
 func get_water_height(world_pos: Vector3) -> float:
 	if sample_water_coverage(world_pos) > 0.0:
 		return global_position.y + water_surface_height

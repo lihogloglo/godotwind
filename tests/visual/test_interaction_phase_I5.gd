@@ -5,7 +5,7 @@
 ## guard).
 ##
 ## Self-tests on startup (headless-friendly):
-##   1. Factory substitution — when OceanManager.is_initialized() is
+##   1. Factory substitution — when WaterSystem.is_initialized() is
 ##      true, CarryableBodyFactory.convert_static_to_rigid produces a
 ##      BuoyancyBody3D, NOT a plain RigidBody3D.
 ##   2. AABB probe count — assert exactly 5 BuoyancyProbe3D children
@@ -70,16 +70,16 @@ func _ready() -> void:
 	InventoryServiceScript.set_current(MWInventoryServiceScript.new())
 
 	# Bring the ocean online before spawning carryables — the factory
-	# checks `OceanManager.is_initialized()` at convert time.
+	# checks `WaterSystem.is_initialized()` at convert time.
 	# Disable the prebaked shore mask first — it's baked against the
 	# Morrowind world bounds and says "land" at (0,0,0), which would
 	# make the FFT shader `discard` every fragment and hide the ocean
 	# mesh. Falling back to the shader's `hint_default_white` sampler
 	# makes `sample_shore` return 1.0 everywhere so the ocean renders.
-	if OceanManager and not OceanManager.is_initialized():
-		OceanManager.use_prebaked_shore_mask = false
-		OceanManager.force_initialize()
-		OceanManager.set_enabled(true)
+	if WaterSystem and not WaterSystem.is_initialized():
+		WaterSystem.use_prebaked_shore_mask = false
+		WaterSystem.force_initialize()
+		WaterSystem.set_enabled(true)
 
 	_run_self_tests()
 
@@ -96,8 +96,8 @@ func _ready() -> void:
 # ----------------------------------------------------------------------------
 
 func _run_self_tests() -> void:
-	if OceanManager == null or not OceanManager.is_initialized():
-		Log.warn("interaction", "[self-test] I.5 skipped — OceanManager not initialized")
+	if WaterSystem == null or not WaterSystem.is_initialized():
+		Log.warn("interaction", "[self-test] I.5 skipped — WaterSystem not initialized")
 		return
 	_test_factory_substitution()
 	_test_probe_count_and_positions()
@@ -157,7 +157,7 @@ func _test_frozen_early_out() -> void:
 	# in `_find_probes`).
 	body._physics_process(0.016)
 	# If we got here without crashing, the guard works. Stronger
-	# assertion would require mocking OceanManager — out of scope.
+	# assertion would require mocking WaterSystem — out of scope.
 	body.queue_free()
 
 

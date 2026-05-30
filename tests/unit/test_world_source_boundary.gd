@@ -187,7 +187,7 @@ class FakeSpawnAdapter:
 		spawned_count += 1
 		var route_name := _route_name(int(record.get("spawn_route")))
 		route_counts[route_name] = int(route_counts.get(route_name, 0)) + 1
-		var payload := object_source.call("get_spawn_adapter_payload", record.get("adapter_payload_id")) if object_source != null else {}
+		var payload: Dictionary = object_source.call("get_spawn_adapter_payload", record.get("adapter_payload_id")) if object_source != null else {}
 		var node := Node3D.new()
 		node.name = str(record.get("object_id"))
 		node.transform = record.get("transform") as Transform3D

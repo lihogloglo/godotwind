@@ -1,0 +1,6 @@
+[gd_scene load_steps=2 format=3 uid="uid://morrowind_water_classification"]
+
+[ext_resource type="Script" path="res://tests/visual/test_morrowind_water_classification.gd" id="1"]
+
+[node name="TestMorrowindWaterClassification" type="Node3D"]
+script = ExtResource("1")

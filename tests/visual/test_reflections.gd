@@ -137,15 +137,15 @@ func _setup_reflection_probe() -> void:
 
 
 func _setup_ocean() -> void:
-	# Use OceanManager (the autoload) to get the full FFT pipeline
+	# Use WaterSystem (the autoload) to get the full FFT pipeline
 	# Force-initialize auto-detects HIGH on capable GPUs and starts FFT.
 	# Do NOT call set_water_quality() after — it would shut down the pipeline
 	# (set_quality returns false when already at target, triggering shutdown logic).
-	if not OceanManager.is_initialized():
-		OceanManager.force_initialize()
-	OceanManager.set_enabled(true)
-	OceanManager.set_camera(_camera)
-	_ocean = OceanManager.get_ocean_mesh()
+	if not WaterSystem.is_initialized():
+		WaterSystem.force_initialize()
+	WaterSystem.set_enabled(true)
+	WaterSystem.set_camera(_camera)
+	_ocean = WaterSystem.get_ocean_mesh()
 
 	# Override shore mask with a plain white texture so ocean renders everywhere
 	# in the test scene (the prebaked shore mask is for the real Morrowind map)

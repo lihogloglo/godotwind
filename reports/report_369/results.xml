@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-29" name="report_369" tests="35" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_morrowind_gpu_hydrology_baker" package="tests/unit" timestamp="2026-05-29T16:25:19" hostname="localhost" tests="13" failures="0" errors="0" skipped="0" flaky="0" time="2.364">
+		<testcase name="test_offline_global_hydrology_artifact_contract_is_runtime_readable" classname="test_morrowind_gpu_hydrology_baker" time="0.002">
+		</testcase>
+		<testcase name="test_global_atlas_builder_keeps_river_across_region_border" classname="test_morrowind_gpu_hydrology_baker" time="0.095">
+		</testcase>
+		<testcase name="test_global_atlas_builder_keeps_cross_region_lake_still" classname="test_morrowind_gpu_hydrology_baker" time="0.003">
+		</testcase>
+		<testcase name="test_global_atlas_builder_rejects_short_ocean_inlet_at_region_edge" classname="test_morrowind_gpu_hydrology_baker" time="0.004">
+		</testcase>
+		<testcase name="test_global_atlas_builder_rejects_candidate_without_open_sea" classname="test_morrowind_gpu_hydrology_baker" time="0.007">
+		</testcase>
+		<testcase name="test_offline_global_hydrology_artifact_rejects_region_scoped_cache_shape" classname="test_morrowind_gpu_hydrology_baker" time="0.006">
+		</testcase>
+		<testcase name="test_gpu_baker_rejects_enclosed_narrow_channel_as_still" classname="test_morrowind_gpu_hydrology_baker" time="0.290">
+		</testcase>
+		<testcase name="test_gpu_baker_keeps_broad_basin_still" classname="test_morrowind_gpu_hydrology_baker" time="0.266">
+		</testcase>
+		<testcase name="test_gpu_baker_rejects_broad_lake_as_river" classname="test_morrowind_gpu_hydrology_baker" time="0.282">
+		</testcase>
+		<testcase name="test_gpu_baker_rejects_one_sided_coastal_inlet_fringe" classname="test_morrowind_gpu_hydrology_baker" time="0.304">
+		</testcase>
+		<testcase name="test_gpu_baker_rejects_archipelago_ocean_channels" classname="test_morrowind_gpu_hydrology_baker" time="0.434">
+		</testcase>
+		<testcase name="test_gpu_baker_preserves_true_river_mouth_with_inland_run" classname="test_morrowind_gpu_hydrology_baker" time="0.325">
+		</testcase>
+		<testcase name="test_gpu_baker_crop_preserves_river_mouth_inland_run" classname="test_morrowind_gpu_hydrology_baker" time="0.316">
+		</testcase>
+	</testsuite>
+	<testsuite id="1" name="test_morrowind_hydrology_provider" package="tests/unit" timestamp="2026-05-29T16:25:21" hostname="localhost" tests="22" failures="0" errors="0" skipped="0" flaky="0" time="5.380">
+		<testcase name="test_generated_flowmap_marks_long_narrow_sea_level_channel_as_river" classname="test_morrowind_hydrology_provider" time="0.182">
+		</testcase>
+		<testcase name="test_hydrology_atlas_prebaker_script_loads" classname="test_morrowind_hydrology_provider" time="0.002">
+		</testcase>
+		<testcase name="test_full_resolution_region_uses_gpu_cache_version" classname="test_morrowind_hydrology_provider" time="1.038">
+		</testcase>
+		<testcase name="test_prepare_region_loads_prebaked_hydrology_without_heightmap_request" classname="test_morrowind_hydrology_provider" time="0.188">
+		</testcase>
+		<testcase name="test_generated_flowmap_leaves_wide_water_component_still" classname="test_morrowind_hydrology_provider" time="0.199">
+		</testcase>
+		<testcase name="test_generated_flowmap_keeps_narrow_river_when_connected_to_broad_basin" classname="test_morrowind_hydrology_provider" time="0.187">
+		</testcase>
+		<testcase name="test_generated_flowmap_orients_sloped_valley_channel_toward_broad_basin" classname="test_morrowind_hydrology_provider" time="0.223">
+		</testcase>
+		<testcase name="test_generated_flowmap_ignores_land" classname="test_morrowind_hydrology_provider" time="0.189">
+		</testcase>
+		<testcase name="test_sampling_does_not_bake_unprepared_regions_from_gameplay_query" classname="test_morrowind_hydrology_provider" time="0.194">
+		</testcase>
+		<testcase name="test_descriptor_lookup_does_not_bake_unprepared_region" classname="test_morrowind_hydrology_provider" time="0.186">
+		</testcase>
+		<testcase name="test_renderable_river_payloads_are_read_only_for_unprepared_region" classname="test_morrowind_hydrology_provider" time="0.202">
+		</testcase>
+		<testcase name="test_renderable_river_payload_uses_generic_godot_space_schema" classname="test_morrowind_hydrology_provider" time="0.227">
+		</testcase>
+		<testcase name="test_renderable_river_centerline_is_ordered_for_straight_channel" classname="test_morrowind_hydrology_provider" time="0.246">
+		</testcase>
+		<testcase name="test_renderable_river_centerline_is_ordered_for_branch_like_channel" classname="test_morrowind_hydrology_provider" time="0.196">
+		</testcase>
+		<testcase name="test_cache_metadata_preserves_renderable_river_components" classname="test_morrowind_hydrology_provider" time="0.232">
+		</testcase>
+		<testcase name="test_region_descriptors_do_not_report_other_regions" classname="test_morrowind_hydrology_provider" time="0.212">
+		</testcase>
+		<testcase name="test_release_region_removes_cached_sampling_data" classname="test_morrowind_hydrology_provider" time="0.231">
+		</testcase>
+		<testcase name="test_prepare_region_retries_after_missing_heightmap_instead_of_poisoning_cache" classname="test_morrowind_hydrology_provider" time="0.233">
+		</testcase>
+		<testcase name="test_region_descriptor_samples_only_its_region" classname="test_morrowind_hydrology_provider" time="0.213">
+		</testcase>
+		<testcase name="test_request_prepare_region_publishes_after_worker_poll" classname="test_morrowind_hydrology_provider" time="0.267">
+		</testcase>
+		<testcase name="test_request_prepare_region_bakes_copied_height_samples" classname="test_morrowind_hydrology_provider" time="0.246">
+		</testcase>
+		<testcase name="test_region_cache_trims_unreferenced_regions" classname="test_morrowind_hydrology_provider" time="0.238">
+		</testcase>
+	</testsuite>
+</testsuites>

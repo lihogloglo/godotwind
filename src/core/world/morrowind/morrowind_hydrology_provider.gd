@@ -1,11 +1,13 @@
 class_name MorrowindHydrologyProvider
 extends "res://src/core/water/water_body_provider.gd"
 
-const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
 const WaterBodyDescriptorScript := preload("res://src/core/water/water_body_descriptor.gd")
+const GpuHydrologyBakerScript := preload("res://src/core/world/morrowind/morrowind_gpu_hydrology_baker.gd")
 
 const REGION_PRIORITY := 160
-const CACHE_VERSION := "river_flow_v3"
+const CACHE_VERSION := "river_flow_gpu_v4"
+const GPU_CACHE_VERSION := "river_flow_gpu_v4"
+const PREBAKED_CACHE_VERSION := "morrowind_gpu_hydrology_region_v1"
 const DEFAULT_FLOW_SPEED_MPS := 1.4
 const MAX_ENCODED_SPEED_MPS := 6.0
 const DEFAULT_MAX_CACHED_REGIONS := 96
@@ -21,13 +23,19 @@ class RegionBakeRequest:
 	var error: int = OK
 	var data: Dictionary = {}
 
+
 var terrain_provider: RefCounted = null
 var coordinate_mapper: RefCounted = null
 var cache_enabled: bool = true
+var use_gpu_hydrology: bool = true
+var min_gpu_region_size: int = 1
+var use_prebaked_hydrology: bool = true
+var allow_runtime_hydrology_bake: bool = true
+var debug_hydrology_outputs: bool = false
 var cache_directory: String = ""
+var hydrology_atlas_directory: String = ""
 var max_cached_regions: int = DEFAULT_MAX_CACHED_REGIONS
-var _native_bridge: NativeBridge = null
-var _native_baker: RefCounted = null
+var _gpu_baker: MorrowindGpuHydrologyBaker = null
 var _terrain_provider_ready: bool = false
 var _region_cache: Dictionary[Vector2i, Dictionary] = {}
 var _region_cache_last_used: Dictionary[Vector2i, int] = {}
@@ -49,10 +57,13 @@ func configure(p_terrain_provider: RefCounted, p_coordinate_mapper: RefCounted) 
 func initialize() -> Error:
 	if terrain_provider == null:
 		return ERR_UNCONFIGURED
-	_native_bridge = NativeBridgeScript.new()
-	_native_baker = _native_bridge.create_river_flow_baker()
-	if _native_baker == null:
-		Log.warn("water", "MorrowindHydrologyProvider: NativeRiverFlowBaker unavailable; generated river flow is disabled until C# is built")
+	if use_gpu_hydrology:
+		_gpu_baker = GpuHydrologyBakerScript.new()
+		_configure_gpu_baker(_gpu_baker)
+		var gpu_err := _gpu_baker.initialize()
+		if gpu_err != OK:
+			Log.warn("water", "MorrowindHydrologyProvider: GPU hydrology unavailable (%d)" % gpu_err)
+	if _gpu_baker == null or not _gpu_baker.is_available():
 		return ERR_UNAVAILABLE
 	return OK
 
@@ -64,7 +75,7 @@ func prepare_region(region_coord: Vector2i) -> Error:
 		return OK
 	if terrain_provider == null:
 		return ERR_UNCONFIGURED
-	if _native_baker == null:
+	if not _can_use_gpu_baker():
 		var init_err := initialize()
 		if init_err != OK:
 			return init_err
@@ -72,13 +83,25 @@ func prepare_region(region_coord: Vector2i) -> Error:
 	if terrain_err != OK:
 		return terrain_err
 
+	var prebaked_result := _load_prebaked_hydrology_region(region_coord)
+	if not prebaked_result.is_empty():
+		_region_cache[region_coord] = prebaked_result
+		_touch_region(region_coord)
+		_trim_region_cache()
+		return OK
+
+	if not allow_runtime_hydrology_bake:
+		return ERR_DOES_NOT_EXIST
+
 	var heightmap: Image = terrain_provider.call("get_heightmap_for_region", region_coord) as Image
 	if heightmap == null:
 		return ERR_DOES_NOT_EXIST
 
 	var width := heightmap.get_width()
 	var height := heightmap.get_height()
-	var cache_key := _cache_key_for_region(region_coord, heightmap)
+	var gpu_available := _can_use_gpu_baker(width, height)
+	var cache_version := GPU_CACHE_VERSION if gpu_available else CACHE_VERSION
+	var cache_key := _cache_key_for_region(region_coord, heightmap, cache_version)
 	var cached_result := _load_cached_region(cache_key, region_coord)
 	if not cached_result.is_empty():
 		_region_cache[region_coord] = cached_result
@@ -86,16 +109,11 @@ func prepare_region(region_coord: Vector2i) -> Error:
 		_trim_region_cache()
 		return OK
 
-	var heights := _height_samples_from_heightmap(heightmap)
-
-	_native_baker.Width = width
-	_native_baker.Height = height
-	_native_baker.SeaLevel = float(terrain_provider.get("sea_level"))
-	_native_baker.TexelSizeMeters = _get_vertex_spacing()
-	_native_baker.FlowSpeedMetersPerSecond = DEFAULT_FLOW_SPEED_MPS
-	_native_baker.MaxEncodedSpeedMetersPerSecond = MAX_ENCODED_SPEED_MPS
-
-	var result: Dictionary = _native_baker.BakeFromHeights(heights)
+	var result: Dictionary = {}
+	if gpu_available:
+		result = _bake_region_gpu(region_coord, heightmap)
+	if result.is_empty():
+		return ERR_UNAVAILABLE
 	var flow_image: Image = result.get("image") as Image
 	if flow_image == null:
 		return FAILED
@@ -106,6 +124,8 @@ func prepare_region(region_coord: Vector2i) -> Error:
 		"river_count": int(result.get("river_count", 0)),
 		"bounds": _region_bounds(region_coord),
 		"cache_key": cache_key,
+		"algorithm": cache_version,
+		"debug_images": result.get("debug_images", {}),
 	}
 	_touch_region(region_coord)
 	_save_cached_region(cache_key, _region_cache[region_coord])
@@ -118,56 +138,16 @@ func request_prepare_region(region_coord: Vector2i) -> Error:
 	if _region_cache.has(region_coord):
 		_touch_region(region_coord)
 		return OK
-	if _pending_region_tasks.has(region_coord):
-		return OK
-	if terrain_provider == null:
-		return ERR_UNCONFIGURED
-	if _native_baker == null:
-		var init_err := initialize()
-		if init_err != OK:
-			return init_err
-	var terrain_err := _ensure_terrain_provider_ready()
-	if terrain_err != OK:
-		return terrain_err
-	var baker := _native_bridge.create_river_flow_baker() if _native_bridge != null else null
-	if baker == null:
-		return ERR_UNAVAILABLE
-	var heightmap: Image = terrain_provider.call("get_heightmap_for_region", region_coord) as Image
-	if heightmap == null:
-		return ERR_DOES_NOT_EXIST
-	var width := heightmap.get_width()
-	var height := heightmap.get_height()
-	var image_hash := hash(heightmap.get_data())
-	var heights := _height_samples_from_heightmap(heightmap)
-	var sea_level := float(terrain_provider.get("sea_level"))
-	var vertex_spacing := _get_vertex_spacing()
-	var region_world_size := _get_region_world_size()
-	var cache_key := _cache_key_for_values(region_coord, width, height, sea_level, vertex_spacing, image_hash)
+	return prepare_region(region_coord)
 
-	var request := RegionBakeRequest.new()
-	request.region_coord = region_coord
-	var task_id := WorkerThreadPool.add_task(
-		_execute_prepare_region_task.bind(
-			request,
-			baker,
-			heights,
-			width,
-			height,
-			sea_level,
-			vertex_spacing,
-			region_world_size,
-			cache_key,
-			cache_enabled,
-			_get_cache_directory()
-		),
-		false,
-		"Morrowind hydrology bake %s" % region_coord
-	)
-	if task_id < 0:
-		return FAILED
-	request.task_id = task_id
-	_pending_region_tasks[region_coord] = request
-	return OK
+
+func get_global_hydrology_debug_snapshot() -> Dictionary:
+	return {
+		"ready": false,
+		"cache_prefix": "",
+		"regions": {},
+		"algorithm": GPU_CACHE_VERSION,
+	}
 
 
 func process_async_requests(max_completions: int = DEFAULT_ASYNC_COMPLETIONS_PER_POLL) -> int:
@@ -466,6 +446,90 @@ func _get_vertex_spacing() -> float:
 	return maxf(float(terrain_provider.get("vertex_spacing")), 0.001)
 
 
+func _configure_gpu_baker(baker: MorrowindGpuHydrologyBaker) -> void:
+	if baker == null:
+		return
+	baker.sea_level = float(terrain_provider.get("sea_level")) if terrain_provider != null else 0.0
+	baker.wet_tolerance_m = 0.0
+	baker.max_river_width_m = 125.0
+	baker.min_river_width_m = 7.0
+	baker.halo_pixels = 64
+	baker.require_open_water_connection = true
+	baker.topology_fallback_multiplier = 2
+	baker.min_terrain_drop_m = 0.25
+	baker.debug_enabled = debug_hydrology_outputs
+	baker.flow_speed_mps = DEFAULT_FLOW_SPEED_MPS
+	baker.max_encoded_speed_mps = MAX_ENCODED_SPEED_MPS
+
+
+func _can_use_gpu_baker(width: int = 0, height: int = 0) -> bool:
+	if not use_gpu_hydrology:
+		return false
+	if (width > 0 and width < min_gpu_region_size) or (height > 0 and height < min_gpu_region_size):
+		return false
+	if _gpu_baker == null:
+		_gpu_baker = GpuHydrologyBakerScript.new()
+		_configure_gpu_baker(_gpu_baker)
+	return _gpu_baker.is_available()
+
+
+func _bake_region_gpu(region_coord: Vector2i, heightmap: Image) -> Dictionary:
+	if _gpu_baker == null:
+		return {}
+	_configure_gpu_baker(_gpu_baker)
+	var halo := _gpu_baker.halo_pixels
+	var padded_heightmap := _build_padded_gpu_heightmap(region_coord, heightmap, halo)
+	var crop_rect := Rect2i(halo, halo, heightmap.get_width(), heightmap.get_height())
+	var result := _gpu_baker.bake_from_heightmap(padded_heightmap, _get_vertex_spacing(), crop_rect)
+	if result.is_empty():
+		Log.warn("water", "MorrowindHydrologyProvider: GPU hydrology bake failed (%d)" % _gpu_baker.get_last_error())
+		return {}
+	Log.debug("water", "MorrowindHydrologyProvider: GPU hydrology baked %dx%d region in %.2f ms" % [
+		heightmap.get_width(),
+		heightmap.get_height(),
+		float(_gpu_baker.get_last_bake_usec()) / 1000.0,
+	])
+	return result
+
+
+func _build_padded_gpu_heightmap(region_coord: Vector2i, center_heightmap: Image, halo: int) -> Image:
+	if center_heightmap == null or halo <= 0:
+		return center_heightmap
+	var width := center_heightmap.get_width()
+	var height := center_heightmap.get_height()
+	if width <= 0 or height <= 0:
+		return center_heightmap
+	var padded_width := width + halo * 2
+	var padded_height := height + halo * 2
+	var ocean_fill := float(terrain_provider.get("sea_level")) - 16.0 if terrain_provider != null else -16.0
+	var padded := Image.create(padded_width, padded_height, false, Image.FORMAT_RF)
+	padded.fill(Color(ocean_fill, 0.0, 0.0, 1.0))
+	for region_y_offset in range(-1, 2):
+		for region_x_offset in range(-1, 2):
+			var source_region := region_coord + Vector2i(region_x_offset, region_y_offset)
+			var source: Image = center_heightmap if source_region == region_coord else terrain_provider.call("get_heightmap_for_region", source_region) as Image
+			if source == null:
+				continue
+			var dest := Vector2i(halo + region_x_offset * width, halo - region_y_offset * height)
+			_blit_clipped_heightmap(source, padded, dest)
+	return padded
+
+
+func _blit_clipped_heightmap(source: Image, target: Image, dest: Vector2i) -> void:
+	var target_width := target.get_width()
+	var target_height := target.get_height()
+	var source_width := source.get_width()
+	var source_height := source.get_height()
+	var x0 := maxi(dest.x, 0)
+	var y0 := maxi(dest.y, 0)
+	var x1 := mini(dest.x + source_width, target_width)
+	var y1 := mini(dest.y + source_height, target_height)
+	if x1 <= x0 or y1 <= y0:
+		return
+	var source_rect := Rect2i(x0 - dest.x, y0 - dest.y, x1 - x0, y1 - y0)
+	target.blit_rect(source, source_rect, Vector2i(x0, y0))
+
+
 func _region_bounds(region_coord: Vector2i) -> AABB:
 	var size_m := _get_region_world_size()
 	var origin := Vector3(float(region_coord.x) * size_m, -1000.0, -float(region_coord.y + 1) * size_m)
@@ -623,11 +687,14 @@ func _components_from_bake_result(result: Dictionary) -> Array[Dictionary]:
 		var component: Dictionary = component_v as Dictionary
 		normalized.append({
 			"component_id": int(component.get("component_id", normalized.size())),
+			"source_label": int(component.get("source_label", 0)),
 			"area_pixels": int(component.get("area_pixels", 0)),
 			"bounds": _variant_to_rect2i(component.get("bounds", Rect2i())),
 			"aspect": float(component.get("aspect", 0.0)),
 			"mean_width_meters": float(component.get("mean_width_meters", 0.0)),
 			"is_river": bool(component.get("is_river", false)),
+			"body_type": component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"),
+			"ocean_contact": bool(component.get("ocean_contact", false)),
 			"flow_direction": _variant_to_vector2(component.get("flow_direction", Vector2.ZERO)),
 			"flow_speed_meters_per_second": float(component.get("flow_speed_meters_per_second", 0.0)),
 			"centerline_pixels": _normalize_centerline_pixels(component.get("centerline_pixels", [])),
@@ -653,11 +720,14 @@ func _serialize_components(components_v: Variant) -> Array[Dictionary]:
 			serialized_centerline.append([pixel.x, pixel.y])
 		serialized.append({
 			"component_id": int(component.get("component_id", serialized.size())),
+			"source_label": int(component.get("source_label", 0)),
 			"area_pixels": int(component.get("area_pixels", 0)),
 			"bounds": [bounds.position.x, bounds.position.y, bounds.size.x, bounds.size.y],
 			"aspect": float(component.get("aspect", 0.0)),
 			"mean_width_meters": float(component.get("mean_width_meters", 0.0)),
 			"is_river": bool(component.get("is_river", false)),
+			"body_type": StringName(component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake")),
+			"ocean_contact": bool(component.get("ocean_contact", false)),
 			"flow_direction": [flow_direction.x, flow_direction.y],
 			"flow_speed_meters_per_second": float(component.get("flow_speed_meters_per_second", 0.0)),
 			"centerline_pixels": serialized_centerline,
@@ -675,11 +745,14 @@ func _deserialize_components(components_v: Variant) -> Array[Dictionary]:
 		var component: Dictionary = component_v as Dictionary
 		components.append({
 			"component_id": int(component.get("component_id", components.size())),
+			"source_label": int(component.get("source_label", 0)),
 			"area_pixels": int(component.get("area_pixels", 0)),
 			"bounds": _variant_to_rect2i(component.get("bounds", Rect2i())),
 			"aspect": float(component.get("aspect", 0.0)),
 			"mean_width_meters": float(component.get("mean_width_meters", 0.0)),
 			"is_river": bool(component.get("is_river", false)),
+			"body_type": component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"),
+			"ocean_contact": bool(component.get("ocean_contact", false)),
 			"flow_direction": _variant_to_vector2(component.get("flow_direction", Vector2.ZERO)),
 			"flow_speed_meters_per_second": float(component.get("flow_speed_meters_per_second", 0.0)),
 			"centerline_pixels": _normalize_centerline_pixels(component.get("centerline_pixels", [])),
@@ -740,32 +813,34 @@ func _variant_to_rect2i(value: Variant) -> Rect2i:
 	return Rect2i()
 
 
-func _height_samples_from_heightmap(heightmap: Image) -> Array[float]:
-	var width := heightmap.get_width()
-	var height := heightmap.get_height()
-	var heights: Array[float] = []
-	heights.resize(width * height)
-	for y in range(height):
-		for x in range(width):
-			heights[y * width + x] = heightmap.get_pixel(x, y).r
-	return heights
-
-
-func _cache_key_for_region(region_coord: Vector2i, heightmap: Image) -> String:
+func _cache_key_for_region(region_coord: Vector2i, heightmap: Image, algorithm: String = CACHE_VERSION) -> String:
 	var image_hash := hash(heightmap.get_data())
+	if algorithm == GPU_CACHE_VERSION:
+		image_hash = _gpu_region_height_hash(region_coord, heightmap)
 	return _cache_key_for_values(
 		region_coord,
 		heightmap.get_width(),
 		heightmap.get_height(),
 		float(terrain_provider.get("sea_level")),
 		_get_vertex_spacing(),
-		image_hash
+		image_hash,
+		algorithm
 	)
 
 
-func _cache_key_for_values(region_coord: Vector2i, width: int, height: int, sea_level: float, vertex_spacing: float, image_hash: int) -> String:
+func _gpu_region_height_hash(region_coord: Vector2i, center_heightmap: Image) -> int:
+	var hashes: Array[int] = []
+	for region_y_offset in range(-1, 2):
+		for region_x_offset in range(-1, 2):
+			var source_region := region_coord + Vector2i(region_x_offset, region_y_offset)
+			var source: Image = center_heightmap if source_region == region_coord else terrain_provider.call("get_heightmap_for_region", source_region) as Image
+			hashes.append(hash(source.get_data()) if source != null else 0)
+	return hash(hashes)
+
+
+func _cache_key_for_values(region_coord: Vector2i, width: int, height: int, sea_level: float, vertex_spacing: float, image_hash: int, algorithm: String = CACHE_VERSION) -> String:
 	return "%s_region_%d_%d_%dx%d_sl%.3f_vs%.3f_%d" % [
-		CACHE_VERSION,
+		algorithm,
 		region_coord.x,
 		region_coord.y,
 		width,
@@ -803,6 +878,7 @@ func _load_cached_region(cache_key: String, region_coord: Vector2i) -> Dictionar
 		"river_count": int(metadata.get("river_count", 0)),
 		"bounds": _region_bounds(region_coord),
 		"cache_key": cache_key,
+		"algorithm": String(metadata.get("algorithm", CACHE_VERSION)),
 	}
 
 
@@ -827,7 +903,7 @@ func _save_cached_region(cache_key: String, data: Dictionary) -> void:
 	var metadata := {
 		"river_count": int(data.get("river_count", 0)),
 		"components": _serialize_components(data.get("components", [])),
-		"algorithm": CACHE_VERSION,
+		"algorithm": String(data.get("algorithm", CACHE_VERSION)),
 		"format": "RGBA8 flowmap: RG=direction, B=speed, A=coverage",
 	}
 	var metadata_file := FileAccess.open(metadata_path, FileAccess.WRITE)
@@ -842,6 +918,72 @@ func _get_cache_directory() -> String:
 	return SettingsManager.get_cache_base_path().path_join("water").path_join("morrowind_flowmaps")
 
 
+func _get_hydrology_atlas_directory() -> String:
+	if not hydrology_atlas_directory.is_empty():
+		return ProjectSettings.globalize_path(hydrology_atlas_directory) if hydrology_atlas_directory.begins_with("user://") or hydrology_atlas_directory.begins_with("res://") else hydrology_atlas_directory
+	return SettingsManager.get_cache_base_path().path_join("water").path_join("morrowind_hydrology_atlas")
+
+
+func _load_prebaked_hydrology_region(region_coord: Vector2i) -> Dictionary:
+	if not use_prebaked_hydrology:
+		return {}
+	var dir := _get_hydrology_atlas_directory()
+	if dir.is_empty() or not DirAccess.dir_exists_absolute(dir):
+		return {}
+	var key := _prebaked_region_key(region_coord)
+	var image_path := dir.path_join(key + ".png")
+	var metadata_path := dir.path_join(key + ".json")
+	if not FileAccess.file_exists(image_path) or not FileAccess.file_exists(metadata_path):
+		return {}
+	if not _prebaked_manifest_is_compatible(dir):
+		return {}
+	var image := Image.load_from_file(image_path)
+	if image == null:
+		return {}
+	var metadata_file := FileAccess.open(metadata_path, FileAccess.READ)
+	if metadata_file == null:
+		return {}
+	var parsed: Variant = JSON.parse_string(metadata_file.get_as_text())
+	metadata_file.close()
+	if not parsed is Dictionary:
+		return {}
+	var metadata := parsed as Dictionary
+	if String(metadata.get("algorithm", "")) != PREBAKED_CACHE_VERSION:
+		return {}
+	return {
+		"flow_image": image,
+		"components": _deserialize_components(metadata.get("components", [])),
+		"river_count": int(metadata.get("river_count", 0)),
+		"bounds": _region_bounds(region_coord),
+		"cache_key": key,
+		"algorithm": PREBAKED_CACHE_VERSION,
+		"prebaked": true,
+	}
+
+
+func _prebaked_manifest_is_compatible(dir: String) -> bool:
+	var manifest_path := dir.path_join("manifest.json")
+	if not FileAccess.file_exists(manifest_path):
+		return true
+	var manifest_file := FileAccess.open(manifest_path, FileAccess.READ)
+	if manifest_file == null:
+		return false
+	var parsed: Variant = JSON.parse_string(manifest_file.get_as_text())
+	manifest_file.close()
+	if not parsed is Dictionary:
+		return false
+	var manifest := parsed as Dictionary
+	return String(manifest.get("algorithm", "")) == PREBAKED_CACHE_VERSION
+
+
+static func prebaked_region_key(region_coord: Vector2i) -> String:
+	return "region_%d_%d" % [region_coord.x, region_coord.y]
+
+
+func _prebaked_region_key(region_coord: Vector2i) -> String:
+	return MorrowindHydrologyProvider.prebaked_region_key(region_coord)
+
+
 func _ensure_terrain_provider_ready() -> Error:
 	if _terrain_provider_ready:
 		return OK
@@ -853,49 +995,6 @@ func _ensure_terrain_provider_ready() -> Error:
 			return err
 	_terrain_provider_ready = true
 	return OK
-
-
-func _execute_prepare_region_task(
-	request: RegionBakeRequest,
-	baker: RefCounted,
-	heights: Array[float],
-	width: int,
-	height: int,
-	sea_level: float,
-	vertex_spacing: float,
-	region_world_size: float,
-	cache_key: String,
-	use_cache: bool,
-	cache_dir: String
-) -> void:
-	var region_coord := request.region_coord
-	var cached := _load_cached_region_for_values(use_cache, cache_dir, cache_key, region_coord, region_world_size)
-	if not cached.is_empty():
-		request.data = cached
-		request.error = OK
-		return
-
-	baker.Width = width
-	baker.Height = height
-	baker.SeaLevel = sea_level
-	baker.TexelSizeMeters = maxf(vertex_spacing, 0.001)
-	baker.FlowSpeedMetersPerSecond = DEFAULT_FLOW_SPEED_MPS
-	baker.MaxEncodedSpeedMetersPerSecond = MAX_ENCODED_SPEED_MPS
-
-	var result: Dictionary = baker.BakeFromHeights(heights)
-	var flow_image: Image = result.get("image") as Image
-	if flow_image == null:
-		request.error = FAILED
-		return
-	request.data = {
-		"flow_image": flow_image,
-		"components": _components_from_bake_result(result),
-		"river_count": int(result.get("river_count", 0)),
-		"bounds": _region_bounds_for_values(region_coord, region_world_size),
-		"cache_key": cache_key,
-	}
-	_save_cached_region_for_values(use_cache, cache_dir, cache_key, request.data)
-	request.error = OK
 
 
 func _region_bounds_for_values(region_coord: Vector2i, size_m: float) -> AABB:
@@ -927,6 +1026,7 @@ func _load_cached_region_for_values(use_cache: bool, dir: String, cache_key: Str
 		"river_count": int(metadata.get("river_count", 0)),
 		"bounds": _region_bounds_for_values(region_coord, region_world_size),
 		"cache_key": cache_key,
+		"algorithm": String(metadata.get("algorithm", CACHE_VERSION)),
 	}
 
 
@@ -946,7 +1046,7 @@ func _save_cached_region_for_values(use_cache: bool, dir: String, cache_key: Str
 	var metadata := {
 		"river_count": int(data.get("river_count", 0)),
 		"components": _serialize_components(data.get("components", [])),
-		"algorithm": CACHE_VERSION,
+		"algorithm": String(data.get("algorithm", CACHE_VERSION)),
 		"format": "RGBA8 flowmap: RG=direction, B=speed, A=coverage",
 	}
 	var metadata_file := FileAccess.open(metadata_path, FileAccess.WRITE)

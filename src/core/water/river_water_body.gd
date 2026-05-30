@@ -1,7 +1,7 @@
 ## RiverWaterBody3D - curved flowing water body.
 ##
 ## Source-owned river rendering/query node. It uses generic Godot-space curve
-## data, registers a WaterBodyDescriptor with OceanManager, and keeps authored
+## data, registers a WaterBodyDescriptor with WaterSystem, and keeps authored
 ## river rendering separate from simple box/polygon water volumes.
 @tool
 class_name RiverWaterBody3D
@@ -460,23 +460,23 @@ func _update_material() -> void:
 func _sync_water_interaction_material() -> void:
 	if _material == null:
 		return
-	if not is_instance_valid(OceanManager):
+	if not is_instance_valid(WaterSystem):
 		sync_water_interaction_texture(null, Vector4.ZERO, false, false)
 		return
-	var texture := OceanManager.get_water_interaction_texture()
-	var stats: Dictionary = OceanManager.get_water_interaction_stats()
+	var texture := WaterSystem.get_water_interaction_texture()
+	var stats: Dictionary = WaterSystem.get_water_interaction_stats()
 	var active := bool(stats.get("enabled", false)) and texture != null
 	sync_water_interaction_texture(
 		texture,
-		OceanManager.get_water_interaction_bounds(),
+		WaterSystem.get_water_interaction_bounds(),
 		active,
-		OceanManager.is_water_interaction_debug_enabled(),
-		OceanManager.get_water_body_atlas_texture(),
-		OceanManager.get_water_body_atlas_bounds(),
-		OceanManager.has_water_body_atlas(),
-		OceanManager.get_water_dynamic_flow_texture() if OceanManager.has_method("get_water_dynamic_flow_texture") else null,
-		OceanManager.get_water_interaction_bounds(),
-		active and OceanManager.has_method("get_water_dynamic_flow_texture")
+		WaterSystem.is_water_interaction_debug_enabled(),
+		WaterSystem.get_water_body_atlas_texture(),
+		WaterSystem.get_water_body_atlas_bounds(),
+		WaterSystem.has_water_body_atlas(),
+		WaterSystem.get_water_dynamic_flow_texture() if WaterSystem.has_method("get_water_dynamic_flow_texture") else null,
+		WaterSystem.get_water_interaction_bounds(),
+		active and WaterSystem.has_method("get_water_dynamic_flow_texture")
 	)
 
 
@@ -624,26 +624,26 @@ func _flowmap_bounds_uniform() -> Vector4:
 func _register_with_water_registry() -> void:
 	if _registered_with_water_registry:
 		return
-	if is_instance_valid(OceanManager) and OceanManager.has_method("register_water_body"):
-		OceanManager.call("register_water_body", get_water_body_descriptor())
+	if is_instance_valid(WaterSystem) and WaterSystem.has_method("register_water_body"):
+		WaterSystem.call("register_water_body", get_water_body_descriptor())
 		_registered_with_water_registry = true
 
 
 func _register_water_interaction_renderer() -> void:
-	if is_instance_valid(OceanManager) and OceanManager.has_method("register_water_interaction_renderer"):
-		OceanManager.call("register_water_interaction_renderer", self)
+	if is_instance_valid(WaterSystem) and WaterSystem.has_method("register_water_interaction_renderer"):
+		WaterSystem.call("register_water_interaction_renderer", self)
 
 
 func _unregister_water_interaction_renderer() -> void:
-	if is_instance_valid(OceanManager) and OceanManager.has_method("unregister_water_interaction_renderer"):
-		OceanManager.call("unregister_water_interaction_renderer", self)
+	if is_instance_valid(WaterSystem) and WaterSystem.has_method("unregister_water_interaction_renderer"):
+		WaterSystem.call("unregister_water_interaction_renderer", self)
 
 
 func _unregister_from_water_registry() -> void:
 	if not _registered_with_water_registry:
 		return
-	if _body_descriptor != null and is_instance_valid(OceanManager) and OceanManager.has_method("unregister_water_body"):
-		OceanManager.call("unregister_water_body", _body_descriptor)
+	if _body_descriptor != null and is_instance_valid(WaterSystem) and WaterSystem.has_method("unregister_water_body"):
+		WaterSystem.call("unregister_water_body", _body_descriptor)
 	_registered_with_water_registry = false
 
 

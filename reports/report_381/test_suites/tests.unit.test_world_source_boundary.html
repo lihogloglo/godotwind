@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+	<meta charset="UTF-8">
+	<meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+	<meta http-equiv="x-ua-compatible" content="IE=edge" />
+	<meta name="viewport" content="width=device-width, initial-scale=1.0">
+	<title>GdUnit4 Testsuite</title>
+	<link rel="stylesheet" href="../css/styles.css">
+	<link href="../css/breadcrumb.css" rel="stylesheet" type="text/css" />
+
+	<script src="https://code.jquery.com/jquery-3.6.4.js"></script>
+	<script>
+		$(document).ready(function () {
+			var report_view = $('#report_area').find('.report-column')
+
+			$('#report-table tr').click(function () {
+				var report = $(this).find('.report-column').html();
+				report_view.html(report)
+				$('.selected').removeClass('selected');
+				$(this).addClass('selected');
+			});
+		});
+	</script>
+</head>
+
+<body>
+	<header>
+		<div class="logo">
+			<img src="../css/logo.png" alt="GdUnit4 Logo">
+			<span>GdUnit4</span>
+		</div>
+		<div class="report-container">
+			<h1>Testsuite Report</h1>
+			<div>
+				<span class="label">res://tests/unit/test_world_source_boundary.gd</span>
+			</div>
+			<div class="summary">
+				<div class="summary-item">
+					<span class="label">Tests</span>
+					<span class="value">15</span>
+				</div>
+				<div class="summary-item">
+					<span class="label">Skipped</span>
+					<span class="value">0</span>
+				</div>
+				<div class="summary-item">
+					<span class="label">Flaky</span>
+					<span class="value">0</span>
+				</div>
+				<div class="summary-item">
+					<span class="label">Failures</span>
+					<span class="value">3</span>
+				</div>
+				<div class="summary-item">
+					<span class="label">Orphans</span>
+					<span class="value">15</span>
+				</div>
+				<div class="summary-item">
+					<span class="label">Duration</span>
+					<span class="value">391ms</span>
+				</div>
+				<div class="success-rate">
+					<div class="check-icon status-error">✓</div>
+					<div class="rate-text">
+						<span class="label">Success Rate</span>
+						<span class="value">80%</span>
+					</div>
+				</div>
+			</div>
+		</div>
+		<div class="breadcrumb">
+			<a href="../index.html"><span>All</span></a>
+			<a href="../path/tests.unit.html"><span>tests/unit</span></a>
+			<a class="active" href="#"><span>test_world_source_boundary</span></a>
+		</div>
+	</header>
+
+	<main>
+		<div class="tab-report-grid">
+			<div class="grid-item tab">
+				<table id="report-table">
+					<thead>
+						<tr>
+							<th>Testcase</th>
+							<th>Result</th>
+							<th>Skipped</th>
+							<th>Orphans</th>
+							<th>Duration</th>
+							<th class="report-column">Report</th>
+						</tr>
+					</thead>
+					<tbody>
+						
+								<tr class="testcase-group">
+									<td>test_world_source_contract_exposes_required_providers</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>10ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_world_source_exposes_optional_water_provider_without_object_streaming_requirement</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>8ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_world_source_separates_terrain_and_object_streaming_capabilities</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>7ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_native_streaming_manager_rejects_missing_source</td>
+									<td><span class="status status-warning">WARNING</span></td>
+									<td>0</td>
+									<td>1</td>
+									<td>11ms</td>
+									<td class="report-column">
+										<pre>
+line 285: WARNING:: Found 1 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_native_streaming_manager_rejects_terrain_only_source_for_object_streaming</td>
+									<td><span class="status status-warning">WARNING</span></td>
+									<td>0</td>
+									<td>1</td>
+									<td>13ms</td>
+									<td class="report-column">
+										<pre>
+line 291: WARNING:: Found 1 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_lapalma_remains_world_data_provider_without_morrowind_object_contracts</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>16ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_native_streaming_manager_accepts_fake_non_morrowind_source</td>
+									<td><span class="status status-warning">WARNING</span></td>
+									<td>0</td>
+									<td>1</td>
+									<td>15ms</td>
+									<td class="report-column">
+										<pre>
+line 336: WARNING:: Found 1 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_fake_asset_provider_supplies_source_owned_models</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>14ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_distant_lights_use_provider_coordinate_mapper_for_pages</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>27ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_native_streaming_manager_rejects_source_without_spawn_adapter</td>
+									<td><span class="status status-warning">WARNING</span></td>
+									<td>0</td>
+									<td>1</td>
+									<td>18ms</td>
+									<td class="report-column">
+										<pre>
+line 370: WARNING:: Found 1 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_cell_manager_world_cell_async_uses_fake_records_without_legacy_cell</td>
+									<td><span class="status status-failed">FAILED</span></td>
+									<td>0</td>
+									<td>2</td>
+									<td>21ms</td>
+									<td class="report-column">
+										<pre>
+line 379: WARNING:: Found 2 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+line 395: Expecting: 'true' but is 'false'
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_cell_manager_exterior_async_prefers_world_manifest_without_legacy_cell</td>
+									<td><span class="status status-warning">WARNING</span></td>
+									<td>0</td>
+									<td>2</td>
+									<td>28ms</td>
+									<td class="report-column">
+										<pre>
+line 398: WARNING:: Found 2 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_cell_manager_sync_exterior_uses_world_manifest_without_legacy_cell</td>
+									<td><span class="status status-error">ERROR</span></td>
+									<td>0</td>
+									<td>5</td>
+									<td>36ms</td>
+									<td class="report-column">
+										<pre>
+line 439: Godot Runtime Error !
+Error: 'Cannot call method 'get_meta' on a null value.'
+	at res://tests/unit/test_world_source_boundary.gd:439
+line 416: WARNING:: Found 5 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+line 438: Expecting: not to be '<null>'
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_cell_manager_metadata_only_exterior_uses_world_manifest_without_legacy_cell</td>
+									<td><span class="status status-passed">PASSED</span></td>
+									<td>0</td>
+									<td>0</td>
+									<td>41ms</td>
+									<td class="report-column">
+										<pre>
+
+										</pre>
+									</td>
+								</tr>
+
+
+								<tr class="testcase-group">
+									<td>test_fake_non_morrowind_source_instantiates_without_legacy_assets</td>
+									<td><span class="status status-warning">WARNING</span></td>
+									<td>0</td>
+									<td>2</td>
+									<td>43ms</td>
+									<td class="report-column">
+										<pre>
+line 464: WARNING:: Found 2 possible orphan nodes.
+	Add 'collect_orphan_node_details()' to the end of the test to collect details.
+
+										</pre>
+									</td>
+								</tr>
+
+					</tbody>
+				</table>
+			</div>
+			<div id="report_area" class="grid-item tab">
+				<h4>Failure Report</h4>
+				<div class="report-column"></div>
+			</div>
+		</div>
+	</main>
+
+	<footer>
+		<p>Generated by <a href="https://github.com/MikeSchulze/gdUnit4">GdUnit4</a> at 2026-05-30 06:35:55</p>
+		<div class="status-legend">
+			<span class="status-legend-item">
+				<span class="status-box status-skipped"></span> Skipped
+			</span>
+			<span class="status-legend-item">
+				<span class="status-box status-passed"></span> Passed
+			</span>
+			<span class="status-legend-item">
+				<span class="status-box status-flaky"></span> Flaky
+			</span>
+			<span class="status-legend-item">
+				<span class="status-box status-warning"></span> Warning
+			</span>
+			<span class="status-legend-item">
+				<span class="status-box status-failed"></span> Failed
+			</span>
+			<span class="status-legend-item">
+				<span class="status-box status-error"></span> Error
+			</span>
+		</div>
+	</footer>
+</body>
+
+<script>
+	function groupTableRows() {
+		const table = document.getElementById('report-table');
+		const rows = table.querySelectorAll('tbody tr');
+
+		let previousTestCase = '';
+		let groupStartIndex = 0;
+		let groupColorToggle = true; // Toggle between two colors
+
+		rows.forEach((row, index) => {
+			const testCaseName = row.cells[0].textContent.trim();
+
+			if (testCaseName !== previousTestCase) {
+				// Close the previous group
+				if (index > 0 && groupStartIndex !== index - 1) {
+					// Apply background color to the group
+					const groupClass = groupColorToggle ? 'group-bg-1' : 'group-bg-2';
+					for (let i = groupStartIndex; i <= index - 1; i++) {
+						rows[i].classList.add(groupClass);
+					}
+
+					// Toggle background color for the next group
+					groupColorToggle = !groupColorToggle;
+				}
+
+				// Start a new group
+				groupStartIndex = index;
+			}
+
+			previousTestCase = testCaseName;
+		});
+
+		// Handle the last group
+		if (groupStartIndex !== rows.length - 1) {
+			// Apply background color to the last group
+			const groupClass = groupColorToggle ? 'group-bg-1' : 'group-bg-2';
+			for (let i = groupStartIndex; i < rows.length; i++) {
+				rows[i].classList.add(groupClass);
+			}
+		}
+	}
+
+	// Call the function to group table rows after the DOM loads
+	document.addEventListener('DOMContentLoaded', groupTableRows);
+</script>
+
+</html>

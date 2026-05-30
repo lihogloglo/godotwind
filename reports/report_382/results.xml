@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<testsuites id="2026-05-30" name="report_382" tests="26" failures="0" skipped="0" flaky="0" time="0.000">
+	<testsuite id="0" name="test_ocean_controls_ui_state" package="tests/unit" timestamp="2026-05-30T06:55:43" hostname="localhost" tests="3" failures="0" errors="0" skipped="0" flaky="0" time="0.014">
+		<testcase name="test_underwater_feature_choices_survive_process_sync" classname="test_ocean_controls_ui_state" time="0.001">
+		</testcase>
+		<testcase name="test_particle_toggle_uses_ocean_manager_state_not_compositor_feature_flag" classname="test_ocean_controls_ui_state" time="0.000">
+		</testcase>
+		<testcase name="test_show_ocean_toggle_tracks_ocean_surface_without_clearing_water_preferences" classname="test_ocean_controls_ui_state" time="0.006">
+		</testcase>
+	</testsuite>
+	<testsuite id="1" name="test_water_body_registry" package="tests/unit" timestamp="2026-05-30T06:55:43" hostname="localhost" tests="23" failures="0" errors="0" skipped="0" flaky="0" time="6.582">
+		<testcase name="test_registry_uses_highest_priority_active_body" classname="test_water_body_registry" time="0.002">
+		</testcase>
+		<testcase name="test_registry_falls_back_when_no_body_covers_position" classname="test_water_body_registry" time="0.001">
+		</testcase>
+		<testcase name="test_registry_skips_coverage_sampling_outside_valid_source_bounds" classname="test_water_body_registry" time="0.006">
+		</testcase>
+		<testcase name="test_ocean_manager_unified_query_does_not_report_sea_level_outside_registered_body_when_ocean_disabled" classname="test_water_body_registry" time="0.013">
+		</testcase>
+		<testcase name="test_ocean_manager_water_body_atlas_is_disabled_by_default" classname="test_water_body_registry" time="0.014">
+		</testcase>
+		<testcase name="test_ocean_toggle_does_not_enable_water_body_atlas" classname="test_water_body_registry" time="3.063">
+		</testcase>
+		<testcase name="test_water_system_generated_water_root_is_owned_by_water_world" classname="test_water_body_registry" time="0.028">
+		</testcase>
+		<testcase name="test_ocean_toggle_disables_ocean_surface_without_disabling_registered_water" classname="test_water_body_registry" time="3.031">
+		</testcase>
+		<testcase name="test_ocean_manager_water_body_atlas_encodes_registered_coverage_and_height" classname="test_water_body_registry" time="0.048">
+		</testcase>
+		<testcase name="test_water_surface_state_exposes_water_body_atlas_cpu_sample" classname="test_water_body_registry" time="0.041">
+		</testcase>
+		<testcase name="test_public_local_water_update_rebuilds_atlas_before_interaction_step" classname="test_water_body_registry" time="0.047">
+		</testcase>
+		<testcase name="test_ocean_manager_local_flow_obstacle_changes_sampled_registered_velocity" classname="test_water_body_registry" time="0.020">
+		</testcase>
+		<testcase name="test_water_volume_descriptor_reports_flow_velocity" classname="test_water_body_registry" time="0.040">
+		</testcase>
+		<testcase name="test_water_volume_uses_shared_shader_resource" classname="test_water_body_registry" time="0.020">
+		</testcase>
+		<testcase name="test_water_volume_does_not_own_buoyancy_physics" classname="test_water_body_registry" time="0.020">
+		</testcase>
+		<testcase name="test_water_volume_area_uses_exported_detection_collision_mask" classname="test_water_body_registry" time="0.020">
+		</testcase>
+		<testcase name="test_polygon_volume_area_uses_exported_detection_collision_mask" classname="test_water_body_registry" time="0.021">
+		</testcase>
+		<testcase name="test_polygon_volume_registers_and_unregisters_water_interaction_renderer" classname="test_water_body_registry" time="0.020">
+		</testcase>
+		<testcase name="test_polygon_volume_mesh_subdivisions_is_pinned_until_supported" classname="test_water_body_registry" time="0.014">
+		</testcase>
+		<testcase name="test_polygon_volume_coverage_uses_polygon_not_convex_collision" classname="test_water_body_registry" time="0.020">
+		</testcase>
+		<testcase name="test_polygon_volume_triangulates_clockwise_polygon_and_samples_coverage" classname="test_water_body_registry" time="0.019">
+		</testcase>
+		<testcase name="test_polygon_volume_descriptor_bounds_follow_polygon_and_height_edits" classname="test_water_body_registry" time="0.027">
+		</testcase>
+		<testcase name="test_polygon_volume_json_import_preserves_zero_flow_speed" classname="test_water_body_registry" time="0.013">
+		</testcase>
+	</testsuite>
+</testsuites>

@@ -130,18 +130,18 @@ func _ready() -> void:
 		_buoyancy_cubes.append(cube)
 
 	# ================================================================
-	# OCEAN — use OceanManager autoload for full FFT pipeline
-	# If OceanManager is disabled in project settings, force-initialize it.
+	# OCEAN — use WaterSystem autoload for full FFT pipeline
+	# If WaterSystem is disabled in project settings, force-initialize it.
 	# This gives us the compute pipeline (displacement/normal textures) that
 	# the FFT shader requires as global uniforms.
 	# ================================================================
-	if OceanManager:
+	if WaterSystem:
 		ProjectSettings.set_setting("ocean/quality", 1)
-	if OceanManager and not OceanManager.is_initialized():
-		OceanManager.force_initialize()
-	if OceanManager and OceanManager.is_initialized():
-		_ocean = OceanManager.get_ocean_mesh()
-		OceanManager.set_camera(_camera)
+	if WaterSystem and not WaterSystem.is_initialized():
+		WaterSystem.force_initialize()
+	if WaterSystem and WaterSystem.is_initialized():
+		_ocean = WaterSystem.get_ocean_mesh()
+		WaterSystem.set_camera(_camera)
 		# Override shore mask to all-white (deep ocean everywhere) for this test.
 		# The test scene has no real terrain, so the prebaked Morrowind shore mask
 		# would suppress waves near the camera position (marked as "land").
@@ -209,8 +209,8 @@ func _process(delta: float) -> void:
 		var dir := _camera.global_transform.basis * input.normalized() * _move_speed * delta
 		_camera.global_position += dir
 
-	# Update ocean mesh position (skip if OceanManager owns it)
-	if not OceanManager or not OceanManager.is_initialized():
+	# Update ocean mesh position (skip if WaterSystem owns it)
+	if not WaterSystem or not WaterSystem.is_initialized():
 		_ocean.update_position(Vector3(_camera.global_position.x, SEA_LEVEL, _camera.global_position.z))
 
 	# Buoyancy handled by BuoyancyBody3D._physics_process()
@@ -237,7 +237,7 @@ func _process(delta: float) -> void:
 
 
 func _update_debug_grid() -> void:
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 	var cam_pos := _camera.global_position
 	var half := DEBUG_GRID_SIZE / 2.0
@@ -247,7 +247,7 @@ func _update_debug_grid() -> void:
 			var world_x := cam_pos.x + (gx - half) * DEBUG_GRID_SPACING
 			var world_z := cam_pos.z + (gz - half) * DEBUG_GRID_SPACING
 			var query_pos := Vector3(world_x, 0, world_z)
-			var wave_h := OceanManager.get_wave_height(query_pos)
+			var wave_h := WaterSystem.get_wave_height(query_pos)
 			_debug_markers[idx].global_position = Vector3(world_x, wave_h, world_z)
 			idx += 1
 

@@ -25,6 +25,7 @@ const ImpostorBakerV3 := preload("res://src/tools/prebaking/impostor_baker_v3.gd
 const ModelPrebaker := preload("res://src/tools/prebaking/model_prebaker.gd")
 const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const ShoreMaskBaker := preload("res://src/tools/shore_mask_baker.gd")
+const HydrologyAtlasPrebaker := preload("res://src/tools/prebaking/morrowind_hydrology_atlas_prebaker.gd")
 const ImpostorCandidates := preload("res://src/core/world/impostor_candidates.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
@@ -39,6 +40,7 @@ enum Component {
 	MODELS,        # Individual NIF->Godot conversions with embedded LODs
 	IMPOSTORS,     # Octahedral impostor textures (FAR tier)
 	NAVMESHES,     # Navigation meshes
+	HYDROLOGY,     # GPU-generated Morrowind water/river flowmaps
 	SHORE_MASK,    # Ocean visibility mask
 	CLOUD_NOISE,   # 3D noise textures for volumetric clouds
 	# REMOVED: LODS - now embedded in MODELS via NIFConverter
@@ -67,12 +69,14 @@ var _model_baker: ModelPrebaker = null
 var _impostor_baker: ImpostorBakerV3 = null
 var _navmesh_baker: NavMeshBaker = null
 var _shore_baker: ShoreMaskBaker = null
+var _hydrology_baker: RefCounted = null
 
 ## Component enable flags
 var enable_terrain: bool = true
 var enable_models: bool = true
 var enable_impostors: bool = true
 var enable_navmeshes: bool = true
+var enable_hydrology: bool = true
 var enable_shore_mask: bool = true
 var enable_cloud_noise: bool = true
 
@@ -254,6 +258,10 @@ func start_prebaking() -> void:
 		_current_component = Component.NAVMESHES
 		results["navmeshes"] = await _bake_navmeshes()
 
+	if enable_hydrology and not _should_stop:
+		_current_component = Component.HYDROLOGY
+		results["hydrology"] = await _bake_hydrology()
+
 	if enable_shore_mask and not _should_stop:
 		_current_component = Component.SHORE_MASK
 		results["shore_mask"] = await _bake_shore_mask()
@@ -309,6 +317,7 @@ func _clear_cache_directories() -> void:
 		SettingsManager.get_impostors_path(),
 		SettingsManager.get_navmeshes_path(),
 		SettingsManager.get_ocean_path(),
+		SettingsManager.get_cache_base_path().path_join("water").path_join("morrowind_hydrology_atlas"),
 		# NOTE: merged_cells, lods, hlod directories no longer used
 		# LODs embedded in models; HLOD now runtime-merged
 	]
@@ -804,6 +813,57 @@ func _bake_navmeshes() -> Dictionary:
 	return result
 
 
+## Bake Morrowind hydrology flowmaps from the already-prebaked Terrain3D height regions.
+func _bake_hydrology() -> Dictionary:
+	Log.info("prebaking", "=".repeat(80))
+	Log.info("prebaking", "HYDROLOGY: Baking GPU water classification from Terrain3D cache")
+	Log.info("prebaking", "=".repeat(80))
+
+	component_started.emit("Hydrology")
+	var state: PrebakeState.ComponentState = _state_manager.hydrology
+	state.start_time = Time.get_unix_time_from_system()
+	state.pending = ["hydrology_atlas"]
+	state.completed.clear()
+	state.failed.clear()
+	_state_manager.save_state()
+
+	if not terrain_3d:
+		if not await _ensure_terrain_loaded():
+			var message := "Failed to load Terrain3D data"
+			state.pending.clear()
+			state.failed.append("hydrology_atlas")
+			state.end_time = Time.get_unix_time_from_system()
+			_state_manager.save_state()
+			error_occurred.emit("Hydrology", message)
+			component_completed.emit("Hydrology", 0, 1, 0)
+			return {"success": 0, "failed": 1, "error": ERR_DOES_NOT_EXIST, "message": message}
+
+	_hydrology_baker = HydrologyAtlasPrebaker.new()
+	_hydrology_baker.terrain_data_directory = SettingsManager.get_terrain_path()
+	_hydrology_baker.output_directory = SettingsManager.get_cache_base_path().path_join("water").path_join("morrowind_hydrology_atlas")
+	_hydrology_baker.progress.connect(func(current: int, total: int, region_key: String) -> void:
+		component_progress.emit("Hydrology", current, total, region_key)
+	)
+
+	var result: Dictionary = _hydrology_baker.call("bake_from_terrain3d", terrain_3d)
+	var success := int(result.get("success", 0))
+	var failed := int(result.get("failed", 0))
+	var error := int(result.get("error", OK))
+	state.pending.clear()
+	if error == OK and success > 0:
+		state.completed.append("hydrology_atlas")
+		state.last_baked = "hydrology_atlas"
+	else:
+		state.failed.append("hydrology_atlas")
+		if error != OK:
+			error_occurred.emit("Hydrology", String(result.get("message", error_string(error))))
+	state.end_time = Time.get_unix_time_from_system()
+	_state_manager.save_state()
+
+	component_completed.emit("Hydrology", success, failed, int(result.get("skipped", 0)))
+	return result
+
+
 ## Bake shore mask
 func _bake_shore_mask() -> Dictionary:
 	Log.info("prebaking", "=".repeat(80))
@@ -831,12 +891,12 @@ func _bake_shore_mask() -> Dictionary:
 	_shore_baker = ShoreMaskBaker.new()
 	_shore_baker.terrain = terrain_3d as Terrain3D
 
-	# Get sea level from project settings (consistent with OceanManager)
+	# Get sea level from project settings (consistent with WaterSystem)
 	var sea_level: float = ProjectSettings.get_setting("ocean/sea_level", 0.0)
 	_shore_baker.sea_level = sea_level
 
-	# Get fade distance from OceanManager defaults
-	_shore_baker.fade_distance = 50.0  # Matches OceanManager.shore_fade_distance
+	# Get fade distance from WaterSystem defaults
+	_shore_baker.fade_distance = 50.0  # Matches WaterSystem.shore_fade_distance
 
 	Log.info("prebaking", "Shore mask config - sea_level=%.1f, fade_distance=%.1fm" % [
 		_shore_baker.sea_level, _shore_baker.fade_distance
@@ -916,6 +976,8 @@ func bake_component(component: Component) -> void:
 			result = await _bake_impostors()
 		Component.NAVMESHES:
 			result = await _bake_navmeshes()
+		Component.HYDROLOGY:
+			result = await _bake_hydrology()
 		Component.SHORE_MASK:
 			result = await _bake_shore_mask()
 		Component.CLOUD_NOISE:
@@ -935,6 +997,7 @@ func _component_name(component: Component) -> String:
 		Component.MODELS: return "models"
 		Component.IMPOSTORS: return "impostors"
 		Component.NAVMESHES: return "navmeshes"
+		Component.HYDROLOGY: return "hydrology"
 		Component.SHORE_MASK: return "shore_mask"
 		Component.CLOUD_NOISE: return "cloud_noise"
 	return "unknown"

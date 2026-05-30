@@ -6,6 +6,11 @@ For Godotwind work, do not stop at static inspection. Before calling a gameplay,
 streaming, rendering, or performance change done, run a visual launch or
 automated benchmark/crash smoke that exercises the changed path.
 
+Choose the most specific scene, visual test, benchmark, or tool for the changed
+path. Do not automatically launch `scenes/Godotwind.tscn`; use it only when the
+main world scene itself is the relevant path or no narrower verification target
+exists.
+
 Use the documented local binary when a visual launch is appropriate:
 
 ```powershell
@@ -256,7 +261,9 @@ Ground truth lives in `docs/STATUS.md`. Don't duplicate here. When in doubt abou
 
 ## Verification — How to Check Your Work
 
-- Open `scenes/Godotwind.tscn` and run — should stream Morrowind cells at 60+ FPS
+- Run the narrowest scene, visual test, benchmark, or tool that exercises the
+  changed path. Use `scenes/Godotwind.tscn` only for main-world streaming
+  changes or when there is no more specific target.
 - Press `` ` `` for console, check for errors
 - Streaming changes: watch frame time (budget: 2ms/frame for cell loading)
 - Shader changes: fly to tier boundaries (150m, 500m) and check for artifacts

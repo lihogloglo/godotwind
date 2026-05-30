@@ -306,8 +306,8 @@ func on_weather_toggled(enabled: bool) -> void:
 			_particles = null
 
 	# Reset ocean to calm defaults when weather is disabled
-	if not enabled and OceanManager.is_system_enabled():
-		OceanManager.reset_weather()
+	if not enabled and WaterSystem.is_system_enabled():
+		WaterSystem.reset_weather()
 
 	Log.info("weather", "Weather system %s" % ("enabled" if enabled else "disabled"))
 
@@ -358,16 +358,16 @@ func on_cloud_size_changed(value: float) -> void:
 
 
 ## Handle wind strength slider change. Drives both cloud wind-sweep and
-## the ocean wave system (via OceanManager override).
+## the ocean wave system (via WaterSystem override).
 func on_wind_strength_changed(value: float) -> void:
 	# Clouds: wind_swept_strength ranges 0-5000. Use a gentle curve so mid
 	# slider values produce visible drift without overshooting the default.
 	var cloud_sweep: float = lerpf(0.0, 2500.0, value)
 	_set_cloud_param("wind_swept_strength", cloud_sweep)
-	# Ocean: delegate to OceanManager — it internally maps 0-1 to cascade
-	# wind_speed + storm-fog multiplier. See OceanManager.set_wind_strength.
-	if OceanManager and OceanManager.is_system_enabled() and OceanManager.has_method("set_wind_strength"):
-		OceanManager.set_wind_strength(value)
+	# Ocean: delegate to WaterSystem — it internally maps 0-1 to cascade
+	# wind_speed + storm-fog multiplier. See WaterSystem.set_wind_strength.
+	if WaterSystem and WaterSystem.is_system_enabled() and WaterSystem.has_method("set_wind_strength"):
+		WaterSystem.set_wind_strength(value)
 
 
 ## Enable/disable SunshineClouds2 rendering (CompositorEffect.enabled).
@@ -480,8 +480,8 @@ func process(delta: float) -> void:
 		_particles.update(result)
 
 	# Drive ocean parameters from weather (wind → waves, color, foam)
-	if ocean_link_enabled and OceanManager.is_system_enabled():
-		OceanManager.apply_weather(result)
+	if ocean_link_enabled and WaterSystem.is_system_enabled():
+		WaterSystem.apply_weather(result)
 
 	_update_status_label()
 

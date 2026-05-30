@@ -295,6 +295,11 @@ var _camera_position: Vector3 = Vector3.ZERO
 ## Current camera cell
 var _camera_cell: Vector2i = Vector2i.ZERO
 
+## Classic interior travel freezes exterior tracking without pausing async work.
+var _world_tracking_frozen: bool = false
+var _frozen_camera_position: Vector3 = Vector3.ZERO
+var _frozen_camera_cell: Vector2i = Vector2i.ZERO
+
 ## Tracked camera node
 var _camera: Camera3D = null
 
@@ -650,6 +655,59 @@ func set_camera(camera: Camera3D) -> void:
 		_update_loaded_cells()
 
 
+func set_world_tracking_frozen(enabled: bool, anchor_position: Vector3 = Vector3.INF) -> void:
+	_world_tracking_frozen = enabled
+	if enabled:
+		_frozen_camera_position = anchor_position if anchor_position != Vector3.INF else _camera_position
+		_frozen_camera_cell = _world_to_cell(_frozen_camera_position)
+		_camera_position = _frozen_camera_position
+		_camera_cell = _frozen_camera_cell
+		_camera_velocity_xz = Vector2.ZERO
+		_teleport_detected = false
+		Log.info("streaming", "World tracking frozen at cell %s position %s" % [_camera_cell, _camera_position])
+	else:
+		_prev_camera_position = Vector3.ZERO
+		_camera_velocity_xz = Vector2.ZERO
+		if _camera:
+			_camera_position = _camera.global_position
+			_camera_cell = _world_to_cell(_camera_position)
+		Log.info("streaming", "World tracking unfrozen at cell %s position %s" % [_camera_cell, _camera_position])
+
+
+func is_world_tracking_frozen() -> bool:
+	return _world_tracking_frozen
+
+
+func _enter_post_teleport_burst() -> void:
+	if _startup_phase:
+		return
+	Log.info("streaming", "Streaming origin jump - re-entering startup burst mode")
+	_startup_phase = true
+	_first_playable_reached = false
+	_startup_frames = 0
+	_post_startup_start_ms = 0
+	_queue_drain_logged = false
+	_post_startup_audit_accum = 0.0
+	if _impostor_renderer:
+		_impostor_renderer.set_load_budget_usec(15000.0)
+
+
+func commit_streaming_origin(position: Vector3) -> void:
+	_world_tracking_frozen = false
+	_frozen_camera_position = Vector3.ZERO
+	_frozen_camera_cell = Vector2i.ZERO
+	_prev_camera_position = Vector3.ZERO
+	_camera_velocity_xz = Vector2.ZERO
+	_camera_position = position
+	_camera_cell = _world_to_cell(position)
+	_enter_post_teleport_burst()
+	if _cell_preloader != null:
+		_cell_preloader.abort_all()
+		_cell_preloader.reset(_camera_cell)
+	refresh_cells()
+	Log.info("streaming", "Streaming origin committed at cell %s position %s" % [_camera_cell, _camera_position])
+
+
 func set_world_source(source: RefCounted) -> void:
 	_world_source = source
 	if source == null:
@@ -794,7 +852,8 @@ func _effective_scene_load_distance_cap() -> float:
 func _reconcile_distant_tier_loading() -> void:
 	if not _camera:
 		return
-	_camera_position = _camera.global_position
+	var tracking_frozen := _world_tracking_frozen
+	_camera_position = _frozen_camera_position if tracking_frozen else _camera.global_position
 	_camera_cell = _world_to_cell(_camera_position)
 	if _hlod_requested_visible and _hlod_merger:
 		_hlod_merger.call("update_for_camera", _camera_cell, _camera_position, _camera_velocity_xz)
@@ -987,22 +1046,25 @@ func _process(delta: float) -> void:
 	if prof:
 		prof.begin_frame()
 
+	var tracking_frozen := _world_tracking_frozen
+
 	# Update camera position and velocity. Fix B (streaming_stutter_2026_04_25
 	# §11.4) — bracket cell_manager.set_camera_position; cheap in theory but
 	# walks the proximity-deferred list internally on some paths.
-	_camera_position = _camera.global_position
+	_camera_position = _frozen_camera_position if tracking_frozen else _camera.global_position
 	if _cell_manager:
 		if prof: prof.begin_section("cm_set_camera_position")
 		_cell_manager.set_camera_position(_camera_position)
 		if prof: prof.end_section("cm_set_camera_position")
-	var new_cell := _world_to_cell(_camera_position)
+		_cell_manager.tick_proximity_deferred(_camera_position)
+	var new_cell := _frozen_camera_cell if tracking_frozen else _world_to_cell(_camera_position)
 
 	# Phase 7 finish (2026-04-17) — teleport detection. A single-frame camera
 	# jump beyond TELEPORT_DETECT_THRESHOLD re-enters startup_phase so the
 	# post-teleport ring loads at the aggressive 25ms budget instead of
 	# post-startup 4ms. Must run BEFORE the _camera_velocity_xz update so
 	# the teleport jump doesn't poison the EMA-smoothed velocity.
-	if _prev_camera_position != Vector3.ZERO \
+	if not tracking_frozen and _prev_camera_position != Vector3.ZERO \
 			and _camera_position.distance_to(_prev_camera_position) > TELEPORT_DETECT_THRESHOLD:
 		_teleport_detected = true
 		# Phase 2 stutter diag — bracket the teleport handler so the slow-frame
@@ -1039,13 +1101,14 @@ func _process(delta: float) -> void:
 	# EMA-smoothed velocity on XZ plane (for predictive cell loading).
 	# Teleport frames skip the EMA so the huge jump doesn't throw predictive
 	# pre-queue into a nonsense direction for the following seconds.
-	if delta > 0.0 and _prev_camera_position != Vector3.ZERO and not _teleport_detected:
+	if not tracking_frozen and delta > 0.0 and _prev_camera_position != Vector3.ZERO and not _teleport_detected:
 		var raw_vel := Vector2(
 			(_camera_position.x - _prev_camera_position.x) / delta,
 			(_camera_position.z - _prev_camera_position.z) / delta
 		)
 		_camera_velocity_xz = _camera_velocity_xz.lerp(raw_vel, 0.3)
-	_prev_camera_position = _camera_position
+	if not tracking_frozen:
+		_prev_camera_position = _camera_position
 
 	# On teleport, re-arm startup_phase so the instantiation/merge budget
 	# switches back to burst mode. ObjectPaging has its own TELEPORT_THRESHOLD
@@ -1078,7 +1141,7 @@ func _process(delta: float) -> void:
 
 	# Check if we moved to a new cell
 	var cell_update_usec: float = 0.0
-	_cell_changed_this_frame = (new_cell != _camera_cell)
+	_cell_changed_this_frame = (not tracking_frozen and new_cell != _camera_cell)
 	if _cell_changed_this_frame:
 		_debug("Camera moved to new cell: %s (was %s)" % [new_cell, _camera_cell])
 		_camera_cell = new_cell
@@ -1089,7 +1152,7 @@ func _process(delta: float) -> void:
 		cell_update_usec = float(Time.get_ticks_usec() - cu_start)
 		if prof:
 			prof.end_section("cell_update")
-	elif _impostor_update_pending and not _startup_phase and _first_playable_reached:
+	elif not tracking_frozen and _impostor_update_pending and not _startup_phase and _first_playable_reached:
 		# Deferred impostor update — runs on the frame AFTER cell change
 		# Prevents impostor scan (170ms+ initial) from stacking with cell load/unload
 		var impostors_on := _impostor_streaming_enabled()
@@ -1140,7 +1203,7 @@ func _process(delta: float) -> void:
 			var hlod_deadline := int(hlod_slice.get("deadline_usec", 0))
 			if _cell_manager and _cell_manager.has_method("process_async_disk_loads"):
 				_cell_manager.call("process_async_disk_loads", mini(HLOD_MODEL_WARMUP_BUDGET_USEC, maxi(0, hlod_deadline - Time.get_ticks_usec())))
-			if Time.get_ticks_usec() < hlod_deadline and _should_update_hlod():
+			if Time.get_ticks_usec() < hlod_deadline and not tracking_frozen and _should_update_hlod():
 				_hlod_merger.call("update_for_camera", _camera_cell, _camera_position, _camera_velocity_xz)
 				_hlod_needs_initial_update = false
 				_hlod_last_update_position = _camera_position
@@ -1154,7 +1217,7 @@ func _process(delta: float) -> void:
 		if prof: prof.end_section("hlod_merger")
 
 	# Update distant light manager (camera pos + time-of-day)
-	if _distant_light_manager:
+	if _distant_light_manager and not tracking_frozen:
 		if prof: prof.begin_section("distant_light_manager")
 		var light_slice := _claim_publication_slice(PUBLICATION_LANE_DISTANT_LIGHTS, DISTANT_LIGHT_PUBLICATION_BUDGET_USEC)
 		var distant_light_start := Time.get_ticks_usec()
@@ -1178,7 +1241,7 @@ func _process(delta: float) -> void:
 	# Warms ResourceLoader + dispatches Phase F prereg for cells the camera is
 	# heading toward. Skipped during startup burst so the initial ring finishes
 	# with its own aggressive budget first.
-	if not _startup_phase and _cell_preloader != null:
+	if not tracking_frozen and not _startup_phase and _cell_preloader != null:
 		if prof: prof.begin_section("cell_preloader_update")
 		_cell_preloader.update(_camera_cell, _camera_position, _camera_velocity_xz)
 		if prof: prof.end_section("cell_preloader_update")
@@ -1188,7 +1251,7 @@ func _process(delta: float) -> void:
 	var phase_start := Time.get_ticks_usec()
 	if prof:
 		prof.begin_section("unload")
-	if not _pending_unload_queue.is_empty() or not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty():
+	if not tracking_frozen and (not _pending_unload_queue.is_empty() or not _unloading_cells.is_empty() or not _pending_rs_hide_cells.is_empty() or not _pending_rs_cleanup_cells.is_empty()):
 		CrashBreadcrumb.write("nsm::unload_tick_begin", "queued=%d cells=%d hide=%d clean=%d" % [
 			_pending_unload_queue.size(), _unloading_cells.size(), _pending_rs_hide_cells.size(), _pending_rs_cleanup_cells.size()
 		])
@@ -1230,7 +1293,7 @@ func _process(delta: float) -> void:
 			# Post-startup normal: 4ms — prevents 48%-of-frame death spiral.
 			phase_start = Time.get_ticks_usec()
 			var instantiation_budget_ms: float
-			if _startup_phase or _near_burst_drain:
+			if _startup_phase or _near_burst_drain or tracking_frozen:
 				instantiation_budget_ms = 25.0
 			else:
 				instantiation_budget_ms = SC.POST_STARTUP_INSTANTIATION_BUDGET_MS
@@ -1298,13 +1361,14 @@ func _process(delta: float) -> void:
 				# fall back to source cells when no manifest provider is available.
 				phase_start = Time.get_ticks_usec()
 				if prof: prof.begin_section("pending_loads_async")
-				_process_pending_loads_async()
+				if not tracking_frozen:
+					_process_pending_loads_async()
 				if prof: prof.end_section("pending_loads_async")
 				phase_times[6] = float(Time.get_ticks_usec() - phase_start)
 
 	else:
 		# Fallback: synchronous loading (blocks frame)
-		if _near_tier_visible:
+		if _near_tier_visible and not tracking_frozen:
 			if prof: prof.begin_section("pending_loads_sync")
 			_process_pending_loads_sync(delta)
 			if prof: prof.end_section("pending_loads_sync")
@@ -1313,7 +1377,7 @@ func _process(delta: float) -> void:
 	# internally when the registry hasn't been instantiated yet (cold
 	# boot, empty world). Runs after all add/remove/transform work this
 	# frame so the packed buffer reflects the latest state.
-	if _static_renderer:
+	if _static_renderer and not tracking_frozen:
 		phase_start = Time.get_ticks_usec()
 		if prof: prof.begin_section("static_renderer_cull")
 		var vr_end: float = _static_renderer.visibility_range_end
@@ -2158,23 +2222,11 @@ func _process_pending_loads_async() -> void:
 
 
 func _process_payload_publish_steps(budget_usec: int) -> int:
-	if _cell_manager == null or budget_usec <= 0 or _async_requests.is_empty():
+	if _cell_manager == null or budget_usec <= 0:
 		return 0
-	var start_us := Time.get_ticks_usec()
-	var published := 0
-	for grid: Vector2i in _async_requests:
-		var elapsed := Time.get_ticks_usec() - start_us
-		if elapsed >= budget_usec:
-			break
-		var request_id: int = _async_requests[grid]
-		if not _cell_manager.has_method("get_async_payload"):
-			break
-		var payload: RefCounted = _cell_manager.call("get_async_payload", request_id) as RefCounted
-		if payload == null or not payload.has_method("publish_step"):
-			continue
-		var remaining_usec: int = budget_usec - elapsed
-		published += int(payload.call("publish_step", remaining_usec))
-	return published
+	if _cell_manager.has_method("process_async_payloads"):
+		return int(_cell_manager.call("process_async_payloads", budget_usec))
+	return 0
 
 
 ## Process completed async requests
@@ -2321,6 +2373,7 @@ func get_stats() -> Dictionary:
 	s["async_loading_enabled"] = async_loading_enabled
 	s["camera_cell"] = _camera_cell
 	s["camera_position"] = _camera_position
+	s["world_tracking_frozen"] = _world_tracking_frozen
 	s["frame_budget_ms"] = frame_budget_ms
 	s["frame_total_ms"] = _last_frame_total_ms
 	s["startup_phase"] = _startup_phase

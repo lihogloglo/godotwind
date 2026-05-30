@@ -346,21 +346,21 @@ func _on_show_ocean_toggled(enabled: bool) -> void:
 			_initialize_ocean()
 
 		# Enable ocean rendering
-		if OceanManager.is_system_enabled():
-			OceanManager.set_enabled(true)
-			_log("Ocean: ON (mode: %s)" % OceanManager.get_water_quality_name())
+		if WaterSystem.is_system_enabled():
+			WaterSystem.set_enabled(true)
+			_log("Ocean: ON (mode: %s)" % WaterSystem.get_water_quality_name())
 		else:
 			_log("[color=yellow]Ocean: Failed to enable[/color]")
 	else:
 		# Disable ocean rendering
-		if OceanManager.is_system_enabled():
-			OceanManager.set_enabled(false)
+		if WaterSystem.is_system_enabled():
+			WaterSystem.set_enabled(false)
 		_log("Ocean: OFF")
 
 	_update_stats()
 
 
-## Initialize OceanManager for La Palma (sea level at 2m, flat mode)
+## Initialize WaterSystem for La Palma (sea level at 2m, flat mode)
 func _initialize_ocean() -> void:
 	if _ocean_initialized:
 		return
@@ -368,24 +368,24 @@ func _initialize_ocean() -> void:
 	_log("Initializing Ocean system (flat mode)...")
 
 	# Configure ocean for La Palma's extended view distance
-	OceanManager.ocean_radius = OCEAN_RADIUS
-	OceanManager.sea_level = 10.0  # Sea level at 10 meters altitude
+	WaterSystem.ocean_radius = OCEAN_RADIUS
+	WaterSystem.sea_level = 10.0  # Sea level at 10 meters altitude
 
 	# Force FLAT quality mode (0 = flat) before initialization
-	OceanManager.water_quality = 0
+	WaterSystem.water_quality = 0
 
 	# Force initialize (since ocean is disabled by default in project settings)
-	OceanManager.force_initialize()
+	WaterSystem.force_initialize()
 
 	# Ensure FLAT mode is set after initialization
-	OceanManager.set_water_quality(0)  # 0 = FLAT
+	WaterSystem.set_water_quality(0)  # 0 = FLAT
 
 	# Set the terrain for shore mask generation
 	if terrain_3d:
-		OceanManager.set_terrain(terrain_3d)
+		WaterSystem.set_terrain(terrain_3d)
 
 	# Set the camera
-	OceanManager.set_camera(camera)
+	WaterSystem.set_camera(camera)
 
 	_ocean_initialized = true
 	_log("Ocean initialized: FLAT mode, sea_level=10m, radius=%.0fkm" % (OCEAN_RADIUS / 1000.0))
@@ -590,8 +590,8 @@ func _update_stats() -> void:
 
 	# Get ocean info
 	var ocean_str := "OFF"
-	if _show_ocean and OceanManager.is_system_enabled():
-		ocean_str = "ON (%s)" % OceanManager.get_water_quality_name()
+	if _show_ocean and WaterSystem.is_system_enabled():
+		ocean_str = "ON (%s)" % WaterSystem.get_water_quality_name()
 
 	stats_text.text = """[b]Performance[/b]
 FPS: [color=%s]%.1f[/color] (%.2f ms)

@@ -60,7 +60,7 @@ uniform float shore_wave_amplitude : hint_range(0.0, 3.0) = 0.5;
 // Waves per meter of shore distance — 0.1 = 10m wavelength, 0.05 = 20m.
 // Must be low enough that wavelength exceeds clipmap vertex spacing (~2-4m inner rings).
 uniform float shore_wave_frequency : hint_range(0.02, 0.5) = 0.1;
-// Temporal frequency in cycles/sec. OceanManager derives this from the same
+// Temporal frequency in cycles/sec. WaterSystem derives this from the same
 // gravity-wave dispersion relation used by the FFT compute shader.
 uniform float shore_wave_speed : hint_range(0.1, 5.0) = 0.4;
 uniform float shore_wave_steepness : hint_range(0.0, 1.0) = 0.58;
@@ -102,7 +102,7 @@ uniform float refraction_edge_guard_strength : hint_range(0.0, 1.0) = 0.0;
 // Diagnostic-only edge threshold for submerged-object silhouette/disocclusion
 // checks. Normal rendering does not use this until the debug views prove it.
 uniform float refraction_depth_edge_threshold : hint_range(0.05, 5.0) = 0.75;
-// World-space Y of the undisplaced water surface. Set by OceanManager when the
+// World-space Y of the undisplaced water surface. Set by WaterSystem when the
 // material is initialized; default 0 works for sea-level-at-origin scenes.
 uniform float sea_level = 0.0;
 
@@ -123,13 +123,13 @@ group_uniforms visual;
 uniform float roughness : hint_range(0.0, 1.0) = 0.02;
 uniform float normal_strength : hint_range(0.0, 2.0) = 1.0;
 uniform float wave_scale : hint_range(0.0, 3.0) = 1.0;
-// Shared clock driven by OceanManager. Keep ocean surface animation and
+// Shared clock driven by WaterSystem. Keep ocean surface animation and
 // compositor classifiers on one time source instead of mixing shader TIME with
 // GDScript wall-clock samples.
 uniform float ocean_time = 0.0;
 
 // Debug visualization — cycles through views of the fragment-shader
-// intermediate state. 0 = normal render. Set via `OceanManager.set_debug_mode(int)`.
+// intermediate state. 0 = normal render. Set via `WaterSystem.set_debug_mode(int)`.
 //   0 = Normal (production)
 //   1 = Shore depth (R=thin/near shore, G=deep)
 //   2 = Shore intersection zone (red = ocean behind terrain)
@@ -170,10 +170,10 @@ uniform int debug_mode : hint_range(0, 20) = 0;
 group_uniforms sss;
 // Colour the scatter picks up at wave peaks — default is light aquamarine to
 // match thin-water appearance (sun passing through 10-20cm of water over a
-// crest). Weather-driven via OceanManager (calm = brighter, storm = darker).
+// crest). Weather-driven via WaterSystem (calm = brighter, storm = darker).
 uniform vec3 color_sub_surface : source_color = vec3(0.28, 0.62, 0.48);
 // Master scatter strength — 0 disables, 1 is reference, >1 boosts. Kept uniform
-// name `sss_strength` for compatibility with existing OceanManager weather hooks.
+// name `sss_strength` for compatibility with existing WaterSystem weather hooks.
 uniform float sss_strength : hint_range(0.0, 3.0) = 0.9;
 uniform float sss_emission_strength : hint_range(0.0, 2.0) = 0.45;
 // Choppiness thresholds for the peak mask. Min = ignored noise floor, max =
@@ -182,7 +182,7 @@ uniform float sss_emission_strength : hint_range(0.0, 2.0) = 0.45;
 uniform float scatter_choppiness_min : hint_range(0.0, 2.0) = 0.28;
 uniform float scatter_choppiness_max : hint_range(0.1, 3.0) = 0.75;
 // Sun direction in WORLD space (pointing FROM sun TO world). Set per-frame by
-// OceanManager from the scene's DirectionalLight3D. Default (down) = noon.
+// WaterSystem from the scene's DirectionalLight3D. Default (down) = noon.
 uniform vec3 sun_dir_world = vec3(0.0, -1.0, 0.0);
 
 // Varyings — populated by vertex() in each .gdshader, read by fragment() here.

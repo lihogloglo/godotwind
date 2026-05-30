@@ -336,7 +336,7 @@ func _update_camera(delta: float) -> void:
 func _update_hud() -> void:
 	if _hud == null or _camera == null:
 		return
-	var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	var state: WaterSurfaceState = WaterSystem.get_water_surface_state()
 	var query := state.sample_surface_query(_camera.global_position) if state != null else {}
 	_hud.text = "camera water: body=%s coverage=%.2f depth=%.2f\nobjects: 3 BuoyancyBody3D crates with CollisionShape3D + 4 probes each\nwater volumes: Area3D detection + registry queries + ripple renderer sync\nmouse: %s | right-click toggles capture" % [
 		str(query.get("water_body_id", WaterSurfaceState.WATER_BODY_NONE)),

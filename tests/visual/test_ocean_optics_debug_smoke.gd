@@ -8,8 +8,8 @@ extends "res://tests/visual/test_ocean_lab.gd"
 
 func _ready() -> void:
 	super._ready()
-	if OceanManager == null:
-		push_error("[Ocean Optics Smoke] OceanManager missing")
+	if WaterSystem == null:
+		push_error("[Ocean Optics Smoke] WaterSystem missing")
 		get_tree().quit(1)
 		return
 
@@ -65,7 +65,7 @@ func _ready() -> void:
 	if surface_snapshot.is_empty():
 		return
 	for expected_mode in [OceanMesh.MeshMode.PROJECTED, OceanMesh.MeshMode.CLIPMAP]:
-		if OceanManager.get_mesh_mode() != expected_mode:
+		if WaterSystem.get_mesh_mode() != expected_mode:
 			_toggle_mesh_mode()
 			await _wait_frames(12)
 		surface_snapshot = _assert_surface_refraction_ready("projected" if expected_mode == OceanMesh.MeshMode.PROJECTED else "clipmap")
@@ -139,12 +139,12 @@ func _ready() -> void:
 		return
 
 	_debug_mode = 8
-	OceanManager.set_debug_mode(_debug_mode)
+	WaterSystem.set_debug_mode(_debug_mode)
 	await _wait_frames(4)
 
 	for mode in [13, 14, 15, 16, 17, 18]:
 		_debug_mode = mode
-		OceanManager.set_debug_mode(_debug_mode)
+		WaterSystem.set_debug_mode(_debug_mode)
 		await _wait_frames(2)
 
 	if _camera != null:

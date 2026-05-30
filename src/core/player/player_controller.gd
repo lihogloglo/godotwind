@@ -880,18 +880,18 @@ func _find_nearest_poi() -> Vector3:
 # =============================================================================
 
 ## Check ocean/water height at player position each frame.
-## Uses OceanManager's unified water surface. Legacy WaterVolume callbacks remain
+## Uses WaterSystem's unified water surface. Legacy WaterVolume callbacks remain
 ## as a compatibility fallback for old scenes that have not registered bodies.
 func _update_water_state() -> void:
 	var pos := global_position
 	var queried_surface_y := -INF
 
-	if OceanManager != null and OceanManager.has_method("get_water_surface_state"):
-		var state: WaterSurfaceState = OceanManager.get_water_surface_state()
+	if WaterSystem != null and WaterSystem.has_method("get_water_surface_state"):
+		var state: WaterSurfaceState = WaterSystem.get_water_surface_state()
 		if state != null and state.can_sample_height():
 			queried_surface_y = state.sample_height(pos, -INF)
-	elif OceanManager != null and OceanManager.is_system_enabled():
-		queried_surface_y = OceanManager.get_wave_height(pos)
+	elif WaterSystem != null and WaterSystem.is_system_enabled():
+		queried_surface_y = WaterSystem.get_wave_height(pos)
 
 	if _in_water_volume and _water_volume_surface_y > queried_surface_y:
 		_water_surface_y = _water_volume_surface_y

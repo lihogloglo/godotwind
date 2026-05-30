@@ -259,9 +259,9 @@ func _push_params_to_effect(effect: PostProcessEffect) -> void:
 
 
 func _get_water_state() -> WaterSurfaceState:
-	if not is_inside_tree() or not get_tree().root.has_node("OceanManager"):
+	if not is_inside_tree() or not get_tree().root.has_node("WaterSystem"):
 		return null
-	var ocean_manager := get_tree().root.get_node("OceanManager")
+	var ocean_manager := get_tree().root.get_node("WaterSystem")
 	if ocean_manager.has_method("get_water_surface_state"):
 		var state: Variant = ocean_manager.call("get_water_surface_state")
 		if state is WaterSurfaceState:

@@ -20,7 +20,6 @@ wave_speed = 1.5
 flow_direction = Vector2(0, 1)
 flow_speed = 2.0
 enable_swimming = true
-enable_buoyancy = true
 current_strength = 1.5
 
 [node name="DirectionalLight3D" type="DirectionalLight3D" parent="."]

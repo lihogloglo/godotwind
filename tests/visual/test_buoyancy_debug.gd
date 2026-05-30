@@ -1,6 +1,6 @@
 ## Buoyancy debug test scene — visualize CPU wave sample vs shader mesh.
 ##
-## Interactive diagnostic for the `OceanManager.get_wave_height()` CPU
+## Interactive diagnostic for the `WaterSystem.get_wave_height()` CPU
 ## sampler. Renders a 40×40 grid of magenta markers at the heights the
 ## sampler returns, centered on the active camera and updated every
 ## frame. A/B directly against the visible FFT ocean mesh: the markers
@@ -29,7 +29,7 @@ const WeatherTypesScript := preload("res://src/core/weather/weather_types.gd")
 const BUOY_DEBUG_GRID: int = 40         # 40×40 = 1600 markers
 const BUOY_DEBUG_SPACING: float = 1.0   # 1m between markers → 40m grid
 
-# Weather presets (MW wind range is 0.0-0.9, we lerp inside OceanManager)
+# Weather presets (MW wind range is 0.0-0.9, we lerp inside WaterSystem)
 # Index order: 1=Calm, 2=Breeze, 3=Moderate, 4=Storm, 5=Blizzard
 const WEATHER_PRESETS: Array = [
 	{"name": "Calm",     "wind": 0.1},
@@ -80,12 +80,12 @@ func _ready() -> void:
 	# makes `sample_shore` return 1.0 everywhere → ocean renders.
 	# Also write the quality into ProjectSettings BEFORE init because
 	# `_deferred_init` overwrites `water_quality` from the setting.
-	if OceanManager:
+	if WaterSystem:
 		ProjectSettings.set_setting("ocean/quality", 1)  # HIGH = FFT
-		OceanManager.use_prebaked_shore_mask = false
-		if not OceanManager.is_initialized():
-			OceanManager.force_initialize()
-		OceanManager.set_enabled(true)
+		WaterSystem.use_prebaked_shore_mask = false
+		if not WaterSystem.is_initialized():
+			WaterSystem.force_initialize()
+		WaterSystem.set_enabled(true)
 
 	_build_debug_mesh()
 	_build_ui()
@@ -129,11 +129,11 @@ func _unhandled_input(event: InputEvent) -> void:
 ## rebuild. Use for A/B comparison between the two vertex paths on the
 ## same weather / sun state.
 func _toggle_mesh_mode() -> void:
-	if OceanManager == null or not OceanManager.has_method("rebuild_mesh_with_mode"):
+	if WaterSystem == null or not WaterSystem.has_method("rebuild_mesh_with_mode"):
 		return
-	var current: int = OceanManager.get_mesh_mode()
+	var current: int = WaterSystem.get_mesh_mode()
 	var next: int = 1 if current == 0 else 0
-	OceanManager.rebuild_mesh_with_mode(next)
+	WaterSystem.rebuild_mesh_with_mode(next)
 	Log.info("water", "[buoyancy-debug] mesh mode → %s" %
 		("PROJECTED" if next == 1 else "CLIPMAP"))
 
@@ -165,8 +165,8 @@ func _toggle_sun_angle() -> void:
 
 func _cycle_debug_mode() -> void:
 	_debug_mode = (_debug_mode + 1) % DEBUG_MODE_NAMES.size()
-	if OceanManager and OceanManager.has_method("set_debug_mode"):
-		OceanManager.set_debug_mode(_debug_mode)
+	if WaterSystem and WaterSystem.has_method("set_debug_mode"):
+		WaterSystem.set_debug_mode(_debug_mode)
 	Log.info("water", "[buoyancy-debug] debug_mode %d = %s" %
 		[_debug_mode, DEBUG_MODE_NAMES[_debug_mode]])
 
@@ -333,7 +333,7 @@ func _build_debug_mesh() -> void:
 func _update_debug_mesh() -> void:
 	if _debug_mmi == null or _fly_camera == null:
 		return
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 
 	var cam_xz := Vector2(_fly_camera.global_position.x, _fly_camera.global_position.z)
@@ -349,7 +349,7 @@ func _update_debug_mesh() -> void:
 		for ix in BUOY_DEBUG_GRID:
 			var wx: float = origin_x + float(ix) * BUOY_DEBUG_SPACING
 			var sample_pos := Vector3(wx, 0.0, wz)
-			var wy: float = OceanManager.get_wave_height(sample_pos)
+			var wy: float = WaterSystem.get_wave_height(sample_pos)
 			xf.origin = Vector3(wx, wy, wz)
 			mm.set_instance_transform(idx, xf)
 			idx += 1
@@ -391,14 +391,14 @@ func _build_ui() -> void:
 
 
 func _update_weather_label() -> void:
-	if _weather_label == null or not OceanManager:
+	if _weather_label == null or not WaterSystem:
 		return
-	if not OceanManager.is_initialized():
-		_weather_label.text = "OceanManager not initialized"
+	if not WaterSystem.is_initialized():
+		_weather_label.text = "WaterSystem not initialized"
 		return
 	# Surface some of the cascade state the buoyancy CPU path actually
 	# reads so we can correlate visible differences with the numbers.
-	var cascades: Array = OceanManager._cascade_parameters
+	var cascades: Array = WaterSystem._cascade_parameters
 	if cascades.is_empty():
 		_weather_label.text = "no cascades"
 		return
@@ -406,7 +406,7 @@ func _update_weather_label() -> void:
 	var lines: Array[String] = [
 		"PRESET %d — %s (mw_wind=%.2f)" % [_current_preset + 1, preset.name, preset.wind],
 		"DEBUG %d — %s" % [_debug_mode, DEBUG_MODE_NAMES[_debug_mode]],
-		"wave_scale=%.2f" % OceanManager.wave_scale,
+		"wave_scale=%.2f" % WaterSystem.wave_scale,
 	]
 	for i in cascades.size():
 		var c = cascades[i]
@@ -415,7 +415,7 @@ func _update_weather_label() -> void:
 	_weather_label.text = "\n".join(lines)
 
 
-## Build a fake `WeatherResult` carrying just the fields `OceanManager`
+## Build a fake `WeatherResult` carrying just the fields `WaterSystem`
 ## reads and push it through `apply_weather`. This mirrors the runtime
 ## path used by the main scene's weather system — we drive the same
 ## `_apply_weather_fft` entry point so the test state exactly matches
@@ -423,7 +423,7 @@ func _update_weather_label() -> void:
 func _apply_weather_preset(idx: int) -> void:
 	if idx < 0 or idx >= WEATHER_PRESETS.size():
 		return
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
 	_current_preset = idx
 	var preset: Dictionary = WEATHER_PRESETS[idx]
@@ -435,7 +435,7 @@ func _apply_weather_preset(idx: int) -> void:
 	result.storm_direction = Vector3(sin(wind_rad), 0, cos(wind_rad))
 	# cloud_coverage drives water-color darkening; set roughly to match.
 	result.cloud_coverage = preset.wind
-	OceanManager.apply_weather(result)
+	WaterSystem.apply_weather(result)
 	Log.info("water", "[buoyancy-debug] preset %d = %s (mw_wind=%.2f)" %
 		[idx + 1, preset.name, preset.wind])
 	# Dump per-cascade sample diagnostics for this preset — helps
@@ -450,15 +450,15 @@ func _apply_weather_preset(idx: int) -> void:
 ## the CPU buoyancy sampler against the visible shader mesh when
 ## they disagree — the log output is the canonical breakdown.
 func _dump_cpu_sampler_state(world_pos: Vector3) -> void:
-	if not OceanManager or not OceanManager.is_initialized():
+	if not WaterSystem or not WaterSystem.is_initialized():
 		return
-	var cascades: Array = OceanManager._cascade_parameters
-	var bufs: Array = OceanManager._displacement_cpu_per_cascade
+	var cascades: Array = WaterSystem._cascade_parameters
+	var bufs: Array = WaterSystem._displacement_cpu_per_cascade
 	Log.info("water", "[buoyancy-debug] ======== SAMPLER DUMP @ %s ========" % world_pos)
 	Log.info("water", "[buoyancy-debug] shore_factor=%.3f wave_scale=%.3f sea_level=%.2f" % [
-		OceanManager._get_shore_factor(world_pos),
-		OceanManager.wave_scale,
-		OceanManager.sea_level,
+		WaterSystem._get_shore_factor(world_pos),
+		WaterSystem.wave_scale,
+		WaterSystem.sea_level,
 	])
 	Log.info("water", "[buoyancy-debug] cascades_params=%d bufs=%d" % [cascades.size(), bufs.size()])
 	var total_y: float = 0.0
@@ -467,15 +467,15 @@ func _dump_cpu_sampler_state(world_pos: Vector3) -> void:
 		var buf_size: int = bufs[i].size() if i < bufs.size() else 0
 		var raw := Vector3.ZERO
 		if i < bufs.size() and bufs[i].size() > 0:
-			raw = OceanManager._sample_displacement_readback_cascade(world_pos, bufs[i], c.tile_length)
+			raw = WaterSystem._sample_displacement_readback_cascade(world_pos, bufs[i], c.tile_length)
 		var scaled_y: float = raw.y * c.displacement_scale
 		total_y += scaled_y
 		Log.info("water", "[buoyancy-debug] c%d tile=%.0f disp_scale=%.3f wind=%.1f  buf_bytes=%d  raw.y=%.4f  scaled.y=%.4f" % [
 			i, c.tile_length.x, c.displacement_scale, c.wind_speed,
 			buf_size, raw.y, scaled_y,
 		])
-	var final_y: float = OceanManager.sea_level + total_y * OceanManager._get_shore_factor(world_pos) * OceanManager.wave_scale
-	var reported: float = OceanManager.get_wave_height(world_pos)
+	var final_y: float = WaterSystem.sea_level + total_y * WaterSystem._get_shore_factor(world_pos) * WaterSystem.wave_scale
+	var reported: float = WaterSystem.get_wave_height(world_pos)
 	Log.info("water", "[buoyancy-debug] expected_final_y=%.4f  get_wave_height()=%.4f  delta=%.4f" % [
 		final_y, reported, absf(final_y - reported),
 	])

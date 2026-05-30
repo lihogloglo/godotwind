@@ -1,11 +1,16 @@
 # Interior Transitions & Stencil Portal System
 
-## Status (2026-04-18)
+## Status (2026-05-30)
 
 - **Async load pipeline shipped 2026-04-06.** `InteriorPocketManager._load_pocket()` routes through `CellManager.request_cell_async(cell_name, LoadProfile.interior_pocket())` and drains the result over 1–2 frames via `_update_async_loads()` + `_update_pocket_finish_up()`. A fade-to-black bridge handles the case where the player rushes a door faster than the load completes. Real-renderer peaks verified at ≤ ~6 ms on NORMAL path (Seyda Neen 268-ref Census and Excise Office), ~10 ms on first-visit shader warm-up, ~12 ms on BRIDGE path.
-- **Classic mode is the default.** ENTER near a door → fade-to-black → teleport to the interior pocket.
+- **Classic mode is the default and wired in the main scene.** Raycast door activation emits a placed-door `instance_key`, `world_explorer.gd` resolves that key through `InteriorPocketManager`, then routes exterior→interior, interior→exterior, and interior→interior through the same fade/priority/wait bridge.
+- **World streaming freezes tracking, not processing.** `NativeStreamingManager.set_world_tracking_frozen()` keeps the exterior anchor stable while the camera is inside a pocket, but async completions and `CellManager.process_async_instantiation()` keep draining so rushed door activation cannot starve an in-flight pocket load.
 - **Seamless mode is experimental** and gated behind `InteriorPocketManager.seamless_enabled`. Walk-through with stencil portal preview. Has known depth-sorting, lighting, and building-hide issues (see Known Issues below).
 - **Test scene:** `tests/visual/test_interior_transition.tscn` (F5 toggle classic/seamless, E activate, TAB cycle doors, frametime readout per transition).
+- **Main-scene smoke:** launch `scenes/Godotwind.tscn -- --interior-door-smoke`
+  to activate a registered travel door, wait for the active pocket, activate an
+  exit door, and verify exterior tracking unfreezes. Add
+  `--interior-door-smoke-rush` to skip the preload wait and exercise the bridge.
 
 ---
 
@@ -18,6 +23,18 @@ Interior transitions are encoded in ESM door references:
 - `DNAM` subrecord: destination cell name (string for interiors, grid coords for exteriors)
 - Interior cells have their own `water_height`, `ambient_color`, `sunlight_color`, `fog_color`, `fog_density`
 - `is_quasi_exterior()` flag: some interiors share exterior sky/weather (e.g., Vivec plazas)
+
+### Placed-Door Identity
+
+Gameplay uses a placed-reference key, not the base DOOR record id:
+
+- Exterior: `ext:x,y:<base_ref_id_lower>:<ref_num>`
+- Interior: `int:<cell_name_lower>:<base_ref_id_lower>:<ref_num>`
+
+`ref_id` / `base_ref_id` still identify the base door mesh and record. `ref_num`
+distinguishes multiple placed references that share that same base record. Main-scene
+activation, duplicate checks, portal tracking, preload tracking, and active-door maps
+use `DoorInfo.instance_key`.
 
 ### Morrowind-Specific Challenges
 
@@ -236,12 +253,12 @@ load completes.
   - **Fast path:** if the player is within
     `INTERACT_RADIUS * FAST_PATH_RADIUS_MULT (=2.0)` of the door at completion,
     F0+F1 run synchronously on the same frame.
-- **Fade-to-black bridge** (`enter_interior`): if the slot is still loading when E
-  is pressed:
+- **Fade-to-black bridge** (`_prepare_target_pocket_for_transition`): if the slot is still loading when E
+  is pressed (exterior→interior or interior→interior):
   1. Set `_is_transitioning=true`, emit `transition_started`
   2. Boost via `set_request_priority(rid, true)` + `force_queue_resort()`
   3. `await _fade(0, 1, FADE_DURATION)` — 300 ms out
-  4. Poll completion with a 2.0 s hard timeout (`INTERIOR_LOAD_TIMEOUT`)
+  4. Poll completion with a generous hard timeout (`INTERIOR_LOAD_TIMEOUT`)
   5. On timeout: log error, emit `interior_load_timeout(cell_name, rid)` signal,
      `cancel_async_request`, clear slot, fade back in, return false
   6. On success: teleport + fade-in via `_do_transition`
@@ -257,6 +274,12 @@ load completes.
   `CellManager.process_async_instantiation(4.0, camera_pos, camera_fwd)` every
   frame. Without this, the async pipeline's main-thread drain never runs in the
   test scene (main scene gets it from NativeStreamingManager).
+- **Main-scene freeze mode** — `world_explorer.gd` calls
+  `NativeStreamingManager.set_world_tracking_frozen(true, anchor_position)` before
+  entering an interior and unfreezes only after a real exterior exit or failed enter.
+  While frozen, the manager skips camera-cell updates, exterior load requests,
+  unload ticks, preloader ticks, and distant-tier camera tracking. It keeps async
+  completions and cell instantiation processing alive.
 
 ---
 
@@ -373,15 +396,10 @@ a separate depth layer).
 
 Tracked here (`docs/FUTURE_STEPS.md` no longer exists — consolidated into per-system docs).
 
-1. **`NativeStreamingManager.pause()/resume()` wiring in `world_explorer.gd`** — the
-   test scene doesn't run the streaming manager so the fix couldn't be validated
-   there, but the main scene does. When
-   `InteriorPocketManager.transition_started` fires, the streaming manager should
-   stop accepting new exterior cell requests (keep draining the existing queue —
-   the priority lane already routes interior entries first) and resume on
-   `transition_completed` or `interior_load_timeout`. The pause API already exists
-   at `world_explorer.gd:~1855` — just needs signal connections in
-   `_setup_pocket_manager()`.
+1. **Streaming freeze regression coverage** — main-scene travel now uses
+   `NativeStreamingManager.set_world_tracking_frozen()` instead of a hard process
+   pause. Keep the `--interior-door-smoke` and `--interior-door-smoke-rush` paths
+   current so regressions in frozen async draining are caught before manual QA.
 2. **MW adapter extraction (`DoorDescriptor` + `WorldDataProvider`)** —
    `InteriorPocketManager` still imports ESM types directly, holds
    `BUILDING_PATTERNS`/`NON_SEAMLESS_PATTERNS` MW STAT prefixes, reads

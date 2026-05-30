@@ -254,7 +254,7 @@ func _create_stencil_plane() -> void:
 	# Door AABB has 3 dimensions: thickness (thinnest), width, height.
 	# The two largest are the door opening size.
 	var portal_size := Vector2(DEFAULT_PORTAL_WIDTH, DEFAULT_PORTAL_HEIGHT)
-	var door_mesh: MeshInstance3D = DoorUtils.find_door_mesh(_scene_root, _door_info.ref_id, _door_exterior_pos, 10.0)
+	var door_mesh: MeshInstance3D = DoorUtils.find_door_mesh(_scene_root, _door_info.ref_id, _door_exterior_pos, 10.0, _door_info.ref_num)
 	if door_mesh and door_mesh.mesh:
 		var aabb: AABB = door_mesh.mesh.get_aabb()
 		var sizes: Array[float] = [aabb.size.x, aabb.size.y, aabb.size.z]
@@ -443,7 +443,7 @@ func _compute_alignment_rotation(pocket_slot: Variant, exit_door: Variant, door_
 
 	# 1. Compute exterior door outward direction from mesh geometry
 	var ext_door_mesh: MeshInstance3D = DoorUtils.find_door_mesh(
-		_scene_root, door_info.ref_id, _door_exterior_pos, 10.0)
+		_scene_root, door_info.ref_id, _door_exterior_pos, 10.0, door_info.ref_num)
 	var ext_basis: Basis = DoorUtils.compute_door_basis(
 		_door_exterior_basis, ext_door_mesh, _main_camera, _door_exterior_pos)
 	exterior_forward = -ext_basis.z  # -Z is outward from wall
@@ -470,7 +470,7 @@ func _compute_alignment_rotation(pocket_slot: Variant, exit_door: Variant, door_
 		var exit_esm_basis: Basis = CS.esm_rotation_to_godot_basis(exit_door.door_rotation_mw)
 		# Try mesh geometry first (most reliable when found)
 		var int_door_mesh: MeshInstance3D = DoorUtils.find_door_mesh(
-			pocket_slot.cell_node, exit_door.ref_id, exit_local_pos, 10.0)
+			pocket_slot.cell_node, exit_door.ref_id, exit_local_pos, 10.0, exit_door.ref_num)
 		var int_basis: Basis
 		if int_door_mesh:
 			int_basis = DoorUtils.compute_door_basis(exit_esm_basis, int_door_mesh, null, exit_local_pos)
@@ -519,7 +519,7 @@ func _compute_alignment_rotation(pocket_slot: Variant, exit_door: Variant, door_
 func _hide_exterior_door(door_info: Variant) -> void:
 	_hidden_exterior_door = null
 	var door_node: Node3D = DoorUtils.find_by_ref_id(
-		_scene_root, door_info.ref_id, door_info.world_position, 10.0)
+		_scene_root, door_info.ref_id, door_info.world_position, 10.0, door_info.ref_num)
 	if not door_node:
 		door_node = DoorUtils.find_near(_scene_root, door_info.world_position, 5.0)
 	if door_node and door_node.visible:

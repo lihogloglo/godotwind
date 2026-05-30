@@ -46,10 +46,10 @@ func _process(delta: float) -> void:
 func _assert_boujie_full_stack() -> bool:
 	if not _is_boujie_full_preset_active():
 		return _fail("Boujie Full preset state did not stay active")
-	if OceanManager == null or OceanManager.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
-		return _fail("OceanManager was not in Boujie shader mode")
-	if OceanManager.has_method("get_surface_shader_mode_name") and OceanManager.get_surface_shader_mode_name() != "Boujie High":
-		return _fail("OceanManager shader mode name was %s" % OceanManager.get_surface_shader_mode_name())
+	if WaterSystem == null or WaterSystem.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL:
+		return _fail("WaterSystem was not in Boujie shader mode")
+	if WaterSystem.has_method("get_surface_shader_mode_name") and WaterSystem.get_surface_shader_mode_name() != "Boujie High":
+		return _fail("WaterSystem shader mode name was %s" % WaterSystem.get_surface_shader_mode_name())
 	var mat := _get_ocean_material()
 	if mat == null or mat.shader == null or not mat.shader.resource_path.contains("ocean_boujie_experimental"):
 		return _fail("ocean material was not using a Boujie shader")
@@ -120,8 +120,8 @@ func _assert_boujie_full_restored() -> bool:
 		return _fail("Boujie Full stayed active after pressing the button again")
 	if _experimental_surface_shader_enabled:
 		return _fail("Boujie surface shader stayed enabled after Boujie Full disable")
-	if OceanManager == null or OceanManager.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.DEFAULT:
-		return _fail("OceanManager did not return to the default surface shader")
+	if WaterSystem == null or WaterSystem.get_surface_shader_mode() != OceanMesh.SurfaceShaderMode.DEFAULT:
+		return _fail("WaterSystem did not return to the default surface shader")
 	if _underwater_effect_enabled:
 		return _fail("underwater compositor request stayed enabled after Boujie Full disable")
 	if _uw_particles_enabled:
@@ -182,8 +182,8 @@ func _finish_smoke(exit_code: int) -> void:
 		_wet_effect.blend_factor = 0.0
 		_wet_effect.on_effect_removed()
 		_wet_effect = null
-	if OceanManager != null and OceanManager.has_method("release_runtime_resources"):
-		OceanManager.release_runtime_resources()
+	if WaterSystem != null and WaterSystem.has_method("release_runtime_resources"):
+		WaterSystem.release_runtime_resources()
 	_shutdown_shader_manager_effects()
 	for _i in range(6):
 		await get_tree().process_frame
