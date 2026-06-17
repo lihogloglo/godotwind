@@ -15,7 +15,7 @@ extends Node3D
 const CS := preload("res://src/core/coordinate_system.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
+const TerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
 
 var _camera: Camera3D
 var _terrain: Terrain3D

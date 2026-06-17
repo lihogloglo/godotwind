@@ -130,7 +130,7 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 		var clamped := SC.clamp_load_radius_cells(value)
 		view_distance_cells = clamped
 		view_distance_meters = int(round(SC.distant_render_end_for_load_radius_cells(clamped)))
-		load_radius_cells = SC.scene_load_radius_cells_for_view_distance_meters(view_distance_meters)
+		load_radius_cells = SC.scene_load_radius_cells_for_view_distance_meters(view_distance_meters, _cell_size_meters())
 
 ## Enable/disable distant rendering (backwards compatibility)
 ## Controls impostor rendering
@@ -589,6 +589,8 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	_cell_preloader.configure(_cell_manager.get_model_loader())
 	if _cell_preloader.has_method("set_world_object_source"):
 		_cell_preloader.call("set_world_object_source", _world_object_source)
+	if _cell_preloader.has_method("set_coordinate_mapper"):
+		_cell_preloader.call("set_coordinate_mapper", _coordinate_mapper)
 	_cell_preloader.set_debug(debug_enabled)
 
 	# Phase 2 stutter diag — see field declarations above.
@@ -619,6 +621,8 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 	# Sync debug flag
 	if _impostor_renderer:
 		_impostor_renderer.set("debug_enabled", debug_enabled)
+		if _impostor_renderer.has_method("set_coordinate_mapper"):
+			_impostor_renderer.call("set_coordinate_mapper", _coordinate_mapper)
 		# Startup burst: 15ms impostor budget while loading screen is visible
 		# Normal budget (4ms) is restored when startup phase completes
 		_impostor_renderer.set_load_budget_usec(15000.0)
@@ -766,8 +770,16 @@ func set_impostor_candidates(candidates: RefCounted) -> void:
 
 func set_coordinate_mapper(mapper: RefCounted) -> void:
 	_coordinate_mapper = mapper
+	load_radius_cells = SC.scene_load_radius_cells_for_view_distance_meters(view_distance_meters, _cell_size_meters())
+	max_load_distance = SC.scene_load_distance_cap_for_view_distance_meters(view_distance_meters, _cell_size_meters())
+	if _cell_preloader and _cell_preloader.has_method("set_coordinate_mapper"):
+		_cell_preloader.call("set_coordinate_mapper", mapper)
+	if _impostor_renderer and _impostor_renderer.has_method("set_coordinate_mapper"):
+		_impostor_renderer.call("set_coordinate_mapper", mapper)
 	if _distant_light_manager and _distant_light_manager.has_method("set_coordinate_mapper"):
 		_distant_light_manager.call("set_coordinate_mapper", mapper)
+	if _hlod_merger and _hlod_merger.has_method("set_coordinate_mapper"):
+		_hlod_merger.call("set_coordinate_mapper", mapper)
 
 
 func set_asset_provider(provider: RefCounted) -> void:
@@ -820,7 +832,7 @@ func set_view_distance_meters(distance_m: int, refresh: bool = true) -> int:
 	var clamped := SC.clamp_view_distance_meters(distance_m)
 	var changed := clamped != view_distance_meters
 	view_distance_meters = clamped
-	load_radius_cells = SC.scene_load_radius_cells_for_view_distance_meters(clamped)
+	load_radius_cells = SC.scene_load_radius_cells_for_view_distance_meters(clamped, _cell_size_meters())
 	# Do not assign the legacy `view_distance_cells` alias here. Its setter
 	# converts cells back into meters and would collapse a distant view cap
 	# (for example 1100m) down to the capped scene-cell radius (~250m).
@@ -842,7 +854,7 @@ func _apply_distant_render_distance_for_load_radius() -> void:
 
 func _apply_view_distance_cap() -> void:
 	_distant_render_end_m = float(SC.clamp_view_distance_meters(view_distance_meters))
-	max_load_distance = SC.scene_load_distance_cap_for_view_distance_meters(view_distance_meters)
+	max_load_distance = SC.scene_load_distance_cap_for_view_distance_meters(view_distance_meters, _cell_size_meters())
 	_apply_static_renderer_tier_visibility()
 	_apply_hlod_request()
 	_apply_impostor_request()
@@ -856,7 +868,7 @@ func _impostor_streaming_enabled() -> bool:
 
 
 func _distant_stream_radius_cells() -> int:
-	return SC.distant_stream_radius_cells_for_view_distance_meters(view_distance_meters, impostor_radius_cells)
+	return SC.distant_stream_radius_cells_for_view_distance_meters(view_distance_meters, impostor_radius_cells, _cell_size_meters())
 
 
 func _effective_scene_load_radius_cells() -> int:
@@ -3131,6 +3143,8 @@ func _ensure_hlod_merger() -> bool:
 	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor, _cell_manager.get_model_loader())
 	if _hlod_merger.has_method("set_world_object_source"):
 		_hlod_merger.call("set_world_object_source", _world_object_source)
+	if _hlod_merger.has_method("set_coordinate_mapper"):
+		_hlod_merger.call("set_coordinate_mapper", _coordinate_mapper)
 	if _hlod_merger.has_method("set_visual_begin_floor"):
 		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
 	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID bridge 150-%dm, HLOD visible %d-%dm, FAR starts at %dm, view cap=%dm" % [

@@ -83,20 +83,6 @@ const INTERACTION_QUERY_LAYER: int = 1 << 2   # Layer 3 ("Interactable")
 ## Fade duration for transitions
 const FADE_DURATION: float = 0.3
 
-## Interior environment tunables.
-## MW fog_density values are typically 0.8-2.0; Godot exp-height-fog density is
-## in 0.001-0.005 range. Previous 0.01 scale produced fog-walls inside. 0.003
-## matches the MW-authored feel at Godot's exp-height falloff rate. Tune by
-## flipping this const — no per-cell overrides needed.
-const INTERIOR_FOG_DENSITY_SCALE: float = 0.003
-
-## OpenMW-style minimum interior relative-luminance floor. MW AMBI data is
-## often near-black (e.g. RGB ~15,13,10). Without a floor the ambient barely
-## lights the pocket. OpenMW scales up to hit this threshold
-## (`mMinimumInteriorBrightness`). Port: `relativeLuminance = 0.2126R + 0.7152G
-## + 0.0722B`. Matches OpenMW default of 0.08.
-const MIN_INTERIOR_LUMA: float = 0.08
-
 ## Building model path patterns for seamless transition support.
 ## Matched against ESM STAT model paths to identify the building containing a door.
 ## Order: most specific first. Patterns are substring-matched (lowercase).
@@ -204,8 +190,8 @@ class PocketSlot:
 	var slot_index: int = -1
 	var cell_name: String = ""
 	var cell_node: Node3D = null
-	var cell_record: Variant = null
 	var space_handle: RefCounted = null
+	var space_info: RefCounted = null
 	var interior_environment: Environment = null
 	var is_occupied: bool = false
 	var is_loading: bool = false
@@ -235,8 +221,8 @@ class PocketSlot:
 		if cell_node and is_instance_valid(cell_node):
 			cell_node.queue_free()
 		cell_node = null
-		cell_record = null
 		space_handle = null
+		space_info = null
 		interior_environment = null
 		cell_name = ""
 		is_occupied = false
@@ -498,7 +484,7 @@ func unregister_exterior_cell_doors(cell_grid: Vector2i) -> void:
 
 ## Register doors found inside a loaded interior pocket
 func _register_interior_doors(pocket: PocketSlot) -> void:
-	if not pocket.cell_record or _transition_provider == null:
+	if _transition_provider == null or pocket == null:
 		return
 
 	pocket.doors_inside.clear()
@@ -510,7 +496,6 @@ func _register_interior_doors(pocket: PocketSlot) -> void:
 	var descriptors: Array = _transition_provider.call(
 		"get_interior_transition_portals",
 		source_space,
-		pocket.cell_record,
 		pocket.get_offset()
 	)
 	for descriptor in descriptors:
@@ -722,16 +707,17 @@ func _find_free_slot() -> PocketSlot:
 	return null
 
 
-func _get_transition_space_payload(space_handle: RefCounted) -> Variant:
+func _get_transition_space_info(space_handle: RefCounted) -> RefCounted:
 	if _transition_provider == null or space_handle == null:
 		return null
-	if not _transition_provider.has_method("get_transition_space_payload"):
+	if not _transition_provider.has_method("get_transition_space_info"):
 		return null
-	return _transition_provider.call("get_transition_space_payload", space_handle)
+	var info: Variant = _transition_provider.call("get_transition_space_info", space_handle, _exterior_environment)
+	return info as RefCounted
 
 
 func _premark_transition_portals_for_spawn(slot: PocketSlot) -> void:
-	if _transition_provider == null or slot == null or slot.cell_record == null:
+	if _transition_provider == null or slot == null:
 		return
 	if not _transition_provider.has_method("get_interior_transition_portals"):
 		return
@@ -741,7 +727,6 @@ func _premark_transition_portals_for_spawn(slot: PocketSlot) -> void:
 	_transition_provider.call(
 		"get_interior_transition_portals",
 		source_space,
-		slot.cell_record,
 		Vector3.ZERO
 	)
 
@@ -805,16 +790,16 @@ func _load_pocket(slot: PocketSlot, space_handle: RefCounted) -> void:
 
 	Log.info("streaming", "[POCKET] Loading '%s' into slot %d" % [cell_name, slot.slot_index])
 
-	var cell_record: Variant = _get_transition_space_payload(space_handle)
-	if cell_record == null:
-		Log.error("streaming", "[POCKET] Transition space payload not found: '%s'" % cell_name)
+	var space_info: RefCounted = _get_transition_space_info(space_handle)
+	if space_info == null:
+		Log.error("streaming", "[POCKET] Transition space info not found: '%s'" % cell_name)
 		slot.is_loading = false
 		slot.cell_name = ""
 		slot.space_handle = null
 		return
 
-	slot.cell_record = cell_record
-	Log.info("streaming", "[POCKET] Space payload found: '%s'" % cell_name)
+	slot.space_info = space_info
+	Log.info("streaming", "[POCKET] Space info found: '%s'" % cell_name)
 	_premark_transition_portals_for_spawn(slot)
 
 	# Validate cell_manager before accessing private members
@@ -822,7 +807,7 @@ func _load_pocket(slot: PocketSlot, space_handle: RefCounted) -> void:
 		Log.error("streaming", "[POCKET] _cell_manager is null!")
 		slot.is_loading = false
 		slot.cell_name = ""
-		slot.cell_record = null
+		slot.space_info = null
 		slot.space_handle = null
 		return
 
@@ -890,7 +875,7 @@ func _update_async_loads() -> void:
 				request_id, slot.cell_name])
 			slot.is_loading = false
 			slot.cell_name = ""
-			slot.cell_record = null
+			slot.space_info = null
 			continue
 
 		Log.info("streaming", "[POCKET] async %s: req=%d '%s' (%d children) → finish-up" % [
@@ -934,8 +919,8 @@ func _begin_pocket_finish_up(slot: PocketSlot, collapse: bool) -> void:
 		slot.cell_node, INTERIOR_RENDER_LAYERS, slot.physics_layer_mask
 	)
 
-	# F0 — Build interior environment from AMBI data
-	slot.interior_environment = _build_interior_environment(slot.space_handle, slot.cell_record)
+	# F0 — Build interior environment from transition-space info
+	slot.interior_environment = _build_interior_environment(slot.space_info)
 
 	# F0 — Register doors inside this interior
 	_register_interior_doors(slot)
@@ -1492,10 +1477,10 @@ func _seamless_enter(door: DoorInfo, slot: PocketSlot, door_forward: Vector3) ->
 
 	# 6. Exclude interior layers from sun — interior OmniLights handle illumination.
 	#    Skip for quasi-exterior cells (they share exterior sky/weather).
-	if _sun and slot.cell_record and not slot.cell_record.is_quasi_exterior():
+	if _sun and not _is_quasi_exterior_space(slot):
 		_sun.light_cull_mask = _sun_original_cull_mask & ~INTERIOR_RENDER_LAYERS
 
-	# 6b. Blend environment to interior lighting (AMBI data)
+	# 6b. Blend environment to interior lighting
 	if slot.interior_environment:
 		_blend_environment(slot.interior_environment)
 
@@ -1644,52 +1629,21 @@ func _blend_environment(target_env: Environment) -> void:
 
 #region Environment Building
 
+func _is_quasi_exterior_space(slot: PocketSlot) -> bool:
+	return slot != null and slot.space_info != null and bool(slot.space_info.get("is_quasi_exterior"))
+
+
 ## Build an Environment resource from source-neutral transition space data.
-func _build_interior_environment(space_handle: RefCounted, cell: Variant) -> Environment:
-	if _transition_provider != null and _transition_provider.has_method("build_transition_environment"):
-		var provided: Variant = _transition_provider.call(
-			"build_transition_environment",
-			space_handle,
-			cell,
-			_exterior_environment
-		)
+func _build_interior_environment(space_info: RefCounted) -> Environment:
+	if space_info != null:
+		var provided: Variant = space_info.get("environment")
 		if provided is Environment:
 			return provided
-
 	var env := Environment.new()
-
-	if cell != null and bool(cell.get("has_ambient")):
-		# Interior ambient from AMBI record, with OpenMW-style luminance floor.
-		# Port of `apps/openmw/mwrender/renderingmanager.cpp::configureAmbient`:
-		# Rec.709 relative luminance, scale up to MIN_INTERIOR_LUMA if darker.
-		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		var c: Color = cell.get("ambient_color")
-		var luma: float = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
-		if luma < MIN_INTERIOR_LUMA:
-			if luma < 0.001:
-				# Near-black: use grayscale floor (no hue to preserve).
-				env.ambient_light_color = Color(MIN_INTERIOR_LUMA, MIN_INTERIOR_LUMA, MIN_INTERIOR_LUMA)
-			else:
-				# Preserve AMBI hue, scale RGB to hit the luma floor.
-				env.ambient_light_color = c * (MIN_INTERIOR_LUMA / luma)
-		else:
-			env.ambient_light_color = c
-		env.ambient_light_energy = 0.8
-
-		# Fog from AMBI
-		var fog_density := float(cell.get("fog_density"))
-		if fog_density > 0.001:
-			env.fog_enabled = true
-			env.fog_light_color = cell.get("fog_color")
-			env.fog_density = fog_density * INTERIOR_FOG_DENSITY_SCALE
-	else:
-		# Default interior: dim ambient, no fog
-		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		env.ambient_light_color = Color(0.15, 0.13, 0.11)
-		env.ambient_light_energy = 0.5
-
-	# No sky for interiors (unless quasi-exterior)
-	if cell != null and cell.has_method("is_quasi_exterior") and bool(cell.call("is_quasi_exterior")):
+	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
+	env.ambient_light_color = Color(0.15, 0.13, 0.11)
+	env.ambient_light_energy = 0.5
+	if space_info != null and bool(space_info.get("is_quasi_exterior")):
 		env.background_mode = Environment.BG_SKY
 		if _exterior_environment:
 			env.sky = _exterior_environment.sky
@@ -2512,7 +2466,7 @@ func _activate_portal(door: DoorInfo) -> void:
 
 	# Exclude interior layers from sun during portal — prevents sun from lighting
 	# interior geometry visible through the stencil (same as Fix 1 for seamless mode)
-	if _sun and is_instance_valid(_sun) and slot.cell_record and not slot.cell_record.is_quasi_exterior():
+	if _sun and is_instance_valid(_sun) and not _is_quasi_exterior_space(slot):
 		_sun.light_cull_mask = _sun_original_cull_mask & ~INTERIOR_RENDER_LAYERS
 
 

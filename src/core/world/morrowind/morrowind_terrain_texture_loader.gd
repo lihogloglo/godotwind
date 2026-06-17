@@ -27,7 +27,7 @@
 ##
 ## When next-gen texture packs are installed, they will be automatically
 ## loaded if they follow these naming conventions.
-class_name TerrainTextureLoader
+class_name MorrowindTerrainTextureLoader
 extends RefCounted
 
 const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")

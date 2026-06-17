@@ -4,6 +4,7 @@ const DoorInteractableScript := preload("res://src/core/interaction/morrowind/do
 const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const MorrowindTransitionProviderScript := preload("res://src/core/world/morrowind/morrowind_transition_provider.gd")
+const WorldSpaceHandleScript := preload("res://src/core/world/transition/world_space_handle.gd")
 
 
 class FakeCell:
@@ -15,12 +16,13 @@ class FakeCell:
 	var ambient_color: Color = Color.BLACK
 	var fog_color: Color = Color.BLACK
 	var fog_density: float = 0.0
+	var quasi_exterior: bool = false
 
 	func is_interior() -> bool:
 		return interior
 
 	func is_quasi_exterior() -> bool:
-		return false
+		return quasi_exterior
 
 
 class FakeRef:
@@ -176,6 +178,30 @@ func test_morrowind_transition_provider_emits_source_neutral_portal_descriptors(
 	assert_str(str(door_ref.get_meta("transition_portal_key"))).is_equal("ext:-2,-9:ex_common_door:42")
 
 
+func test_morrowind_transition_provider_returns_source_neutral_space_info() -> void:
+	var object_source := FakeObjectSource.new()
+	var interior := FakeCell.new()
+	interior.name = "Seyda Neen, Arrille's Tradehouse"
+	interior.interior = true
+	interior.has_ambient = true
+	interior.ambient_color = Color(0.02, 0.015, 0.01)
+	interior.quasi_exterior = true
+	object_source.cells[interior.name] = interior
+
+	var provider: Variant = MorrowindTransitionProviderScript.new()
+	provider.configure(object_source)
+
+	var info: RefCounted = provider.get_transition_space_info(
+		WorldSpaceHandleScript.interior(interior.name),
+		Environment.new()
+	)
+
+	assert_object(info).is_not_null()
+	assert_str(info.get("display_name")).is_equal(interior.name)
+	assert_bool(info.get("is_quasi_exterior")).is_true()
+	assert_object(info.get("environment")).is_instanceof(Environment)
+
+
 func test_pocket_manager_registers_provider_descriptors_by_instance_key() -> void:
 	var manager: Variant = InteriorPocketManagerScript.new()
 	var object_source := FakeObjectSource.new()
@@ -213,6 +239,7 @@ func test_pocket_manager_registers_interior_exit_doors_after_completion() -> voi
 	var interior := FakeCell.new()
 	interior.name = "Seyda Neen, Arrille's Tradehouse"
 	interior.interior = true
+	object_source.cells[interior.name] = interior
 	var exit_ref := FakeRef.new()
 	exit_ref.ref_id = &"ex_common_door_01"
 	exit_ref.ref_num = 202
@@ -223,7 +250,6 @@ func test_pocket_manager_registers_interior_exit_doors_after_completion() -> voi
 
 	var pocket: Variant = InteriorPocketManagerScript.PocketSlot.new()
 	pocket.cell_name = interior.name
-	pocket.cell_record = interior
 	pocket.space_handle = preload("res://src/core/world/transition/world_space_handle.gd").interior(interior.name)
 	pocket.cell_node = Node3D.new()
 

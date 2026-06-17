@@ -258,6 +258,7 @@ var _prev_impostor_center: Vector2i = Vector2i(999999, 999999)
 var _prev_impostor_radius: int = -1
 var _hlod_covered_object_ids: Dictionary = {}
 var _world_object_source: RefCounted = null
+var _coordinate_mapper: RefCounted = null
 var _fast_cleanup_done: bool = false
 
 #endregion
@@ -659,6 +660,31 @@ func set_hlod_covered_object_ids(covered_object_ids: Dictionary) -> void:
 
 func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
+
+
+func set_coordinate_mapper(mapper: RefCounted) -> void:
+	_coordinate_mapper = mapper
+
+
+func _cell_size_meters() -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("get_cell_size_meters"):
+		return float(_coordinate_mapper.call("get_cell_size_meters"))
+	return DU.CELL_SIZE_METERS
+
+
+func _cell_distance_squared(cell_a: Vector2i, cell_b: Vector2i) -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_distance_squared"):
+		return float(_coordinate_mapper.call("cell_distance_squared", cell_a, cell_b))
+	return DU.cell_distance_squared(cell_a, cell_b)
+
+
+func _cell_to_world_center(cell: Vector2i, y: float = 0.0) -> Vector3:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_to_world_center"):
+		var mapped: Variant = _coordinate_mapper.call("cell_to_world_center", cell, y)
+		if mapped is Vector3:
+			return mapped
+	return DU.cell_to_world_center(cell, y)
+
 
 #endregion
 
@@ -1485,8 +1511,9 @@ func _page_key_for_cell(cell_grid: Vector2i, bucket: TextureBucket) -> String:
 func _page_center_for_key(spatial_key: Vector2i) -> Vector3:
 	var origin_x := spatial_key.x * IMPOSTOR_PAGE_SIZE_CELLS
 	var origin_y := spatial_key.y * IMPOSTOR_PAGE_SIZE_CELLS
-	var center_x := (float(origin_x) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
-	var center_z := -(float(origin_y) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * DU.CELL_SIZE_METERS
+	var cell_size := _cell_size_meters()
+	var center_x := (float(origin_x) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * cell_size
+	var center_z := -(float(origin_y) + float(IMPOSTOR_PAGE_SIZE_CELLS) * 0.5) * cell_size
 	return Vector3(center_x, 0.0, center_z)
 
 
@@ -2111,7 +2138,7 @@ func update_impostor_area(center_cell: Vector2i, radius: int, deadline_usec: int
 		push_warning("[NativeImpostorRenderer] update_impostor_area called but impostor_candidates is null!")
 		return true
 
-	var radius_meters := float(radius) * DU.CELL_SIZE_METERS
+	var radius_meters := float(radius) * _cell_size_meters()
 	var radius_sq := radius_meters * radius_meters
 
 	# Differential update: if we moved only 1-2 cells, compute only the delta ring
@@ -2138,12 +2165,12 @@ func update_impostor_area(center_cell: Vector2i, radius: int, deadline_usec: int
 				var trail_x: int = _prev_impostor_center.x - radius * signi(move.x) + (step - 1) * signi(move.x)
 				for cy in range(-radius, radius + 1):
 					var lead_grid := Vector2i(lead_x, center_cell.y + cy)
-					if DU.cell_distance_squared(center_cell, lead_grid) <= radius_sq:
+					if _cell_distance_squared(center_cell, lead_grid) <= radius_sq:
 						if lead_grid not in _loaded_impostor_cells and not _pending_impostor_cell_set.has(lead_grid):
 							cells_to_load.append(lead_grid)
 							_loaded_impostor_cells[lead_grid] = true
 					var trail_grid := Vector2i(trail_x, _prev_impostor_center.y + cy)
-					if DU.cell_distance_squared(_prev_impostor_center, trail_grid) <= radius_sq:
+					if _cell_distance_squared(_prev_impostor_center, trail_grid) <= radius_sq:
 						if trail_grid in _loaded_impostor_cells:
 							cells_to_unload.append(trail_grid)
 
@@ -2154,12 +2181,12 @@ func update_impostor_area(center_cell: Vector2i, radius: int, deadline_usec: int
 				var trail_y: int = _prev_impostor_center.y - radius * signi(move.y) + (step - 1) * signi(move.y)
 				for cx in range(-radius, radius + 1):
 					var lead_grid := Vector2i(center_cell.x + cx, lead_y)
-					if DU.cell_distance_squared(center_cell, lead_grid) <= radius_sq:
+					if _cell_distance_squared(center_cell, lead_grid) <= radius_sq:
 						if lead_grid not in _loaded_impostor_cells and not _pending_impostor_cell_set.has(lead_grid):
 							cells_to_load.append(lead_grid)
 							_loaded_impostor_cells[lead_grid] = true
 					var trail_grid := Vector2i(_prev_impostor_center.x + cx, trail_y)
-					if DU.cell_distance_squared(_prev_impostor_center, trail_grid) <= radius_sq:
+					if _cell_distance_squared(_prev_impostor_center, trail_grid) <= radius_sq:
 						if trail_grid in _loaded_impostor_cells:
 							cells_to_unload.append(trail_grid)
 
@@ -2219,7 +2246,7 @@ func _process_pending_area_update(deadline_usec: int = 0) -> bool:
 					if _deadline_reached(deadline_usec):
 						return false
 					var grid := Vector2i(_area_update_center.x + _area_update_dx, _area_update_center.y + _area_update_dy)
-					if DU.cell_distance_squared(_area_update_center, grid) <= _area_update_radius_sq:
+					if _cell_distance_squared(_area_update_center, grid) <= _area_update_radius_sq:
 						_area_update_desired_cells[grid] = true
 					_area_update_dx += 1
 				_area_update_dx = -_area_update_radius
@@ -2256,7 +2283,7 @@ func _process_pending_area_update(deadline_usec: int = 0) -> bool:
 						return false
 					var desired_grid := Vector2i(_area_update_center.x + _area_update_dx, _area_update_center.y + _area_update_dy)
 					_area_update_dx += 1
-					if DU.cell_distance_squared(_area_update_center, desired_grid) > _area_update_radius_sq:
+					if _cell_distance_squared(_area_update_center, desired_grid) > _area_update_radius_sq:
 						continue
 					if desired_grid in _loaded_impostor_cells or _pending_impostor_cell_set.has(desired_grid):
 						continue
@@ -2427,7 +2454,7 @@ func _log_screen_size_histogram() -> void:
 		return
 	_screen_size_histogram_logged = true
 
-	var camera_pos := DU.cell_to_world_center(_last_center_cell)
+	var camera_pos := _cell_to_world_center(_last_center_cell)
 	# Assume 1080p, 75° vertical FOV
 	var screen_height := 1080.0
 	var fov_rad := deg_to_rad(75.0)

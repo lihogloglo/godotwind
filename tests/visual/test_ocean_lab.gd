@@ -715,7 +715,7 @@ func _setup_wetness() -> void:
 		_horizon_mgr.initialize(_terrain, _sun)
 	_push_wet_uniforms()
 
-	var texture_loader := preload("res://src/core/world/terrain_texture_loader.gd").new()
+	var texture_loader := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd").new()
 	if _terrain and _terrain.assets:
 		_textures_loaded = texture_loader.load_terrain_textures(_terrain.assets)
 	if _textures_loaded == 0 and _horizon_mgr:

@@ -26,10 +26,11 @@ func _init(callbacks: Dictionary) -> void:
 
 ## Run the terrain preprocessing operation.
 ## [param terrain] Terrain3D node to import regions into.
-## [param terrain_mgr] TerrainManager with region import methods.
+## [param terrain_mgr] Morrowind terrain manager with region import methods.
 ## [param ui_refs] Dictionary with UI node references:
 ##   preprocess_btn: Button, preprocess_status: Label
-func run(terrain: Terrain3D, terrain_mgr: TerrainManager, ui_refs: Dictionary) -> void:
+@warning_ignore("untyped_declaration", "unsafe_method_access")
+func run(terrain: Terrain3D, terrain_mgr, ui_refs: Dictionary) -> void:
 	var preprocess_btn: Button = ui_refs.get("preprocess_btn")
 	var preprocess_status: Label = ui_refs.get("preprocess_status")
 

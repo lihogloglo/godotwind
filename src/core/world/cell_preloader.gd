@@ -49,6 +49,7 @@ var _cache: Dictionary = {}  # Vector2i -> PreloadEntry
 # manager is freed before the preloader.
 var _model_loader_ref: WeakRef = null  # ModelLoader
 var _world_object_source: RefCounted = null
+var _coordinate_mapper: RefCounted = null
 var _warned_missing_world_object_source: bool = false
 
 var _current_anchor_cell: Vector2i = Vector2i.ZERO
@@ -77,6 +78,10 @@ func configure(model_loader: RefCounted) -> void:
 
 func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
+
+
+func set_coordinate_mapper(mapper: RefCounted) -> void:
+	_coordinate_mapper = mapper
 
 
 func set_debug(enabled: bool) -> void:
@@ -205,7 +210,7 @@ func _compute_predicted_cells(camera_cell: Vector2i, velocity_xz: Vector2) -> Ar
 	# Multi-cell depth for fast movement. At walk (5 m/s): depth=1.
 	# At flight (50 m/s): depth=1 (1s window). At creative fly (200 m/s): depth=2.
 	var depth: int = clampi(
-		int(speed / DU.CELL_SIZE_METERS * t_cache_warm) + 1,
+		int(speed / _cell_size_meters() * t_cache_warm) + 1,
 		1,
 		4,
 	)
@@ -231,6 +236,12 @@ func _compute_predicted_cells(camera_cell: Vector2i, velocity_xz: Vector2) -> Ar
 			if axis_y not in result and axis_y != camera_cell:
 				result.append(axis_y)
 	return result
+
+
+func _cell_size_meters() -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("get_cell_size_meters"):
+		return float(_coordinate_mapper.call("get_cell_size_meters"))
+	return DU.CELL_SIZE_METERS
 
 
 ## Kick the DATA phase for a cell: ask the injected object source for records,

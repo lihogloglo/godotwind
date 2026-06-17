@@ -51,18 +51,18 @@ static func clamp_view_distance_meters(value: int) -> int:
 	return clampi(stepped, MIN_VIEW_DISTANCE_METERS, MAX_VIEW_DISTANCE_METERS)
 
 
-static func scene_load_radius_cells_for_view_distance_meters(value: int) -> int:
+static func scene_load_radius_cells_for_view_distance_meters(value: int, cell_size_meters: float = DU.CELL_SIZE_METERS) -> int:
 	var clamped := clamp_view_distance_meters(value)
 	var scene_distance := minf(float(clamped), DU.HLOD_START)
-	return clampi(DU.distance_to_cell_radius(scene_distance), 1, MAX_SCENE_LOAD_RADIUS_CELLS)
+	return clampi(ceili(scene_distance / cell_size_meters), 1, MAX_SCENE_LOAD_RADIUS_CELLS)
 
 
-static func scene_load_distance_cap_for_view_distance_meters(value: int) -> float:
-	return minf(float(clamp_view_distance_meters(value)), DU.HLOD_START) + DU.CELL_SIZE_METERS
+static func scene_load_distance_cap_for_view_distance_meters(value: int, cell_size_meters: float = DU.CELL_SIZE_METERS) -> float:
+	return minf(float(clamp_view_distance_meters(value)), DU.HLOD_START) + cell_size_meters
 
 
-static func distant_stream_radius_cells_for_view_distance_meters(value: int, max_radius_cells: int) -> int:
-	var radius := DU.distance_to_cell_radius(float(clamp_view_distance_meters(value))) + 2
+static func distant_stream_radius_cells_for_view_distance_meters(value: int, max_radius_cells: int, cell_size_meters: float = DU.CELL_SIZE_METERS) -> int:
+	var radius := ceili(float(clamp_view_distance_meters(value)) / cell_size_meters) + 2
 	return clampi(radius, 1, max_radius_cells)
 
 

@@ -14,7 +14,6 @@
 extends Node3D
 
 const CS := preload("res://src/core/coordinate_system.gd")
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manager.gd")
 
 var _terrain: Terrain3D = null
@@ -100,7 +99,7 @@ func _setup_terrain() -> void:
 		return
 
 	# Try to load terrain textures (requires ESM data — may get 0 in standalone test)
-	var texture_loader := preload("res://src/core/world/terrain_texture_loader.gd").new()
+	var texture_loader := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd").new()
 	var textures_loaded: int = texture_loader.load_terrain_textures(_terrain.assets)
 	Log.info("testing", "Loaded %d terrain textures" % textures_loaded)
 

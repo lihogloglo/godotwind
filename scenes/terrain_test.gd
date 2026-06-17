@@ -18,8 +18,8 @@
 extends Node3D
 
 # Preload dependencies
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
-const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const TerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
+const MorrowindTerrainTextureLoaderScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 # Test configuration
@@ -49,7 +49,7 @@ var _data_path: String = ""
 func _ready() -> void:
 	# Initialize managers
 	terrain_manager = TerrainManagerScript.new()
-	texture_loader = TerrainTextureLoaderScript.new()
+	texture_loader = MorrowindTerrainTextureLoaderScript.new()
 
 	# Get Morrowind data path (try auto-detection if not configured)
 	_data_path = SettingsManager.get_data_path()

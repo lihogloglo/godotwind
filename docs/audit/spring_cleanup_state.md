@@ -939,6 +939,68 @@ Current docs:
   fatal, or exception errors. Raw post-edit scan: `src-core` 666 files /
   112571 lines and `tests-unit` 80 files / 7599 lines. No C# or shader files
   changed, so no `dotnet build` or shader cache/import clearing was required.
+- Pillar 2 transition-space info/environment slice completed on 2026-06-17.
+  `TransitionProvider.get_transition_space_payload()` and the public
+  `build_transition_environment()` hook are gone. Generic
+  `InteriorPocketManager` now stores a source-neutral `TransitionSpaceInfo`
+  with display/environment/quasi-exterior data, while
+  `MorrowindTransitionProvider` privately resolves parser cells and converts
+  Morrowind AMBI/quasi-exterior state into that neutral info. Interior portal
+  enumeration now asks the provider by `WorldSpaceHandle` and pocket offset;
+  the parser cell is no longer passed through or stored on pocket slots.
+- Verification on 2026-06-17 for the transition-space info slice:
+  `reports/report_101` shows `test_interior_transition_phase1` ran 10 tests
+  with 0 failures / 0 errors, and `test_adapter_boundary` also ran clean. The
+  unit runner still executed the whole unit directory, reported 8 unrelated
+  failures elsewhere, and crashed after writing the XML with the existing
+  shutdown/RID leak pattern. The changed-path smoke loaded Arrille's
+  Tradehouse through `[POCKET] Space info found`, completed enter+exit, and
+  logged `exit_to_exterior() called: '-2,-9'`; it exited 2 only because the
+  existing frametime threshold failed, with no script, parse, fatal, or
+  exception errors. Raw post-edit scan: `src-core` 667 files / 112544 lines
+  and `tests-unit` 80 files / 7620 lines. No C# or shader files changed, so
+  no `dotnet build` or shader cache/import clearing was required.
+- Pillar 2 Morrowind terrain texture-loader ownership slice completed on
+  2026-06-17. The LTEX slot loader moved from generic
+  `src/core/world/terrain_texture_loader.gd` to
+  `src/core/world/morrowind/morrowind_terrain_texture_loader.gd` and is now
+  named `MorrowindTerrainTextureLoader`. `MorrowindDataProvider`,
+  `world_explorer`, prebaking, terrain labs, and terrain visual tests now
+  preload the adapter-owned loader. `test_adapter_boundary` no longer carries
+  a generic-world allowance for `terrain_texture_loader.gd`; the strict-typing
+  suppression ledger follows the adapter file. Practical effect: Morrowind
+  LTEX/PBR texture translation is no longer housed as a generic world helper.
+- Verification on 2026-06-17 for the Morrowind terrain texture-loader slice:
+  focused gdUnit `reports/report_103` ran 21 tests with 0 failures / 0 errors
+  across `test_adapter_boundary`, `test_core_strict_typing_policy`, and
+  `test_morrowind_terrain_index_map`. `tests/visual/test_terrain_baking.tscn`
+  loaded BSA/ESM data, loaded 31 terrain textures through the new adapter path,
+  and imported terrain regions before the smoke window was closed. It logged no
+  script, parse, fatal, or exception errors; existing warnings remain for the
+  deprecated physics-interpolation compatibility shim, Terrain3D's 32-slot
+  texture cap, and unmapped texture-index fallback. No C# or shader files
+  changed, so no `dotnet build` or shader cache/import clearing was required.
+- Pillar 2 Morrowind terrain-manager ownership slice completed on 2026-06-17.
+  `MorrowindTerrainManager` now lives at
+  `src/core/world/morrowind/morrowind_terrain_manager.gd` and owns
+  LAND-to-height/control/color map generation plus Terrain3D region import.
+  The generic `src/core/world/terrain_manager.gd` is now only source-neutral
+  Terrain3D region math. Morrowind terrain callers in `MorrowindDataProvider`,
+  `world_explorer`, prebaking, terrain preprocessing, and terrain visual tests
+  preload the adapter path.
+- Verification on 2026-06-17 for the terrain-manager ownership slice:
+  focused gdUnit `reports/report_106` ran 22 tests with 0 failures / 0 errors
+  across `test_adapter_boundary`, `test_core_strict_typing_policy`, and
+  `test_morrowind_terrain_index_map`. Static scan found no `LandRecord`,
+  `ESMManager`, `LAND`, `LTEX`, `Morrowind`, or `mw_` markers in generic
+  `terrain_manager.gd`. `tests/visual/test_terrain_baking.tscn` imported 94/94
+  terrain regions through `MorrowindTerrainManager`, saved terrain, and reached
+  horizon baking 50/60 before the capped smoke was closed. Logs at
+  `reports/spring_cleanup_pillar2_terrain_manager_smoke.*.log` had no script,
+  parse, fatal, exception, crash, or `ERROR:` matches. Existing warnings remain
+  for the deprecated physics-interpolation compatibility shim, Terrain3D's
+  32-slot LTEX cap, and unmapped texture-index fallback. No C# or shader files
+  changed, so no `dotnet build` or shader cache/import clearing was required.
 - The preferred recurring entry point is the `spring-cleanup` skill, not pasted
   prompts.
 
@@ -953,9 +1015,9 @@ Start the next Pillar 2 ownership slice:
    if a new concrete source leak appears. Do not do marker-only cleanup on this
    file.
 3. Audit the next real Pillar 2 boundary candidate with proof before edits.
-   The best next candidate is moving
-   `TransitionProvider.get_transition_space_payload()` toward a source-neutral
-   transition-space payload/environment contract.
+   The transition-space payload/environment seam, Morrowind LTEX loader
+   location, and Morrowind LAND/control-map terrain manager ownership are
+   settled; choose another source-neutral API cleanup from current evidence.
 4. Do not delete `CellRecord` / `CellReference` routes or lower ledgers until
    route counters, focused boundary tests, and a narrow main-world or interior
    smoke prove the affected route is not load-bearing.

@@ -27,8 +27,8 @@ const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const ShoreMaskBaker := preload("res://src/tools/shore_mask_baker.gd")
 const HydrologyAtlasPrebaker := preload("res://src/tools/prebaking/morrowind_hydrology_atlas_prebaker.gd")
 const MorrowindImpostorCandidates := preload("res://src/core/world/morrowind/morrowind_impostor_candidates.gd")
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
-const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const TerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
+const MorrowindTerrainTextureLoaderScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 # REMOVED: MeshPrebakerV2 - cell merging deprecated, LODs now embedded in models
@@ -426,7 +426,7 @@ func _bake_terrain() -> Dictionary:
 
 	# Create terrain manager and texture loader
 	var terrain_manager := TerrainManagerScript.new()
-	var texture_loader := TerrainTextureLoaderScript.new()
+	var texture_loader := MorrowindTerrainTextureLoaderScript.new()
 
 	# Load terrain textures
 	var terrain_assets: Terrain3DAssets = (terrain_3d as Terrain3D).assets
@@ -544,8 +544,9 @@ func _bake_terrain() -> Dictionary:
 
 ## Bake horizon maps for all terrain regions (self-shadowing).
 ## Runs as a second pass after terrain heightmaps are imported.
+@warning_ignore("untyped_declaration", "unsafe_method_access")
 func _bake_horizon_maps(
-	terrain_manager: TerrainManagerScript,
+	terrain_manager,
 	get_land_func: Callable,
 	regions_with_data: Dictionary,
 	min_region: Vector2i,

@@ -4,6 +4,7 @@ extends "res://src/core/world/transition/transition_provider.gd"
 const CS := preload("res://src/core/coordinate_system.gd")
 const WorldSpaceHandleScript := preload("res://src/core/world/transition/world_space_handle.gd")
 const TransitionPortalDescriptorScript := preload("res://src/core/world/transition/transition_portal_descriptor.gd")
+const TransitionSpaceInfoScript := preload("res://src/core/world/transition/transition_space_info.gd")
 
 const MIN_INTERIOR_LUMA: float = 0.08
 const INTERIOR_FOG_DENSITY_SCALE: float = 0.003
@@ -67,10 +68,10 @@ func get_exterior_transition_portals(cell_payload: Variant, cell_grid: Vector2i)
 
 func get_interior_transition_portals(
 	space_handle: WorldSpaceHandle,
-	cell_payload: Variant,
 	pocket_offset: Vector3,
 ) -> Array[TransitionPortalDescriptor]:
 	var portals: Array[TransitionPortalDescriptor] = []
+	var cell_payload: Variant = _get_transition_cell(space_handle)
 	if cell_payload == null or space_handle == null or not ("references" in cell_payload):
 		return portals
 
@@ -91,7 +92,23 @@ func get_interior_transition_portals(
 	return portals
 
 
-func get_transition_space_payload(space_handle: WorldSpaceHandle) -> Variant:
+func get_transition_space_info(
+	space_handle: WorldSpaceHandle,
+	exterior_environment: Environment,
+) -> RefCounted:
+	var cell_payload: Variant = _get_transition_cell(space_handle)
+	if cell_payload == null:
+		return null
+
+	var info := TransitionSpaceInfoScript.new()
+	info.space_handle = space_handle
+	info.display_name = str(cell_payload.get("name")) if "name" in cell_payload else space_handle.display_name
+	info.is_quasi_exterior = bool(cell_payload.call("is_quasi_exterior")) if cell_payload.has_method("is_quasi_exterior") else false
+	info.environment = _build_space_environment(cell_payload, exterior_environment)
+	return info
+
+
+func _get_transition_cell(space_handle: WorldSpaceHandle) -> Variant:
 	if object_source == null or space_handle == null:
 		return null
 	if space_handle.is_interior() and object_source.has_method("get_source_cell"):
@@ -103,12 +120,11 @@ func get_transition_space_payload(space_handle: WorldSpaceHandle) -> Variant:
 	return null
 
 
-func build_transition_environment(
-	space_handle: WorldSpaceHandle,
+func _build_space_environment(
 	cell_payload: Variant,
 	exterior_environment: Environment,
 ) -> Environment:
-	if space_handle == null or not space_handle.is_interior() or cell_payload == null:
+	if cell_payload == null:
 		return null
 	var env := Environment.new()
 

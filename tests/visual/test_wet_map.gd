@@ -112,7 +112,7 @@ func _ready() -> void:
 	_push_wet_uniforms()
 
 	# Load terrain textures for realistic view (optional — works without)
-	var texture_loader := preload("res://src/core/world/terrain_texture_loader.gd").new()
+	var texture_loader := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd").new()
 	_textures_loaded = texture_loader.load_terrain_textures(_terrain.assets)
 	if _textures_loaded == 0:
 		if _horizon_mgr:

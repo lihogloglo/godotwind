@@ -164,7 +164,7 @@ func _setup_terrain() -> void:
 		return
 
 	# Try to load terrain textures
-	var texture_loader := preload("res://src/core/world/terrain_texture_loader.gd").new()
+	var texture_loader := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd").new()
 	var textures_loaded: int = texture_loader.load_terrain_textures(_terrain.assets)
 	Log.info("testing", "Loaded %d terrain textures" % textures_loaded)
 

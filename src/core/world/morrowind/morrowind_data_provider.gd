@@ -1,6 +1,6 @@
 ## MorrowindDataProvider - WorldDataProvider implementation for Morrowind ESM data
 ##
-## Wraps the existing ESMManager and TerrainManager to provide terrain data
+## Wraps the existing ESMManager and MorrowindTerrainManager to provide terrain data
 ## through the unified WorldDataProvider interface.
 ##
 ## Uses combined regions (4x4 MW cells per Terrain3D region) for large world support.
@@ -14,8 +14,8 @@
 class_name MorrowindDataProvider
 extends "res://src/core/world/world_data_provider.gd"
 
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
-const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const TerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
+const MorrowindTerrainTextureLoaderScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 
@@ -68,7 +68,7 @@ func initialize() -> Error:
 	_terrain_manager.set("region_size", region_size)
 
 	# Create texture loader
-	_texture_loader = TerrainTextureLoaderScript.new()
+	_texture_loader = MorrowindTerrainTextureLoaderScript.new()
 
 	# Calculate world bounds from LAND records
 	_calculate_world_bounds()

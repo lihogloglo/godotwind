@@ -9,7 +9,7 @@ extends Node
 
 const PrebakingManagerScript := preload("res://src/tools/prebaking/prebaking_manager.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
+const TerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
 
 var _prebaking_manager: Node = null
 var _start_time: float = 0.0
@@ -72,7 +72,7 @@ func _run_test() -> void:
 
 	# Test a small batch of regions first (canary)
 	var terrain_manager := TerrainManagerScript.new()
-	var texture_loader := preload("res://src/core/world/terrain_texture_loader.gd").new()
+	var texture_loader := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd").new()
 	var textures_loaded := texture_loader.load_terrain_textures(terrain.assets)
 	Log.info("testing", "Loaded %d terrain textures" % textures_loaded)
 	terrain_manager.set_texture_slot_mapper(texture_loader)

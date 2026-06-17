@@ -196,6 +196,7 @@ var _bg_processor: BackgroundProcessor = null
 ## FileAccess/ResourceLoader probes on the streaming hot path.
 var _model_loader: ModelLoader = null
 var _world_object_source: RefCounted = null
+var _coordinate_mapper: RefCounted = null
 
 ## Model cache directory (for loading prototypes not yet in StaticObjectRenderer)
 var _models_dir: String = ""
@@ -370,6 +371,53 @@ func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
 
 
+func set_coordinate_mapper(mapper: RefCounted) -> void:
+	_coordinate_mapper = mapper
+
+
+func _cell_size_meters() -> float:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("get_cell_size_meters"):
+		return float(_coordinate_mapper.call("get_cell_size_meters"))
+	return DU.CELL_SIZE_METERS
+
+
+func _world_to_cell(world_pos: Vector3) -> Vector2i:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("world_to_cell"):
+		var mapped: Variant = _coordinate_mapper.call("world_to_cell", world_pos)
+		if mapped is Vector2i:
+			return mapped
+	return DU.world_to_cell(world_pos)
+
+
+func _cell_to_world_origin(cell: Vector2i, y: float = 0.0) -> Vector3:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_to_world_origin"):
+		var mapped: Variant = _coordinate_mapper.call("cell_to_world_origin", cell, y)
+		if mapped is Vector3:
+			return mapped
+	return DU.cell_to_world_origin(cell, y)
+
+
+func _cell_to_world_center(cell: Vector2i, y: float = 0.0) -> Vector3:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("cell_to_world_center"):
+		var mapped: Variant = _coordinate_mapper.call("cell_to_world_center", cell, y)
+		if mapped is Vector3:
+			return mapped
+	return DU.cell_to_world_center(cell, y)
+
+
+func _chunk_center_world(center_cell: Vector2i, size_level: int) -> Vector2:
+	if _coordinate_mapper != null and _coordinate_mapper.has_method("chunk_center_world"):
+		var mapped: Variant = _coordinate_mapper.call("chunk_center_world", center_cell, size_level)
+		if mapped is Vector2:
+			return mapped
+	return DU.chunk_center_world(center_cell, size_level)
+
+
+func _paging_ring_radius(size_level: int) -> int:
+	var size: int = 1 << size_level
+	return int(ceil(DU.paging_band_end(size_level) / (float(size) * _cell_size_meters())))
+
+
 ## Update active paging chunks based on camera position. Runs the top-down
 ##
 ## `camera_world_pos` is the actual camera world position — used by both the
@@ -388,7 +436,7 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	if camera_world_pos == Vector3.INF:
 		# Legacy fallback — approximate with cell center. Phase 2+ callers pass
 		# the real camera world position.
-		_camera_world_pos_cached = DU.cell_to_world_center(camera_cell)
+		_camera_world_pos_cached = _cell_to_world_center(camera_cell)
 	else:
 		_camera_world_pos_cached = camera_world_pos
 
@@ -822,7 +870,7 @@ func get_active_chunk_debug_data() -> Array[Dictionary]:
 
 func _make_chunk_debug_entry(key: Vector3i, status: String) -> Dictionary:
 	var size_cells := 1 << key.z
-	var size_m := float(size_cells) * DU.CELL_SIZE_METERS
+	var size_m := float(size_cells) * _cell_size_meters()
 	var band_start := DU.paging_band_start(key.z)
 	var band_end := minf(DU.paging_band_end(key.z), _visual_end_cap)
 	var visual_begin := maxf(band_start, _visual_begin_floor)
@@ -1031,7 +1079,7 @@ func _compute_predictive_prefetch_chunks(current_desired: Dictionary) -> Diction
 	for sample in range(1, PREDICTIVE_SAMPLE_COUNT + 1):
 		var t := float(sample) / float(PREDICTIVE_SAMPLE_COUNT)
 		var future_pos := _camera_world_pos_cached + Vector3(dir.x * lookahead * t, 0.0, dir.y * lookahead * t)
-		var future_cell := DU.world_to_cell(future_pos)
+		var future_cell := _world_to_cell(future_pos)
 		var future_desired := _compute_desired_chunks(future_cell, future_pos)
 		for key: Vector3i in future_desired:
 			if key not in current_desired:
@@ -1173,7 +1221,7 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 	for active_key: Vector3i in _active_chunks:
 		if DU.paging_band_start(active_key.z) >= _visual_end_cap:
 			continue
-		if camera_xz.distance_to(DU.chunk_center_world(Vector2i(active_key.x, active_key.y), active_key.z)) >= _visual_end_cap:
+		if camera_xz.distance_to(_chunk_center_world(Vector2i(active_key.x, active_key.y), active_key.z)) >= _visual_end_cap:
 			continue
 		if not _is_within_retention(active_key, camera_xz):
 			continue
@@ -1182,7 +1230,7 @@ func _compute_desired_chunks(camera_cell: Vector2i, camera_world_pos: Vector3) -
 
 	var root_level := 2
 	var root_size: int = 1 << root_level
-	var root_radius: int = DU.paging_ring_radius(root_level)
+	var root_radius: int = _paging_ring_radius(root_level)
 	var root_aligned := DU.chunk_key_for_cell(camera_cell, root_level)
 	for dy in range(-root_radius, root_radius + 1):
 		for dx in range(-root_radius, root_radius + 1):
@@ -1214,7 +1262,7 @@ func _collect_desired_quadtree(center_cell: Vector2i, size_level: int, camera_xz
 	if min_dist >= band_end or max_dist < band_start:
 		return
 
-	var center_world := DU.chunk_center_world(center_cell, size_level)
+	var center_world := _chunk_center_world(center_cell, size_level)
 	var center_dist: float = camera_xz.distance_to(center_world)
 	if center_dist >= band_start and center_dist < band_end:
 		var key := Vector3i(center_cell.x, center_cell.y, size_level)
@@ -1236,10 +1284,10 @@ func _collect_desired_quadtree(center_cell: Vector2i, size_level: int, camera_xz
 				)
 
 
-static func _chunk_distance_bounds(center_cell: Vector2i, size_level: int, camera_xz: Vector2) -> Vector2:
+func _chunk_distance_bounds(center_cell: Vector2i, size_level: int, camera_xz: Vector2) -> Vector2:
 	var size: int = 1 << size_level
-	var min_world := DU.cell_to_world_origin(center_cell)
-	var max_world := DU.cell_to_world_origin(Vector2i(center_cell.x + size, center_cell.y + size))
+	var min_world := _cell_to_world_origin(center_cell)
+	var max_world := _cell_to_world_origin(Vector2i(center_cell.x + size, center_cell.y + size))
 	var min_x: float = minf(min_world.x, max_world.x)
 	var max_x: float = maxf(min_world.x, max_world.x)
 	var min_z: float = minf(min_world.z, max_world.z)
@@ -1299,15 +1347,19 @@ static func _is_within_retention_for(key: Vector3i, camera_xz: Vector2) -> bool:
 ## Instance-facing retention check — used by `_compute_desired_chunks`.
 ## Thin forwarder so the static implementation stays unit-testable.
 func _is_within_retention(key: Vector3i, camera_xz: Vector2) -> bool:
-	return _is_within_retention_for(key, camera_xz)
+	var center_world: Vector2 = _chunk_center_world(Vector2i(key.x, key.y), key.z)
+	var dist: float = camera_xz.distance_to(center_world)
+	var lo: float = DU.paging_band_start(key.z) - DU.PAGING_HYSTERESIS
+	var hi: float = DU.paging_band_end(key.z) + DU.PAGING_HYSTERESIS
+	return dist >= lo and dist < hi
 
 
 ## Sort comparator for the merge queue — closer chunks merge first.
 ## Uses chunk-center XZ distance (2D plane) for consistency with band class.
 func _sort_by_chunk_distance(a: Vector3i, b: Vector3i) -> bool:
 	var camera_xz := Vector2(_camera_world_pos_cached.x, _camera_world_pos_cached.z)
-	var da := camera_xz.distance_squared_to(DU.chunk_center_world(Vector2i(a.x, a.y), a.z))
-	var db := camera_xz.distance_squared_to(DU.chunk_center_world(Vector2i(b.x, b.y), b.z))
+	var da := camera_xz.distance_squared_to(_chunk_center_world(Vector2i(a.x, a.y), a.z))
+	var db := camera_xz.distance_squared_to(_chunk_center_world(Vector2i(b.x, b.y), b.z))
 	return da < db
 
 
@@ -1668,8 +1720,8 @@ func _merge_chunk_worker(key: Vector3i, generation: int, inputs: Array, chunk_or
 
 ## World-space center of the chunk. Used to place the RS instance and to
 ## offset vertex positions during merge (merged mesh is in chunk-local space).
-static func _chunk_origin_world(key: Vector3i) -> Vector3:
-	var center_xz := DU.chunk_center_world(Vector2i(key.x, key.y), key.z)
+func _chunk_origin_world(key: Vector3i) -> Vector3:
+	var center_xz := _chunk_center_world(Vector2i(key.x, key.y), key.z)
 	return Vector3(center_xz.x, 0.0, center_xz.y)
 
 

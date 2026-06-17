@@ -1,6 +1,7 @@
 extends GdUnitTestSuite
 
 const MorrowindImpostorCandidatesScript := preload("res://src/core/world/morrowind/morrowind_impostor_candidates.gd")
+const MorrowindTerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
 const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
 
 const FORBIDDEN_TERMS: PackedStringArray = [
@@ -97,8 +98,7 @@ const BASELINE_FORBIDDEN_COUNTS: Dictionary = {
 	"src/core/world/object_pool.gd": 140,
 	"src/core/world/reference_instantiator.gd": 10,
 	"src/core/world/static_object_renderer.gd": 0,
-	"src/core/world/terrain_manager.gd": 98,
-	"src/core/world/terrain_texture_loader.gd": 18,
+	"src/core/world/terrain_manager.gd": 0,
 	"src/core/world/world_cell_manifest.gd": 0,
 	"src/core/world/world_object_record.gd": 0,
 	"src/core/world/world_object_source.gd": 0,
@@ -221,18 +221,6 @@ const WORLD_BOUNDARY_MARKER_LEDGER: Dictionary = {
 	},
 	"src/core/world/static_object_renderer.gd": {
 		"CellReference": 0,
-	},
-	"src/core/world/terrain_manager.gd": {
-		"ESMManager": 1,
-		"LAND": 32,
-		"LTEX": 1,
-		"Morrowind": 1,
-		"mw_": 28,
-	},
-	"src/core/world/terrain_texture_loader.gd": {
-		"ESMManager": 5,
-		"LTEX": 3,
-		"mw_": 24,
 	},
 }
 
@@ -423,6 +411,23 @@ func test_impostor_catalog_scan_is_morrowind_owned() -> void:
 	).is_false()
 	assert_bool("BSAManager" in morrowind_code).override_failure_message(
 		"Morrowind archive-backed impostor catalog scanning belongs in the Morrowind adapter"
+	).is_true()
+
+
+func test_land_terrain_generation_is_morrowind_owned() -> void:
+	var terrain_manager := MorrowindTerrainManagerScript.new()
+	assert_bool(terrain_manager is TerrainManager).override_failure_message(
+		"Morrowind terrain manager should reuse generic region helpers without making LAND generation generic"
+	).is_true()
+
+	var generic_code := _read_without_comments("res://src/core/world/terrain_manager.gd")
+	var morrowind_code := _read_without_comments("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
+	for marker: String in ["LandRecord", "ESMManager", "LAND", "LTEX", "Morrowind", "mw_"]:
+		assert_bool(marker in generic_code).override_failure_message(
+			"Generic TerrainManager must not own source parser/control-map markers"
+		).is_false()
+	assert_bool("func generate_control_map(land: LandRecord)" in morrowind_code).override_failure_message(
+		"Morrowind LAND control-map generation belongs in the Morrowind adapter"
 	).is_true()
 
 

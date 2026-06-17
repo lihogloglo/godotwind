@@ -29,9 +29,10 @@ What Godotwind actually ships for terrain rendering. For industry-standard techn
 
 | File | Purpose |
 |------|---------|
-| `src/core/world/terrain_manager.gd` | Heightmap/control map generation, region import |
+| `src/core/world/terrain_manager.gd` | Source-neutral Terrain3D region helpers |
 | `src/core/world/generic_terrain_streamer.gd` | Real-time terrain streaming (priority queue, frustum cull) |
-| `src/core/world/terrain_texture_loader.gd` | Morrowind LTEX loading, PBR auto-detection |
+| `src/core/world/morrowind/morrowind_terrain_manager.gd` | Morrowind LAND height/control/color map generation and region import |
+| `src/core/world/morrowind/morrowind_terrain_texture_loader.gd` | Morrowind LTEX loading, PBR auto-detection |
 | `src/core/world/morrowind/morrowind_data_provider.gd` | Morrowind terrain adapter provider (LAND records) |
 | `src/tools/ui/terrain_preprocessor.gd` | Offline prebaking (4x4 cells per region) |
 | `src/core/deformation/` | RTT deformation system (already integrated into shader) |
@@ -61,10 +62,10 @@ Render mode: `blend_mix, depth_draw_opaque, cull_back, diffuse_burley, specular_
 
 ### What We Have
 
-**Mipmaps: YES, generated and required.** The `terrain_texture_loader.gd` ensures all textures have mipmaps:
+**Mipmaps: YES, generated and required.** The `morrowind_terrain_texture_loader.gd` ensures all textures have mipmaps:
 
 ```gdscript
-# From terrain_texture_loader.gd
+# From morrowind_terrain_texture_loader.gd
 if not img.has_mipmaps():
     if img.is_compressed():
         img.decompress()   # DDS/DXT must decompress first
@@ -117,7 +118,7 @@ uniform float _texture_roughness_mod_array[32];     // Per-texture roughness mod
 | AO | **Framework ready, no data** | `_ao_strength_array` uniform exists, defaults to 0 |
 | Height (for blending) | Partial | Control map height-based blend exists in shader |
 
-The `terrain_texture_loader.gd` already searches for PBR companions:
+The `morrowind_terrain_texture_loader.gd` already searches for PBR companions:
 
 ```gdscript
 var normal_suffixes := ["_n", "_normal", "_nrm"]
@@ -176,7 +177,7 @@ The deformation system is **framework-ready but not fully wired**:
 
 ```
 Terrain texture loading:
-  terrain_texture_loader.gd::_load_texture_for_slot()
+  morrowind_terrain_texture_loader.gd::_load_texture_for_slot()
     -> BSAManager.load_texture()
     -> _ensure_mipmaps() [decompress + generate]
     -> _detect_pbr_companions() [auto-detect _n, _h, _r, _ao]
@@ -195,6 +196,6 @@ Deformation:
 
 Preprocessor:
   terrain_preprocessor.gd::_preprocess_terrain()
-    -> terrain_manager.generate_region() [per 4x4 cell block]
+    -> morrowind_terrain_manager.import_combined_region() [per 4x4 cell block]
     -> terrain_3d.data.save_directory()
 ```

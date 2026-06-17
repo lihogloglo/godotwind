@@ -1090,8 +1090,8 @@ Verification:
 Next deletion slice:
 
 1. Do not recreate the parser-cell bridge in generic world code.
-2. Migrate `TransitionProvider.get_transition_space_payload()` toward a
-   source-neutral transition-space payload/environment contract.
+2. Treat transition-space payload/environment migration as settled unless a
+   new concrete failure appears.
 3. Keep the next slice focused; do not start the full transition state-machine
    refactor in the same pass.
 
@@ -1107,6 +1107,60 @@ Pillar 2 DODT exterior target-space cleanup completed on 2026-06-17:
   frametime threshold, but it completed enter/exit with no script, parse,
   fatal, or exception errors. No C# or shader files changed, and shader
   cache/import artifacts were not cleared.
+
+Pillar 2 transition-space info/environment cleanup completed on 2026-06-17:
+
+- Deleted the public parser-payload handoff:
+  `TransitionProvider.get_transition_space_payload()` and public
+  `build_transition_environment()` are no longer part of the transition
+  provider contract.
+- `InteriorPocketManager` stores neutral `TransitionSpaceInfo` on pocket slots
+  and asks providers for portal descriptors by `WorldSpaceHandle`, so it no
+  longer stores or passes parser cells for interior transition runtime.
+- `MorrowindTransitionProvider` owns the parser-cell lookup and AMBI/quasi-
+  exterior translation privately.
+- Verification: `reports/report_101` has clean `test_interior_transition_phase1`
+  and `test_adapter_boundary` suites; the full unit scan still has unrelated
+  failures and the known shutdown/RID crash after XML write. The transition
+  smoke loaded via `[POCKET] Space info found`, completed enter/exit, and had
+  no script, parse, fatal, or exception errors. Exit code 2 was the existing
+  frametime threshold caveat. Shader cache/import artifacts were not cleared.
+
+Pillar 2 Morrowind terrain texture-loader ownership cleanup completed on
+2026-06-17:
+
+- Moved the LTEX terrain slot loader from generic
+  `src/core/world/terrain_texture_loader.gd` to
+  `src/core/world/morrowind/morrowind_terrain_texture_loader.gd` as
+  `MorrowindTerrainTextureLoader`.
+- Updated runtime/tool/test callers to preload the adapter-owned path and
+  removed the old generic-file boundary allowances from `test_adapter_boundary`.
+- This is a move, not a deletion: valid Morrowind terrain texture translation
+  now lives under the Morrowind adapter. The follow-up terrain-manager slice
+  below moved LAND/control-map generation too.
+- Verification: focused gdUnit `reports/report_103` passed 21 tests across
+  boundary, strict-typing, and Morrowind terrain index-map suites. The terrain
+  baking visual smoke loaded 31 terrain textures through the adapter path and
+  imported regions before closure, with no script, parse, fatal, or exception
+  errors. Existing 32-slot/unmapped texture warnings remain. Shader
+  cache/import artifacts were not cleared.
+
+Pillar 2 Morrowind terrain-manager ownership cleanup completed on 2026-06-17:
+
+- Moved LAND height/control/color map generation and Terrain3D region import
+  into `src/core/world/morrowind/morrowind_terrain_manager.gd` as
+  `MorrowindTerrainManager`.
+- Replaced generic `src/core/world/terrain_manager.gd` with source-neutral
+  Terrain3D region helpers only.
+- Updated Morrowind terrain runtime/tool/test callers to preload the adapter
+  path and ratcheted `test_adapter_boundary` so generic `terrain_manager.gd`
+  has zero source markers.
+- Verification: focused gdUnit `reports/report_106` passed 22 tests across
+  boundary, strict-typing, and Morrowind terrain index-map suites. The terrain
+  baking smoke imported 94/94 regions and reached horizon baking before the cap,
+  with no script, parse, fatal, exception, crash, or `ERROR:` matches. Existing
+  32-slot/unmapped texture warnings remain. Shader cache/import artifacts were
+  not cleared.
 
 ## First Bloat-Control Targets
 

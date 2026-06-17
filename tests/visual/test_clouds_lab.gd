@@ -15,7 +15,7 @@ const DRIVER_SCRIPT := "res://addons/SunshineClouds2/SunshineCloudsDriver.gd"
 const CLOUDS_SCRIPT := "res://addons/SunshineClouds2/SunshineClouds.gd"
 const NOISE_DIR := "res://addons/SunshineClouds2/NoiseTextures/"
 const SHADER_DIR := "res://addons/SunshineClouds2/"
-const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const MorrowindTerrainTextureLoaderScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd")
 const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manager.gd")
 const MorrowindTerrainTextureBridgeScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_bridge.gd")
 const WeatherDataScript := preload("res://src/core/weather/weather_data.gd")
@@ -167,7 +167,7 @@ func _setup_terrain() -> void:
 		return
 
 	if _terrain.assets:
-		var texture_loader := TerrainTextureLoaderScript.new()
+		var texture_loader := MorrowindTerrainTextureLoaderScript.new()
 		_terrain_textures = 1 if texture_loader.load_default_terrain_texture(_terrain.assets) else 0
 	_setup_mw_terrain_textures()
 	_terrain_focus = _find_terrain_focus()

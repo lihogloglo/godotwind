@@ -3,6 +3,8 @@ extends GdUnitTestSuite
 const CellManagerScript: Script = preload("res://src/core/world/cell_manager.gd")
 const DistantLightManagerScript: Script = preload("res://src/core/world/distant_light_manager.gd")
 const NativeStreamingManagerScript: Script = preload("res://src/core/world/native_streaming_manager.gd")
+const NativeImpostorRendererScript: Script = preload("res://src/core/world/native_impostor_renderer.gd")
+const ObjectPagingScript: Script = preload("res://src/core/world/object_paging.gd")
 const ReferenceInstantiatorScript: Script = preload("res://src/core/world/reference_instantiator.gd")
 const LaPalmaDataProviderScript: Script = preload("res://src/core/world/lapalma_data_provider.gd")
 const WorldAssetProviderScript: Script = preload("res://src/core/world/world_asset_provider.gd")
@@ -366,6 +368,35 @@ func test_distant_lights_use_provider_coordinate_mapper_for_pages() -> void:
 	assert_vector(lights._page_center_for_key(Vector2i(1, -1))).is_equal_approx(Vector3(252.0, 0.0, 84.0), Vector3.ONE * 0.001)
 	assert_float(lights._cell_radius_to_distance(3)).is_equal(126.0)
 	assert_float(lights._page_visibility_extra_margin()).is_equal(252.0)
+
+
+func test_hlod_uses_provider_coordinate_mapper_for_chunk_math() -> void:
+	var mapper: RefCounted = WorldCoordinateMapperScript.new()
+	mapper.cell_size_meters = 42.0
+	var paging: Variant = ObjectPagingScript.new()
+	paging.set_coordinate_mapper(mapper)
+
+	var center: Vector2 = paging._chunk_center_world(Vector2i(0, 0), 2)
+	assert_float(center.x).is_equal_approx(84.0, 0.001)
+	assert_float(center.y).is_equal_approx(-84.0, 0.001)
+	var origin: Vector3 = paging._chunk_origin_world(Vector3i(0, 0, 2))
+	assert_float(origin.x).is_equal_approx(84.0, 0.001)
+	assert_float(origin.y).is_equal_approx(0.0, 0.001)
+	assert_float(origin.z).is_equal_approx(-84.0, 0.001)
+	assert_int(paging._paging_ring_radius(2)).is_equal(6)
+
+
+func test_far_impostors_use_provider_coordinate_mapper_for_pages() -> void:
+	var mapper: RefCounted = WorldCoordinateMapperScript.new()
+	mapper.cell_size_meters = 42.0
+	var impostors: Variant = NativeImpostorRendererScript.new()
+	impostors.set_coordinate_mapper(mapper)
+
+	var center: Vector3 = impostors._page_center_for_key(Vector2i(1, -1))
+	assert_float(center.x).is_equal_approx(252.0, 0.001)
+	assert_float(center.y).is_equal_approx(0.0, 0.001)
+	assert_float(center.z).is_equal_approx(84.0, 0.001)
+	assert_float(impostors._cell_distance_squared(Vector2i.ZERO, Vector2i(3, 0))).is_equal(15876.0)
 
 
 func test_native_streaming_manager_rejects_source_without_spawn_adapter() -> void:

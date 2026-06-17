@@ -28,8 +28,8 @@ extends Node3D
 # Preload dependencies
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
 const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
-const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
-const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
+const TerrainManagerScript := preload("res://src/core/world/morrowind/morrowind_terrain_manager.gd")
+const MorrowindTerrainTextureLoaderScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_loader.gd")
 const MorrowindTerrainTextureBridgeScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_bridge.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
@@ -136,8 +136,9 @@ var _show_cell_debug: bool = false
 # Managers
 var world_streaming_manager: Node3D = null  # NativeStreamingManager (always native now)
 var native_streaming_manager: Node3D = null  # NativeStreamingManager reference (same as above)
-var terrain_manager: TerrainManager = null  # TerrainManager (for prebaking)
-var texture_loader: TerrainTextureLoader = null  # TerrainTextureLoader
+@warning_ignore("untyped_declaration")
+var terrain_manager = null  # Morrowind LAND terrain baking
+var texture_loader: MorrowindTerrainTextureLoader = null  # MorrowindTerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
 var world_source: RefCounted = null
 var world_object_source: RefCounted = null
@@ -363,7 +364,7 @@ func _ready() -> void:
 
 	# Initialize managers
 	terrain_manager = TerrainManagerScript.new()
-	texture_loader = TerrainTextureLoaderScript.new()
+	texture_loader = MorrowindTerrainTextureLoaderScript.new()
 	cell_manager = CellManagerScript.new()
 	world_source = MorrowindWorldSourceScript.new()
 	world_object_source = world_source.get_object_source()

@@ -6,7 +6,7 @@ const CORE_UNTYPED_SUPPRESSION_LEDGER: Dictionary = {
 	"src/core/logging/crash_breadcrumb.gd": 1,
 	"src/core/native_bridge.gd": 1,
 	"src/core/world/object_paging_kernel.gd": 1,
-	"src/core/world/terrain_texture_loader.gd": 2,
+	"src/core/world/morrowind/morrowind_terrain_texture_loader.gd": 2,
 }
 
 
