@@ -88,6 +88,8 @@ const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
 const BenchLadderRunnerScript := preload("res://src/tools/bench_ladder_runner.gd")
 const StreamingStressRunnerScript := preload("res://src/tools/streaming_stress_runner.gd")
 const LoadingStateMachineScript := preload("res://src/core/loading/loading_state_machine.gd")
+const LoadingBaselineReportScript := preload("res://src/tools/loading_baseline_report.gd")
+const LifetimeProbeReportScript := preload("res://src/tools/lifetime_probe_report.gd")
 const WATER_RENDER_PUBLISH_MAX_CELLS_PER_FRAME := 4
 # Note: HardwareDetection is accessed via class_name, no preload needed
 
@@ -138,7 +140,7 @@ var world_streaming_manager: Node3D = null  # NativeStreamingManager (always nat
 var native_streaming_manager: Node3D = null  # NativeStreamingManager reference (same as above)
 @warning_ignore("untyped_declaration")
 var terrain_manager = null  # Morrowind LAND terrain baking
-var texture_loader: MorrowindTerrainTextureLoader = null  # MorrowindTerrainTextureLoader
+var texture_loader: RefCounted = null  # MorrowindTerrainTextureLoader
 var cell_manager: CellManager = null  # CellManager
 var world_source: RefCounted = null
 var world_object_source: RefCounted = null
@@ -170,6 +172,11 @@ var _shutdown_refs_released: bool = false
 var _loading_state_machine: LoadingStateMachineScript = null  # Phase 8 — canonical loading gate (boot + teleport)
 var _boot_gate_entered: bool = false  # Latches the one-shot boot enter_loading call
 var _loading_phase_times: Dictionary = {}  # Per-phase loading times
+var _observatory_process_start_msec: int = Time.get_ticks_msec()
+var _observatory_ready_msec: int = 0
+var _observatory_init_async_start_msec: int = 0
+var _observatory_init_async_done_msec: int = 0
+var _lifetime_probe_started: bool = false
 
 # State
 var _data_path: String = ""
@@ -327,6 +334,7 @@ func _cleanup_water_provider() -> void:
 
 
 func _ready() -> void:
+	_observatory_ready_msec = Time.get_ticks_msec()
 	# Intercept window close to do fast cleanup instead of slow tree teardown
 	get_tree().set_auto_accept_quit(false)
 
@@ -486,6 +494,7 @@ func _ready() -> void:
 
 func _init_async() -> void:
 	var _ta0 := Time.get_ticks_msec()
+	_observatory_init_async_start_msec = _ta0
 	var _ta := _ta0
 
 	# Initialize ModRegistry
@@ -613,6 +622,7 @@ func _init_async() -> void:
 
 	_initialized = true
 	_loading_time_ms = Time.get_ticks_msec() - _ta0
+	_observatory_init_async_done_msec = Time.get_ticks_msec()
 	print("[TIMING] _init_async() total: %d ms" % _loading_time_ms)
 	_log("[color=green]World streaming initialized![/color]")
 	_log("Loading time: %d ms" % _loading_time_ms)
@@ -754,6 +764,63 @@ func _on_loading_finished(reason: String, duration_s: float, timed_out: bool) ->
 			JSON.stringify(status),
 			JSON.stringify(cm_stats),
 		])
+		_write_loading_baseline_report(reason, duration_s, timed_out, status, cm_stats)
+		if not timed_out:
+			_maybe_start_lifetime_probe()
+
+
+func _write_loading_baseline_report(
+	reason: String,
+	duration_s: float,
+	timed_out: bool,
+	inner_status: Dictionary,
+	cell_manager_stats: Dictionary
+) -> void:
+	var args := _get_loading_baseline_report_args()
+	var streaming_stats: Dictionary = {}
+	if native_streaming_manager and native_streaming_manager.has_method("get_stats"):
+		streaming_stats = native_streaming_manager.call("get_stats")
+	var path: String = LoadingBaselineReportScript.write({
+		"scenario": args.get("scenario", "first_playable"),
+		"cache_state": args.get("cache_state", "unspecified"),
+		"reason": reason,
+		"duration_s": duration_s,
+		"timed_out": timed_out,
+		"timestamps": {
+			"process_start_msec": _observatory_process_start_msec,
+			"ready_msec": _observatory_ready_msec,
+			"init_async_start_msec": _observatory_init_async_start_msec,
+			"init_async_done_msec": _observatory_init_async_done_msec,
+			"first_playable_msec": Time.get_ticks_msec(),
+		},
+		"phase_times_ms": _loading_phase_times,
+		"inner_ring": inner_status,
+		"cell_manager": cell_manager_stats,
+		"streaming": streaming_stats,
+		"benchmark_mode_metadata": streaming_stats.get("benchmark_mode_metadata", {}),
+	})
+	if path.is_empty():
+		Log.error("loading", "[LOADING_BASELINE] failed to write loading baseline report")
+	else:
+		Log.info("loading", "[LOADING_BASELINE] wrote %s" % path)
+
+
+func _get_loading_baseline_report_args() -> Dictionary:
+	var scenario := "first_playable"
+	var cache_state := "unspecified"
+	for arg in _runtime_cmdline_args():
+		if arg.begins_with("--loading-baseline="):
+			scenario = LoadingBaselineReportScript.normalize_scenario(arg.substr("--loading-baseline=".length()))
+			if scenario == "cold_start":
+				cache_state = "cold"
+			elif scenario == "warm_start":
+				cache_state = "warm"
+		elif arg.begins_with("--loading-cache-state="):
+			cache_state = arg.substr("--loading-cache-state=".length()).strip_edges().to_lower()
+	return {
+		"scenario": scenario,
+		"cache_state": cache_state,
+	}
 
 
 ## Phase 8 — teleport trigger. NativeStreamingManager emits
@@ -955,6 +1022,8 @@ func _maybe_start_stress_bench() -> void:
 
 
 func _maybe_start_ready_quit() -> void:
+	if _has_lifetime_probe_arg():
+		return
 	var delay := -1.0
 	for arg in _runtime_cmdline_args():
 		if arg == "--quit-after-ready":
@@ -967,6 +1036,107 @@ func _maybe_start_ready_quit() -> void:
 	get_tree().create_timer(delay).timeout.connect(func() -> void:
 		_request_fast_quit("READY_QUIT - diagnostic ready quit")
 	)
+
+
+func _has_lifetime_probe_arg() -> bool:
+	for arg in _runtime_cmdline_args():
+		if arg == "--lifetime-probe" or arg.begins_with("--lifetime-probe="):
+			return true
+	return false
+
+
+func _get_lifetime_probe_args() -> Dictionary:
+	var loops := 3
+	var settle_s := 4.0
+	var stamp := ""
+	for arg in _runtime_cmdline_args():
+		if arg.begins_with("--lifetime-probe-loops="):
+			loops = max(1, int(arg.substr("--lifetime-probe-loops=".length())))
+		elif arg.begins_with("--lifetime-probe-settle="):
+			settle_s = maxf(0.5, float(arg.substr("--lifetime-probe-settle=".length())))
+		elif arg.begins_with("--lifetime-probe-stamp="):
+			stamp = arg.substr("--lifetime-probe-stamp=".length()).validate_filename()
+	return {
+		"loops": loops,
+		"settle_s": settle_s,
+		"stamp": stamp,
+	}
+
+
+func _maybe_start_lifetime_probe() -> void:
+	if _lifetime_probe_started or not _has_lifetime_probe_arg():
+		return
+	_lifetime_probe_started = true
+	call_deferred("_run_lifetime_probe")
+
+
+func _run_lifetime_probe() -> void:
+	var args := _get_lifetime_probe_args()
+	var loops := int(args["loops"])
+	var settle_s := float(args["settle_s"])
+	var samples: Array = []
+	var route: Array[Vector2i] = [
+		Vector2i(-2, -9),
+		Vector2i(-3, -2),
+		Vector2i(5, -6),
+		Vector2i(0, 0),
+	]
+	Log.info("tools", "[LIFETIME_PROBE] starting teleport_loop loops=%d settle=%.1fs" % [loops, settle_s])
+	samples.append(LifetimeProbeReportScript.sample("baseline", 0, _lifetime_probe_context(Vector2i(-2, -9))))
+	for i in range(loops):
+		var grid := route[(i + 1) % route.size()]
+		_teleport_to_cell(grid.x, grid.y)
+		await _wait_for_lifetime_probe_settle(settle_s)
+		samples.append(LifetimeProbeReportScript.sample("after_teleport_%d" % [i + 1], i + 1, _lifetime_probe_context(grid)))
+	var path: String = LifetimeProbeReportScript.write({
+		"scenario": "fast_travel_streaming",
+		"probe_kind": "teleport_loop",
+		"loop_count": loops,
+		"samples": samples,
+		"benchmark_mode_metadata": _get_benchmark_mode_metadata_for_probe(),
+	}, "user://benchmark_results", str(args["stamp"]))
+	if path.is_empty():
+		Log.error("tools", "[LIFETIME_PROBE] failed to write report")
+	else:
+		Log.info("tools", "[LIFETIME_PROBE] wrote %s" % path)
+	_request_fast_quit("LIFETIME_PROBE_DONE")
+
+
+func _wait_for_lifetime_probe_settle(settle_s: float) -> void:
+	var deadline_ms := Time.get_ticks_msec() + int(settle_s * 1000.0)
+	while Time.get_ticks_msec() < deadline_ms:
+		await get_tree().process_frame
+		if native_streaming_manager and native_streaming_manager.has_method("is_inner_ring_ready"):
+			if bool(native_streaming_manager.call("is_inner_ring_ready")):
+				break
+	await get_tree().create_timer(settle_s).timeout
+
+
+func _lifetime_probe_context(grid: Vector2i) -> Dictionary:
+	var streaming_stats: Dictionary = {}
+	var inner_ring: Dictionary = {}
+	var cell_stats: Dictionary = {}
+	if native_streaming_manager and native_streaming_manager.has_method("get_stats"):
+		streaming_stats = native_streaming_manager.call("get_stats")
+	if native_streaming_manager and native_streaming_manager.has_method("get_inner_ring_status"):
+		inner_ring = native_streaming_manager.call("get_inner_ring_status")
+	if cell_manager and cell_manager.has_method("get_loading_stats"):
+		cell_stats = cell_manager.call("get_loading_stats")
+	return {
+		"target_cell": grid,
+		"streaming": streaming_stats,
+		"inner_ring": inner_ring,
+		"cell_manager": cell_stats,
+	}
+
+
+func _get_benchmark_mode_metadata_for_probe() -> Dictionary:
+	if native_streaming_manager and native_streaming_manager.has_method("get_benchmark_mode_metadata"):
+		return native_streaming_manager.call("get_benchmark_mode_metadata")
+	var stats: Dictionary = {}
+	if native_streaming_manager and native_streaming_manager.has_method("get_stats"):
+		stats = native_streaming_manager.call("get_stats")
+	return stats.get("benchmark_mode_metadata", {})
 
 
 func _maybe_start_interior_door_smoke() -> bool:

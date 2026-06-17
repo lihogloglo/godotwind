@@ -52,6 +52,15 @@ const PUBLICATION_LANE_UNLOAD := "unload"
 const HLOD_PUBLICATION_BUDGET_USEC: int = 1500
 const FAR_IMPOSTOR_PUBLICATION_BUDGET_USEC: int = 4000
 const DISTANT_LIGHT_PUBLICATION_BUDGET_USEC: int = 2400
+const STREAMING_CUSTOM_PERFORMANCE_MONITORS := {
+	&"godotwind/streaming/queue_size": "queue_size",
+	&"godotwind/streaming/loaded_cells": "loaded_cells",
+	&"godotwind/streaming/visual_ready_cells": "visual_ready_cells",
+	&"godotwind/streaming/async_requests": "async_requests",
+	&"godotwind/streaming/startup_phase": "startup_phase",
+	&"godotwind/streaming/first_playable_reached": "first_playable_reached",
+	&"godotwind/streaming/stream_total_ms": "stream_total_ms",
+}
 # MidTierBatchPool removed — StaticObjectRenderer now owns MID statics via
 # server-direct instances and spatially local CellStaticBucket batches.
 
@@ -320,6 +329,7 @@ var _stats: Dictionary = {
 	"mid_to_near_promotions": 0,
 	"near_to_mid_demotions": 0,
 }
+var _streaming_custom_monitors_registered: bool = false
 
 ## Whether the manager has been initialized
 var _initialized: bool = false
@@ -450,6 +460,7 @@ func fast_cleanup() -> void:
 func _exit_tree() -> void:
 	if instance == self:
 		instance = null
+	_unregister_streaming_custom_monitors()
 
 	# If quitting, fast_cleanup() already freed everything — bail immediately
 	if Engine.has_meta("_quitting"):
@@ -480,6 +491,7 @@ func _exit_tree() -> void:
 
 func _ready() -> void:
 	instance = self
+	_register_streaming_custom_monitors()
 
 	# Phase 8 — LoadingStateMachine pauses SceneTree during boot and big
 	# teleports, but the streaming pipeline HAS TO keep loading cells
@@ -2348,15 +2360,6 @@ func _process_pending_loads_sync(_delta: float) -> void:
 func get_stats() -> Dictionary:
 	var s := _stats.duplicate()
 	var desired_cells := _get_cells_in_radius(_camera_cell, load_radius_cells)
-	var visual_ready_cells := 0
-	for grid: Vector2i in _loaded_cells:
-		if grid in _async_requests:
-			if _cell_manager and _cell_manager.has_method("is_async_visual_playable"):
-				var request_id: int = int(_async_requests[grid])
-				if bool(_cell_manager.call("is_async_visual_playable", request_id)):
-					visual_ready_cells += 1
-		else:
-			visual_ready_cells += 1
 
 	# Add load queue stats and telemetry
 	s["frame_overrun_count"] = _frame_overrun_count
@@ -2366,7 +2369,7 @@ func get_stats() -> Dictionary:
 	s["target_cell_count"] = (2 * _effective_scene_load_radius_cells() + 1) * (2 * _effective_scene_load_radius_cells() + 1)
 	s["desired_cell_count"] = desired_cells.size()
 	s["resident_cell_containers"] = _loaded_cells.size()
-	s["visual_ready_cells"] = visual_ready_cells
+	s["visual_ready_cells"] = _get_visual_ready_cell_count()
 	s["load_queue_size"] = _pending_load_queue.size()
 	s["unload_queue_size"] = _pending_unload_queue.size()
 	s["unloading_cells"] = _unloading_cells.size()
@@ -2595,6 +2598,58 @@ func get_phase_times() -> PackedFloat64Array:
 ## Get last frame's total streaming work in ms.
 func get_frame_streaming_ms() -> float:
 	return _last_frame_total_ms
+
+
+func _register_streaming_custom_monitors() -> void:
+	for monitor_id: StringName in STREAMING_CUSTOM_PERFORMANCE_MONITORS:
+		if Performance.has_custom_monitor(monitor_id):
+			Performance.remove_custom_monitor(monitor_id)
+		var metric: String = String(STREAMING_CUSTOM_PERFORMANCE_MONITORS[monitor_id])
+		Performance.add_custom_monitor(monitor_id, Callable(self, "_get_streaming_custom_monitor"), [metric])
+	_streaming_custom_monitors_registered = true
+
+
+func _unregister_streaming_custom_monitors() -> void:
+	if not _streaming_custom_monitors_registered:
+		return
+	for monitor_id: StringName in STREAMING_CUSTOM_PERFORMANCE_MONITORS:
+		if Performance.has_custom_monitor(monitor_id):
+			Performance.remove_custom_monitor(monitor_id)
+	_streaming_custom_monitors_registered = false
+
+
+func _get_streaming_custom_monitor(metric: String) -> float:
+	match metric:
+		"queue_size":
+			if _cell_manager and _cell_manager.has_method("get_instantiation_queue_size"):
+				return float(_cell_manager.get_instantiation_queue_size())
+			return 0.0
+		"loaded_cells":
+			return float(_loaded_cells.size())
+		"visual_ready_cells":
+			return float(_get_visual_ready_cell_count())
+		"async_requests":
+			return float(_async_requests.size())
+		"startup_phase":
+			return 1.0 if _startup_phase else 0.0
+		"first_playable_reached":
+			return 1.0 if _first_playable_reached else 0.0
+		"stream_total_ms":
+			return maxf(0.0, _last_frame_total_ms)
+	return 0.0
+
+
+func _get_visual_ready_cell_count() -> int:
+	var visual_ready_cells := 0
+	for grid: Vector2i in _loaded_cells:
+		if grid in _async_requests:
+			if _cell_manager and _cell_manager.has_method("is_async_visual_playable"):
+				var request_id: int = int(_async_requests[grid])
+				if bool(_cell_manager.call("is_async_visual_playable", request_id)):
+					visual_ready_cells += 1
+		else:
+			visual_ready_cells += 1
+	return visual_ready_cells
 
 
 func consume_lifecycle_events() -> Array[Dictionary]:

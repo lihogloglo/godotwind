@@ -31,6 +31,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
+const PerformanceReportContract := preload("res://src/tools/performance_report_contract.gd")
 
 ## Seconds of FPS >= SETTLE_FPS_TARGET required to call the pipeline settled.
 ## Phase 0 ablation (2026-04-21): relaxed threshold to TRUE steady state.
@@ -378,6 +379,14 @@ func _write_scenario_json(filename: String, samples: Array[Dictionary], meta: Di
 		"summary": summary,
 		"samples": samples,
 	}
+	out = PerformanceReportContract.apply(out, {
+		"scenario": _canonical_scenario(str(meta.get("scenario", ""))),
+		"mode": "autobench",
+		"summary": summary,
+		"duration_s": meta.get("duration_s", 0.0),
+		"benchmark_mode_metadata": mode_meta,
+		"raw_outputs": {"summary_json": path},
+	})
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if not file:
 		Log.error("tools", "[AUTOBENCH] failed to open %s" % path)
@@ -386,6 +395,18 @@ func _write_scenario_json(filename: String, samples: Array[Dictionary], meta: Di
 	file.close()
 	Log.info("tools", "[AUTOBENCH] wrote %s (samples=%d, summary=%s)" % [
 		path, samples.size(), JSON.stringify(summary)])
+
+
+func _canonical_scenario(name: String) -> String:
+	match name:
+		"bench_tiers":
+			return "stress_dense_exterior"
+		"bench_teleport":
+			return "fast_travel_streaming"
+		"bench_hlod_off":
+			return "hlod_ablation"
+		_:
+			return name
 
 
 func _get_benchmark_mode_metadata_snapshot() -> Dictionary:

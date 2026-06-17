@@ -23,6 +23,7 @@ extends Node
 const DU := preload("res://src/core/world/distance_utils.gd")
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const PerformanceReportContract := preload("res://src/tools/performance_report_contract.gd")
 
 const OUTPUT_DIR_BASE: String = "user://benchmark_results"
 
@@ -412,6 +413,7 @@ func _finish() -> void:
 func _write_ladder_json() -> void:
 	var path := "%s/bench_ladder.json" % _output_dir
 	var mode_meta := _get_benchmark_mode_metadata_snapshot()
+	var summary := _build_final_summary()
 	var payload := {
 		"meta": {
 			"scenario": "bench_ladder",
@@ -425,8 +427,17 @@ func _write_ladder_json() -> void:
 		},
 		"stamp": _stamp,
 		"benchmark_mode_metadata": mode_meta,
+		"summary": summary,
 		"rungs": _rungs,
 	}
+	payload = PerformanceReportContract.apply(payload, {
+		"scenario": "bench_ladder",
+		"mode": "ladder",
+		"summary": summary,
+		"duration_s": float(Time.get_ticks_msec() - _started_msec) / 1000.0,
+		"benchmark_mode_metadata": mode_meta,
+		"raw_outputs": {"summary_json": path},
+	})
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if not file:
 		Log.error("tools", "[LADDER] failed to open %s" % path)

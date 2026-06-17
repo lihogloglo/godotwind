@@ -16,6 +16,7 @@ class_name ProgressiveBenchmark
 extends Node
 
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
+const PerformanceReportContract := preload("res://src/tools/performance_report_contract.gd")
 
 ## Additive toggle order. HLOD is included before FAR impostors now that distant
 ## rendering is default-on again. Ordering builds up the render cost from
@@ -145,7 +146,8 @@ func _on_pass_complete(results: Dictionary, label: String) -> void:
 func _finalize() -> void:
 	var elapsed_s := float(Time.get_ticks_msec() - _start_ms) / 1000.0
 	_print_summary_table(elapsed_s)
-	_save_progressive_csv()
+	var csv_path := _save_progressive_csv()
+	_save_progressive_json(csv_path, elapsed_s)
 
 	# Restore toggles to their defaults so the next user interaction starts
 	# from a known baseline instead of everything-on.
@@ -216,7 +218,7 @@ func _print_summary_table(elapsed_s: float) -> void:
 			_console.print_line(line)
 
 
-func _save_progressive_csv() -> void:
+func _save_progressive_csv() -> String:
 	var dir_path := "user://benchmark_results"
 	if not DirAccess.dir_exists_absolute(dir_path):
 		DirAccess.make_dir_recursive_absolute(dir_path)
@@ -227,7 +229,7 @@ func _save_progressive_csv() -> void:
 	var file := FileAccess.open(file_path, FileAccess.WRITE)
 	if not file:
 		Log.error("tools", "ProgressiveBenchmark: Failed to write CSV to %s" % file_path)
-		return
+		return ""
 
 	file.store_line("pass,label,enabled_subsystems,benchmark_mode,benchmark_valid,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_draw_calls,peak_vram_mb,peak_texture_mb,total_frames")
 	for i in range(_results.size()):
@@ -255,6 +257,50 @@ func _save_progressive_csv() -> void:
 	file.close()
 	Log.info("tools", "ProgressiveBenchmark: CSV saved to %s" % file_path)
 	_print_console("progressive CSV: %s" % file_path)
+	return file_path
+
+
+func _save_progressive_json(csv_path: String, elapsed_s: float) -> String:
+	var dir_path := "user://benchmark_results"
+	if not DirAccess.dir_exists_absolute(dir_path):
+		DirAccess.make_dir_recursive_absolute(dir_path)
+
+	var timestamp := Time.get_datetime_string_from_system().replace(":", "-").replace("T", "_")
+	var file_path := "%s/progressive_%s.json" % [dir_path, timestamp]
+	var summary := {
+		"passes": _results.size(),
+		"elapsed_s": elapsed_s,
+		"order": PROGRESSIVE_ORDER,
+	}
+	var mode_meta := _get_benchmark_mode_metadata_snapshot()
+	var payload := PerformanceReportContract.apply({
+		"passes": _results,
+		"benchmark_mode_metadata": mode_meta,
+	}, {
+		"scenario": "progressive_subsystem_sweep",
+		"mode": "progressive",
+		"summary": summary,
+		"duration_s": elapsed_s,
+		"benchmark_mode_metadata": mode_meta,
+		"raw_outputs": {"summary_json": file_path, "csv": csv_path},
+	})
+	var file := FileAccess.open(file_path, FileAccess.WRITE)
+	if not file:
+		Log.error("tools", "ProgressiveBenchmark: Failed to write JSON to %s" % file_path)
+		return ""
+	file.store_string(JSON.stringify(payload, "\t"))
+	file.close()
+	Log.info("tools", "ProgressiveBenchmark: JSON saved to %s" % file_path)
+	return file_path
+
+
+func _get_benchmark_mode_metadata_snapshot() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_benchmark_mode_metadata"):
+		return _streaming_manager.call("get_benchmark_mode_metadata")
+	if _streaming_manager and _streaming_manager.has_method("get_stats"):
+		var stats: Dictionary = _streaming_manager.call("get_stats")
+		return stats.get("benchmark_mode_metadata", {})
+	return {}
 
 
 func _print_console(text: String) -> void:

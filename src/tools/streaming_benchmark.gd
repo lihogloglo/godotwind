@@ -9,6 +9,7 @@ extends Node3D
 const DU := preload("res://src/core/world/distance_utils.gd")
 const NativeStreamingManagerScript := preload("res://src/core/world/native_streaming_manager.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const PerformanceReportContract := preload("res://src/tools/performance_report_contract.gd")
 
 #region Signals
 signal benchmark_complete(results: Dictionary)
@@ -1102,6 +1103,15 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 		"total_time_s": results.get("total_time_s", 0.0),
 		"benchmark_mode_metadata": results.get("benchmark_mode_metadata", _get_benchmark_mode_metadata_snapshot()),
 	}
+	var mode_meta: Dictionary = summary.get("benchmark_mode_metadata", {})
+	summary = PerformanceReportContract.apply(summary, {
+		"scenario": "manual_measurement" if _manual_mode else "flythrough_streaming",
+		"mode": summary.get("mode", "scripted"),
+		"summary": summary.duplicate(true),
+		"duration_s": summary.get("total_time_s", 0.0),
+		"benchmark_mode_metadata": mode_meta,
+		"raw_outputs": {"summary_json": file_path},
+	})
 
 	var file := FileAccess.open(file_path, FileAccess.WRITE)
 	if file:

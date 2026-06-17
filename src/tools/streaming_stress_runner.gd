@@ -11,6 +11,7 @@ const BT := preload("res://tests/benchmark/benchmark_thresholds.gd")
 const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 const MWCarryableRegistryScript := preload("res://src/core/interaction/morrowind/mw_carryable_registry.gd")
 const InventoryServiceScript := preload("res://src/core/interaction/inventory_service.gd")
+const PerformanceReportContract := preload("res://src/tools/performance_report_contract.gd")
 
 const OUTPUT_DIR_BASE := "user://benchmark_results"
 const CSV_HEADERS := "frame,time_ms,fps,cam_x,cam_y,cam_z,cell_x,cell_y,cell_changed,queue_size,loaded_cells,async_requests,rendered_objects,draw_calls,primitives,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us,total_impostors,far_pending_cells,far_texture_layers,far_texture_upload_us,far_normal_upload_us,far_multimesh_pack_us,far_multimesh_upload_us,far_cell_scan_us,far_page_count,far_dirty_page_count,far_pages_rebuilt,far_uploaded_instances,mid_instances,mid_visible,mid_buckets,mid_draw_groups,hlod_cells,hlod_pending,hlod_chunk_surfaces,hlod_chunk_materials,hlod_stale_completions,hlod_merge_queue_us,hlod_completion_us,hlod_desired_chunks,hlod_merge_queue_chunks,hlod_preparing_chunks,hlod_negative_chunks,hlod_active_visual_chunks,hlod_visual_begin_m,handoff_mid_hlod_overlap_chunks,hlod_nonvisual_suppressed,far_visibility_begin_m,handoff_far_hlod_overlap_chunks,handoff_hole_risk_chunks,far_hlod_covered_pages,far_hlod_uncovered_pages,far_hlod_covered_impostors,far_hlod_page_overrides,hlod_active_covered_refs,hlod_active_covered_cells,hlod_complete_coverage_chunks,hlod_incomplete_coverage_chunks,mid_mesh_types,hlod_enabled,hlod_initialized,hlod_cache_mb,hlod_chunks_tier_0,hlod_chunks_tier_1,hlod_chunks_tier_2,distant_light_count,distant_light_pending_cells,distant_light_page_count,distant_light_dirty_pages,distant_light_pages_rebuilt,distant_light_scan_us,distant_light_rebuild_us,distant_light_loaded_cells"
@@ -1324,9 +1325,23 @@ func _write_summary_json(summary: Dictionary, csv_path: String, events_path: Str
 	var out := summary.duplicate()
 	out["csv"] = csv_path
 	out["events_csv"] = events_path
+	var mode_meta: Dictionary = summary.get("benchmark_mode_metadata", {})
+	out = PerformanceReportContract.apply(out, {
+		"scenario": _stress_scenario(),
+		"mode": "stress",
+		"summary": summary,
+		"duration_s": summary.get("duration_s", _duration_s),
+		"benchmark_mode_metadata": mode_meta,
+		"threshold_failures": summary.get("failure_reasons", []),
+		"raw_outputs": {"summary_json": path, "csv": csv_path, "events_csv": events_path},
+	})
 	var file := FileAccess.open(path, FileAccess.WRITE)
 	if not file:
 		return ""
 	file.store_string(JSON.stringify(out, "\t"))
 	file.close()
 	return path
+
+
+func _stress_scenario() -> String:
+	return "stress_dense_exterior" if _route_mode == "loop" else "stress_rapid_cell_crossing"
