@@ -1,5 +1,17 @@
 # Godotwind — Godot 4.6 Morrowind Framework
 
+## Ponytail Coding Session Rule
+
+For every Godotwind coding session, use the installed `ponytail` skill before
+planning or editing code. Keep it active unless the user explicitly says
+`stop ponytail` or `normal mode`.
+
+This means: shortest working diff, deletion over addition, no speculative
+abstractions, no new dependency when stdlib/native/project code already solves
+it, and one small runnable check for non-trivial logic. Do not use Ponytail as
+an excuse to skip required verification, safety, accessibility, security, or
+the Godotwind industry-standard architecture rules below.
+
 ## Codex Session Verification Rule
 
 For Godotwind work, do not stop at static inspection. Before calling a gameplay,
@@ -10,6 +22,11 @@ Choose the most specific scene, visual test, benchmark, or tool for the changed
 path. Do not automatically launch `scenes/Godotwind.tscn`; use it only when the
 main world scene itself is the relevant path or no narrower verification target
 exists.
+
+Launch only one Godot scene/window at a time during verification. Before
+starting another scene, confirm the previous Godot process is closed or close it
+yourself; overlapping scene launches can invalidate visual checks and waste GPU
+memory.
 
 Use the documented local binary when a visual launch is appropriate:
 
@@ -429,3 +446,42 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ---
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+
+---
+
+## Spring Cleanup Audit Workflow
+
+When the user says "Spring cleanup", "continue the audit", "project audit",
+"codebase cleanup", "framework cleanup", or asks to continue one of the audit
+pillars, use the repo-local `spring-cleanup` skill:
+
+`./.agents/skills/spring-cleanup/SKILL.md`
+
+Then read `docs/audit/spring_cleanup_state.md` and continue from the next
+unfinished item. Do not ask the user to paste the long audit prompt again.
+
+## Bloat Control Workflow
+
+When the user says "Check for bloat", "bloat control", "LOC audit",
+"code bloat", "dead code cleanup", "delete dead code", "project sprawl", or
+asks whether new lines/tests/side projects are justified, use the repo-local
+`bloat-control` skill:
+
+`./.agents/skills/bloat-control/SKILL.md`
+
+Then read `docs/audit/bloat_control_state.md`, run the bloat scan, classify
+LOC by ownership, and prefer proven deletion over permanent cleanup scaffolding.
+
+## Performance Observatory Workflow
+
+When the user says "Performance Observatory", "Pillar 3.0", "benchmark
+foundation", "diagnostic suite", "performance pipeline", "loading benchmark",
+or asks to prepare performance/loading diagnostics before optimization, use the
+repo-local `performance-observatory` skill:
+
+`./.agents/skills/performance-observatory/SKILL.md`
+
+Then read `docs/audit/performance_observatory_state.md`, run the observability
+scan, and continue from the next unfinished benchmark/debug/diagnostic slice.
+Do not optimize runtime code in Pillar 3.0 until the benchmark/report contract
+has enough evidence to prove the target bottleneck.

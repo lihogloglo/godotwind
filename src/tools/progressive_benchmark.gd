@@ -229,14 +229,17 @@ func _save_progressive_csv() -> void:
 		Log.error("tools", "ProgressiveBenchmark: Failed to write CSV to %s" % file_path)
 		return
 
-	file.store_line("pass,label,enabled_subsystems,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_draw_calls,peak_vram_mb,peak_texture_mb,total_frames")
+	file.store_line("pass,label,enabled_subsystems,benchmark_mode,benchmark_valid,avg_fps,avg_ms,p50_ms,p95_ms,p99_ms,max_ms,avg_draw_calls,peak_draw_calls,peak_vram_mb,peak_texture_mb,total_frames")
 	for i in range(_results.size()):
 		var r: Dictionary = _results[i]
 		var enabled: String = str(r.get("enabled_subsystems", "")).replace(",", ";")
-		file.store_line("%d,%s,%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.0f,%.0f,%d" % [
+		var mode_meta: Dictionary = r.get("benchmark_mode_metadata", {})
+		file.store_line("%d,%s,%s,%s,%s,%.1f,%.2f,%.2f,%.2f,%.2f,%.2f,%d,%d,%.0f,%.0f,%d" % [
 			i,
 			str(r.get("label", "?")),
 			enabled,
+			str(mode_meta.get("mode_name", "unknown")),
+			str(mode_meta.get("valid_for_performance_baseline", true)),
 			r.get("avg_fps", 0.0),
 			r.get("avg_time_ms", 0.0),
 			r.get("p50_ms", 0.0),

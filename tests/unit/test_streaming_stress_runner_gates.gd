@@ -76,6 +76,21 @@ func test_absent_optional_spike_fields_do_not_fail_gate() -> void:
 	runner.free()
 
 
+func test_invalid_benchmark_mode_fails_gate() -> void:
+	var runner := StreamingStressRunnerScript.new()
+	var summary := _base_summary()
+	summary["benchmark_mode_metadata"] = {
+		"valid_for_performance_baseline": false,
+		"invalid_reasons": ["sync_loading_mode"],
+	}
+	var reasons: Array[String] = runner._collect_gate_failure_reasons(
+		summary,
+		{"reasons": [], "unverified": false}
+	)
+	assert_bool(reasons.has("benchmark_invalid:sync_loading_mode")).is_true()
+	runner.free()
+
+
 func test_thresholds_keep_legacy_symbols_with_bible_values() -> void:
 	assert_float(BenchmarkThresholdsScript.FRAME_BUDGET_MS).is_equal_approx(6.67, 0.001)
 	assert_float(BenchmarkThresholdsScript.LEGACY_SHARED_STREAMING_BUDGET_MS).is_equal_approx(8.0, 0.001)

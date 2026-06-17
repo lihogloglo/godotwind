@@ -751,6 +751,13 @@ func _collect_gate_failure_reasons(summary: Dictionary, failure_scan: Dictionary
 			reasons.append(reason)
 	if bool(failure_scan["unverified"]) and not reasons.has("log_scan_unverified"):
 		reasons.append("log_scan_unverified")
+	var mode_meta: Dictionary = summary.get("benchmark_mode_metadata", {})
+	if not bool(mode_meta.get("valid_for_performance_baseline", true)):
+		var invalid: Array = mode_meta.get("invalid_reasons", [])
+		for reason_value in invalid:
+			var reason := "benchmark_invalid:%s" % str(reason_value)
+			if not reasons.has(reason):
+				reasons.append(reason)
 	for route_failure: String in _route_setup_failures:
 		var reason := "route_invalid:%s" % route_failure
 		if not reasons.has(reason):
@@ -876,6 +883,7 @@ func _build_summary() -> Dictionary:
 			"route_forced_hlod": _route_forced_hlod,
 			"blocking_frame_ms": BLOCKING_FRAME_MS,
 			"frames": 0,
+			"benchmark_mode_metadata": _get_benchmark_mode_metadata_snapshot(),
 			"lifecycle_event_counts": _build_event_counts(),
 		}
 
@@ -1050,6 +1058,7 @@ func _build_summary() -> Dictionary:
 		"route_valid": _route_setup_failures.is_empty(),
 		"route_setup_failures": _route_setup_failures.duplicate(),
 		"route_forced_hlod": _route_forced_hlod,
+		"benchmark_mode_metadata": _get_benchmark_mode_metadata_snapshot(),
 		"route_cells": _route_cells_as_strings(),
 		"route_cell_ref_counts": _route_cell_ref_counts,
 		"route_length_m": _route_total_length,
@@ -1148,6 +1157,15 @@ func _build_summary() -> Dictionary:
 		"transitions": transitions,
 		"lifecycle_event_counts": lifecycle_counts,
 	}
+
+
+func _get_benchmark_mode_metadata_snapshot() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_benchmark_mode_metadata"):
+		return _streaming_manager.call("get_benchmark_mode_metadata")
+	if _streaming_manager and _streaming_manager.has_method("get_stats"):
+		var stats: Dictionary = _streaming_manager.call("get_stats")
+		return stats.get("benchmark_mode_metadata", {})
+	return {}
 
 
 func _build_event_counts() -> Dictionary:

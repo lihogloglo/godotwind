@@ -26,7 +26,7 @@ const ModelPrebaker := preload("res://src/tools/prebaking/model_prebaker.gd")
 const NavMeshBaker := preload("res://src/tools/navmesh_baker.gd")
 const ShoreMaskBaker := preload("res://src/tools/shore_mask_baker.gd")
 const HydrologyAtlasPrebaker := preload("res://src/tools/prebaking/morrowind_hydrology_atlas_prebaker.gd")
-const ImpostorCandidates := preload("res://src/core/world/impostor_candidates.gd")
+const MorrowindImpostorCandidates := preload("res://src/core/world/morrowind/morrowind_impostor_candidates.gd")
 const TerrainManagerScript := preload("res://src/core/world/terrain_manager.gd")
 const TerrainTextureLoaderScript := preload("res://src/core/world/terrain_texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
@@ -708,7 +708,7 @@ func _bake_impostors() -> Dictionary:
 
 	# Get pending items
 	var impostor_state: PrebakeState.ComponentState = _state_manager.impostors
-	var candidates := ImpostorCandidates.new()
+	var candidates := MorrowindImpostorCandidates.new()
 	if impostor_state.pending.is_empty():
 		# Build initial pending list from ALL impostor candidates (landmarks, buildings, terrain, trees)
 		impostor_state.pending = candidates.get_all_impostor_models().duplicate()

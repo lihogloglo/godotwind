@@ -1,14 +1,16 @@
 class_name MorrowindHydrologyAtlasPrebaker
 extends RefCounted
 
-const GpuHydrologyBakerScript := preload("res://src/core/world/morrowind/morrowind_gpu_hydrology_baker.gd")
+const MorrowindNativeBridgeScript := preload("res://src/core/world/morrowind/morrowind_native_bridge.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 
 const SCHEMA := "godotwind.morrowind.hydrology.global_flow_atlas.v1"
-const PREBAKED_CACHE_VERSION := "morrowind_gpu_hydrology_region_v1"
+const PREBAKED_CACHE_VERSION := "morrowind_hydrology_atlas_v2"
 const FLOW_FORMAT := "RGBA8 flowmap: RG=direction, B=speed, A=coverage"
 const DEFAULT_REGION_SIZE_PIXELS := 256
 const DEFAULT_VERTEX_SPACING_M := CS.CELL_SIZE_GODOT / 64.0
+const DEFAULT_FLOW_SPEED_MPS := 1.4
+const MAX_ENCODED_SPEED_MPS := 6.0
 
 signal progress(current: int, total: int, region_key: String)
 
@@ -18,10 +20,7 @@ var region_size_pixels: int = DEFAULT_REGION_SIZE_PIXELS
 var vertex_spacing_m: float = DEFAULT_VERTEX_SPACING_M
 var sea_level: float = 0.0
 var wet_tolerance_m: float = 0.0
-var max_river_width_m: float = 125.0
-var min_river_width_m: float = 7.0
 var halo_pixels: int = 64
-var min_open_sea_area_pixels: int = 16384
 var stop_requested: bool = false
 
 
@@ -78,38 +77,68 @@ func _bake_from_loaded_terrain_data(terrain_data: Terrain3DData, terrain_dir: St
 		return a.y < b.y or (a.y == b.y and a.x < b.x)
 	)
 
-	var baker: MorrowindGpuHydrologyBaker = GpuHydrologyBakerScript.new()
-	_configure_baker(baker)
-	var init_err := baker.initialize()
-	if init_err != OK:
+	var builder := _create_native_atlas_builder()
+	if builder == null:
 		return {
-			"error": init_err,
+			"error": ERR_UNAVAILABLE,
 			"success": 0,
 			"failed": sorted_regions.size(),
 			"skipped": 0,
 			"output_directory": out_dir,
-			"message": "GPU hydrology baker unavailable",
+			"message": "Native Morrowind hydrology atlas builder unavailable; run dotnet build Godotwind.sln",
 		}
+
+	var native_tiles: Array[Dictionary] = []
+	for region_coord: Vector2i in sorted_regions:
+		var heightmap: Image = heightmaps[region_coord]
+		native_tiles.append({
+			"region": region_coord,
+			"heightmap": heightmap,
+		})
+
+	var start_usec := Time.get_ticks_usec()
+	var atlas_result: Dictionary = builder.call(
+		"BuildAtlas",
+		native_tiles,
+		vertex_spacing_m,
+		sea_level,
+		wet_tolerance_m,
+		DEFAULT_FLOW_SPEED_MPS,
+		MAX_ENCODED_SPEED_MPS
+	)
+	var total_bake_ms := float(Time.get_ticks_usec() - start_usec) / 1000.0
+	if int(atlas_result.get("error", FAILED)) != OK:
+		return {
+			"error": int(atlas_result.get("error", FAILED)),
+			"success": 0,
+			"failed": sorted_regions.size(),
+			"skipped": 0,
+			"output_directory": out_dir,
+			"message": String(atlas_result.get("message", "Native hydrology atlas build failed")),
+		}
+
+	var region_results: Array = atlas_result.get("regions", [])
+	var results_by_region: Dictionary[Vector2i, Dictionary] = {}
+	for result_v: Variant in region_results:
+		if not result_v is Dictionary:
+			continue
+		var result_dict: Dictionary = result_v as Dictionary
+		results_by_region[result_dict.get("region", Vector2i(2147483647, 2147483647))] = result_dict
 
 	var manifest_regions: Array[Dictionary] = []
 	var baked := 0
 	var failed := 0
-	var total_bake_ms := 0.0
 	for i in range(sorted_regions.size()):
 		if stop_requested:
 			break
 		var region_coord := sorted_regions[i]
 		var key := _prebaked_region_key(region_coord)
-		var heightmap: Image = heightmaps[region_coord]
-		var padded_heightmap := _build_padded_heightmap(region_coord, heightmap, heightmaps)
-		var crop_rect := Rect2i(halo_pixels, halo_pixels, heightmap.get_width(), heightmap.get_height())
-		var region_result: Dictionary = baker.bake_from_heightmap(padded_heightmap, vertex_spacing_m, crop_rect)
+		var region_result: Dictionary = results_by_region.get(region_coord, {})
 		var flow_image: Image = region_result.get("image") as Image
 		if flow_image == null:
 			failed += 1
 			progress.emit(i + 1, sorted_regions.size(), key)
 			continue
-		total_bake_ms += float(region_result.get("bake_usec", 0)) / 1000.0
 		var image_path := out_dir.path_join(key + ".png")
 		var metadata_path := out_dir.path_join(key + ".json")
 		var save_err := flow_image.save_png(image_path)
@@ -140,7 +169,6 @@ func _bake_from_loaded_terrain_data(terrain_data: Terrain3DData, terrain_dir: St
 		})
 		baked += 1
 		progress.emit(i + 1, sorted_regions.size(), key)
-	baker.shutdown()
 
 	var manifest := {
 		"schema": SCHEMA,
@@ -168,14 +196,9 @@ func request_stop() -> void:
 	stop_requested = true
 
 
-func _configure_baker(baker: MorrowindGpuHydrologyBaker) -> void:
-	baker.sea_level = sea_level
-	baker.wet_tolerance_m = wet_tolerance_m
-	baker.max_river_width_m = max_river_width_m
-	baker.min_river_width_m = min_river_width_m
-	baker.halo_pixels = halo_pixels
-	baker.require_open_water_connection = true
-	baker.local_ocean_postprocess_enabled = false
+func _create_native_atlas_builder() -> RefCounted:
+	var bridge: RefCounted = MorrowindNativeBridgeScript.new()
+	return bridge.create_hydrology_atlas_builder()
 
 
 func _load_heightmaps_from_terrain_data(terrain_data: Terrain3DData) -> Dictionary:

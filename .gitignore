@@ -37,6 +37,11 @@ mono_crash.*.json
 *.log
 *_debug.txt
 
+# Generated gdUnit HTML/XML report directories. Keep durable evidence in
+# docs/audit summaries or explicitly named smoke logs, not numbered reports.
+reports/report_*/
+reports/performance_observatory_scan.*
+
 # OS generated files
 .DS_Store
 Thumbs.db

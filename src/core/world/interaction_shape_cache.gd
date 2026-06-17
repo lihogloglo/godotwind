@@ -28,8 +28,7 @@
 ## Plan: docs/plans/near_streaming_2026_04_28_interactive_spawn.md step 2.
 ##
 ## Deliberately NO class_name — consumers preload this script as a Script
-## const (mirrors `prototype_batch.gd` / `prototype_registry.gd`). Class-
-## name-free avoids the gdUnit4 test-scan + load-order resolution issues
+## const. Class-name-free avoids the gdUnit4 test-scan + load-order resolution issues
 ## that bit `reference_instantiator.gd` when class_name was set here.
 extends RefCounted
 

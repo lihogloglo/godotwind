@@ -2,6 +2,7 @@ extends GdUnitTestSuite
 
 const MorrowindHydrologyProviderScript := preload("res://src/core/world/morrowind/morrowind_hydrology_provider.gd")
 const HydrologyAtlasPrebakerScript := preload("res://src/tools/prebaking/morrowind_hydrology_atlas_prebaker.gd")
+const MorrowindNativeBridgeScript := preload("res://src/core/world/morrowind/morrowind_native_bridge.gd")
 
 
 func test_generated_flowmap_marks_long_narrow_sea_level_channel_as_river() -> void:
@@ -22,6 +23,49 @@ func test_hydrology_atlas_prebaker_script_loads() -> void:
 	assert_bool(prebaker.has_method("bake_from_terrain3d_directory")).is_true()
 
 
+func test_native_atlas_marks_cross_region_channel_as_river() -> void:
+	var result := _build_native_atlas([
+		{"region": Vector2i.ZERO, "heightmap": _heightmap_with_ocean_and_channel_tile(32, 32, true)},
+		{"region": Vector2i(1, 0), "heightmap": _heightmap_with_ocean_and_channel_tile(32, 32, false)},
+	])
+	if result.is_empty():
+		return
+	var region := _region_result_for(result.get("regions", []), Vector2i(1, 0))
+	var image: Image = region.get("image") as Image
+	assert_object(image).is_not_null()
+	var river := image.get_pixel(12, 15)
+	assert_float(river.a).is_greater(0.5)
+	assert_float(river.b).is_greater(0.001)
+
+
+func test_native_atlas_keeps_broad_lake_still() -> void:
+	var result := _build_native_atlas([
+		{"region": Vector2i.ZERO, "heightmap": _heightmap_with_wide_lake(32, 32)},
+	])
+	if result.is_empty():
+		return
+	var region := _region_result_for(result.get("regions", []), Vector2i.ZERO)
+	var image: Image = region.get("image") as Image
+	assert_object(image).is_not_null()
+	var lake := image.get_pixel(16, 16)
+	assert_float(lake.a).is_greater(0.5)
+	assert_float(lake.b).is_equal_approx(0.0, 0.001)
+
+
+func test_native_atlas_rejects_short_coastal_inlet() -> void:
+	var result := _build_native_atlas([
+		{"region": Vector2i.ZERO, "heightmap": _heightmap_with_short_coastal_inlet(48, 32)},
+	])
+	if result.is_empty():
+		return
+	var region := _region_result_for(result.get("regions", []), Vector2i.ZERO)
+	var image: Image = region.get("image") as Image
+	assert_object(image).is_not_null()
+	var inlet := image.get_pixel(20, 15)
+	assert_float(inlet.a).is_greater(0.5)
+	assert_float(inlet.b).is_equal_approx(0.0, 0.001)
+
+
 func test_full_resolution_region_uses_gpu_cache_version() -> void:
 	var provider: MorrowindHydrologyProvider = _configured_provider(_heightmap_with_horizontal_channel(128, 128, 60, 66), 2.0)
 
@@ -29,7 +73,7 @@ func test_full_resolution_region_uses_gpu_cache_version() -> void:
 	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(OK)
 
 	var cached: Dictionary = provider._region_cache.get(Vector2i.ZERO, {})
-	assert_that(cached.get("algorithm")).is_equal("river_flow_gpu_v3")
+	assert_that(cached.get("algorithm")).is_equal("river_flow_gpu_legacy_v5")
 	assert_float(provider.sample_coverage(Vector3(128.0, -0.5, -128.0))).is_greater(0.5)
 
 
@@ -65,9 +109,26 @@ func test_prepare_region_loads_prebaked_hydrology_without_heightmap_request() ->
 
 	var cached: Dictionary = provider._region_cache.get(Vector2i.ZERO, {})
 	assert_bool(bool(cached.get("prebaked", false))).is_true()
-	assert_that(cached.get("algorithm")).is_equal("morrowind_gpu_hydrology_region_v1")
+	assert_that(cached.get("algorithm")).is_equal("morrowind_hydrology_atlas_v2")
 	assert_int(terrain.heightmap_requests).is_equal(0)
 	assert_float(provider.sample_coverage(Vector3(16.0, -0.5, -16.0))).is_greater(0.5)
+	_clear_cache_dir(cache_dir)
+
+
+func test_prepare_region_ignores_stale_prebaked_hydrology_version() -> void:
+	var cache_dir := "user://hydrology_provider_stale_prebaked_atlas"
+	_clear_cache_dir(cache_dir)
+	_write_prebaked_hydrology_region(cache_dir, Vector2i.ZERO, "morrowind_gpu_hydrology_region_v1")
+	var terrain := FakeLazyTerrainProvider.new(2.0)
+	var provider: MorrowindHydrologyProvider = MorrowindHydrologyProviderScript.new()
+	provider.configure(terrain, null)
+	provider.cache_enabled = false
+	provider.hydrology_atlas_directory = cache_dir
+	provider.allow_runtime_hydrology_bake = false
+
+	assert_int(provider.initialize()).is_equal(OK)
+	assert_int(provider.prepare_region(Vector2i.ZERO)).is_equal(ERR_DOES_NOT_EXIST)
+	assert_int(terrain.heightmap_requests).is_equal(0)
 	_clear_cache_dir(cache_dir)
 
 
@@ -383,6 +444,55 @@ func _configured_multi_region_provider(heightmap: Image, vertex_spacing: float) 
 	return provider
 
 
+func _build_native_atlas(tiles: Array) -> Dictionary:
+	var bridge: RefCounted = MorrowindNativeBridgeScript.new()
+	var builder := bridge.create_hydrology_atlas_builder()
+	if builder == null:
+		return {}
+	var result: Dictionary = builder.call(
+		"BuildAtlas",
+		tiles,
+		2.0,
+		0.0,
+		0.0,
+		1.4,
+		6.0
+	)
+	assert_int(int(result.get("error", FAILED))).is_equal(OK)
+	return result
+
+
+func _region_result_for(regions: Array, region_coord: Vector2i) -> Dictionary:
+	for region_v: Variant in regions:
+		if not region_v is Dictionary:
+			continue
+		var region: Dictionary = region_v as Dictionary
+		if region.get("region", Vector2i(2147483647, 2147483647)) == region_coord:
+			return region
+	return {}
+
+
+func _heightmap_with_ocean_and_channel_tile(width: int, height: int, include_ocean: bool) -> Image:
+	var image := Image.create(width, height, false, Image.FORMAT_RF)
+	for y in range(height):
+		for x in range(width):
+			var in_ocean := include_ocean and x <= 5
+			var in_channel := y >= 14 and y <= 16
+			var channel_slope := -1.0 + float(x) * 0.01
+			image.set_pixel(x, y, Color(channel_slope if in_channel or in_ocean else 3.0 + absf(float(y) - 15.0) * 0.08, 0.0, 0.0, 1.0))
+	return image
+
+
+func _heightmap_with_short_coastal_inlet(width: int, height: int) -> Image:
+	var image := Image.create(width, height, false, Image.FORMAT_RF)
+	for y in range(height):
+		for x in range(width):
+			var in_ocean := x <= 9
+			var in_inlet := x > 9 and x <= 22 and y >= 14 and y <= 16
+			image.set_pixel(x, y, Color(-1.0 if in_ocean or in_inlet else 3.0, 0.0, 0.0, 1.0))
+	return image
+
+
 func _heightmap_with_horizontal_channel(width: int, height: int, water_y_min: int, water_y_max: int) -> Image:
 	var image := Image.create(width, height, false, Image.FORMAT_RF)
 	for y in range(height):
@@ -498,7 +608,7 @@ func _clear_cache_dir(cache_dir: String) -> void:
 		DirAccess.remove_absolute(native_dir.path_join(file_name))
 
 
-func _write_prebaked_hydrology_region(cache_dir: String, region_coord: Vector2i) -> void:
+func _write_prebaked_hydrology_region(cache_dir: String, region_coord: Vector2i, algorithm: String = "morrowind_hydrology_atlas_v2") -> void:
 	var native_dir := ProjectSettings.globalize_path(cache_dir)
 	DirAccess.make_dir_recursive_absolute(native_dir)
 	var image := Image.create(32, 32, false, Image.FORMAT_RGBA8)
@@ -507,12 +617,12 @@ func _write_prebaked_hydrology_region(cache_dir: String, region_coord: Vector2i)
 	assert_int(image.save_png(native_dir.path_join(key + ".png"))).is_equal(OK)
 	var manifest := {
 		"schema": "godotwind.morrowind.hydrology.region_atlas.v1",
-		"algorithm": "morrowind_gpu_hydrology_region_v1",
+		"algorithm": algorithm,
 		"regions": [{"region": [region_coord.x, region_coord.y], "image": key + ".png", "metadata": key + ".json"}],
 	}
 	var metadata := {
 		"schema": "godotwind.morrowind.hydrology.region_atlas.v1",
-		"algorithm": "morrowind_gpu_hydrology_region_v1",
+		"algorithm": algorithm,
 		"source": "offline_terrain3d_prebake",
 		"river_count": 0,
 		"components": [],

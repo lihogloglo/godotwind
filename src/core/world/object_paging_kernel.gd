@@ -33,7 +33,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 
 
 ## LOD generation parameters for merged chunks. Aggressive because merged
-## chunks only render at 300m+ (HLOD) / 150m+ (paging tiers).
+## chunks only render at the 400m+ HLOD floor when ObjectPaging is enabled.
 const LOD_NORMAL_MERGE_ANGLE: float = 60.0
 const LOD_SCREEN_COVERAGE: float = 25.0
 
@@ -85,9 +85,7 @@ static func _get_native() -> RefCounted:
 	if _native == null and not _native_checked:
 		_native_checked = true
 		var bridge := NativeBridgeScript.new()
-		var factory: RefCounted = bridge.get("_factory")
-		if factory != null:
-			_native = factory.call("CreateObjectPagingKernel") as RefCounted
+		_native = bridge.create_native_service(&"CreateObjectPagingKernel") as RefCounted
 		if _native == null:
 			push_error("ObjectPagingKernel: native C# kernel unavailable — rebuild C# (dotnet build Godotwind.sln)")
 	var out: RefCounted = _native

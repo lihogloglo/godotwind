@@ -806,7 +806,17 @@ func _calculate_results() -> Dictionary:
 		"peak_vram_mb": peak_vram_mb,
 		"peak_texture_mb": peak_texture_mb,
 		"segments": segment_data,
+		"benchmark_mode_metadata": _get_benchmark_mode_metadata_snapshot(),
 	}
+
+
+func _get_benchmark_mode_metadata_snapshot() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_benchmark_mode_metadata"):
+		return _streaming_manager.call("get_benchmark_mode_metadata")
+	if _streaming_manager:
+		var stats: Dictionary = _streaming_manager.get_stats()
+		return stats.get("benchmark_mode_metadata", {})
+	return {}
 
 
 func _sort_float_array(arr: PackedFloat64Array) -> void:
@@ -922,6 +932,18 @@ func _print_summary(results: Dictionary) -> void:
 	lines.append("VRAM:")
 	lines.append("  Peak VRAM: %.0f MB" % results.peak_vram_mb)
 	lines.append("  Peak texture memory: %.0f MB" % results.peak_texture_mb)
+	var mode_meta: Dictionary = results.get("benchmark_mode_metadata", {})
+	if not mode_meta.is_empty():
+		lines.append("")
+		lines.append("Benchmark Mode:")
+		lines.append("  Mode: %s" % str(mode_meta.get("mode_name", "unknown")))
+		lines.append("  Valid baseline: %s" % str(mode_meta.get("valid_for_performance_baseline", true)))
+		var invalid: Array = mode_meta.get("invalid_reasons", [])
+		if not invalid.is_empty():
+			var reason_text: PackedStringArray = PackedStringArray()
+			for reason_value in invalid:
+				reason_text.append(str(reason_value))
+			lines.append("  Invalid reasons: %s" % ", ".join(reason_text))
 
 	# MID-tier stats — show range over entire run to detect cleanup issues
 	var final_mid_stats := _get_mid_tier_stats()
@@ -1078,6 +1100,7 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 		"peak_vram_mb": results.get("peak_vram_mb", 0.0),
 		"total_frames": results.get("total_frames", 0),
 		"total_time_s": results.get("total_time_s", 0.0),
+		"benchmark_mode_metadata": results.get("benchmark_mode_metadata", _get_benchmark_mode_metadata_snapshot()),
 	}
 
 	var file := FileAccess.open(file_path, FileAccess.WRITE)

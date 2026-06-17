@@ -1,6 +1,7 @@
 extends GdUnitTestSuite
 
 const OceanControlsScript := preload("res://src/tools/ui/ocean_controls.gd")
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
 
 
 func test_underwater_feature_choices_survive_process_sync() -> void:
@@ -39,3 +40,32 @@ func test_show_ocean_toggle_tracks_ocean_surface_without_clearing_water_preferen
 	assert_bool(controls.is_underwater_feature_enabled(&"snell")).is_false()
 	assert_bool(controls.is_underwater_feature_enabled(&"particles")).is_false()
 	assert_bool(status["underwater_particles_enabled"]).is_false()
+
+
+func test_temporary_world_space_ocean_hide_does_not_clear_user_toggle() -> void:
+	var controls: OceanControls = OceanControlsScript.new({})
+
+	controls.set_world_space_ocean_visible(false)
+
+	assert_bool(controls.show_ocean).is_true()
+	assert_bool(controls.all_water_enabled).is_true()
+
+
+func test_ocean_camera_layer_uses_shared_render_policy() -> void:
+	var camera := Camera3D.new()
+	camera.cull_mask = RenderLayersScript.EXTERIOR_WORLD
+	var controls: OceanControls = OceanControlsScript.new({})
+
+	controls.set_camera(camera)
+
+	assert_bool(RenderLayersScript.has_water_surface(camera.cull_mask)).is_true()
+	assert_bool(RenderLayersScript.has_exterior_world(camera.cull_mask)).is_true()
+	camera.free()
+
+
+func test_world_space_ocean_restore_uses_active_camera_configuration_path() -> void:
+	var source := FileAccess.get_file_as_string("res://src/tools/ui/ocean_controls.gd")
+
+	assert_bool(source.contains("func set_world_space_ocean_visible(visible: bool)")).is_true()
+	assert_bool(source.contains("var active_camera := _get_active_camera()")).is_true()
+	assert_bool(source.contains("set_camera(active_camera)")).is_true()

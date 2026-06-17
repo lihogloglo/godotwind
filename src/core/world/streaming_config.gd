@@ -106,7 +106,8 @@ static func format_load_radius_with_distance(value: int) -> String:
 const NEAR_END := DU.NEAR_END  # 150.0
 
 ## Distance where MID tier ends and FAR begins by default (meters)
-## MID tier: one RS instance per object, engine-driven sub-LOD from embedded ArrayMesh surface_lod chain
+## MID tier: cell-local CellStaticBucket draw groups, engine-driven sub-LOD
+## from embedded ArrayMesh surface_lod chains.
 const MID_END := DU.MID_END  # 400.0
 
 ## Distance where FAR tier ends and HORIZON begins (meters)
@@ -244,8 +245,8 @@ const CELL_STATIC_COLLISION_FINALIZE_MIN_REMAINING_MS := 2.0
 const CELL_STATIC_COLLISION_FINALIZE_MAX_TRIS_PER_FRAME := 1000
 
 ## Main-thread static prototype prepare budget. This lane registers renderer
-## prototypes and creates empty PrototypeBatch/MultiMesh buckets before refs
-## reach the activation drain, avoiding cold work inside add_instance().
+## prototypes before refs reach the activation drain, avoiding cold work inside
+## add_instance().
 const STATIC_PREPARE_ENABLED := true
 const STATIC_PREPARE_BUDGET_MS := 2.0
 const STATIC_PREPARE_MAX_PER_FRAME := 1
@@ -277,31 +278,6 @@ const NEAR_BURST_DISTANCE := 0.0              ## Disabled until visual stability
 ## Waits for multiple textures to finish loading before rebuilding
 const TEXTURE_REBUILD_DELAY_MS := 300.0
 
-## Maximum number of MultiMesh rebuilds per second
-## Prevents per-frame rebuilding during heavy loading
-const MAX_MULTIMESH_REBUILDS_PER_SEC := 4.0
-
-## Maximum PrototypeRegistry batches to cull/upload per frame after static
-## renderer churn. 0 means full pass. During NEAR stabilization, keep this
-## bounded so one unload/add dirty sweep cannot spend 4-15 ms in
-## MultiMesh.set_buffer work on the same frame as cell transition work.
-const STATIC_CULL_BATCH_BUDGET_PER_FRAME: int = 12
-
-## Godot 4.6 has proven sensitive to replacing a world-scoped MultiMesh buffer
-## in the same frame as unload-driven slot hide/release churn. While any
-## static renderer unload queue is active, pause PrototypeRegistry uploads; once
-## the unload queues go quiet, let this many frames pass before the next upload.
-const STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD: int = 4
-
-## Native C# packing kernel for world-scoped static MultiMesh culling.
-##
-## Default-disabled after the 2026-04-28 smooth-baseline run crashed in
-## PrototypeBatch._cull_native() while uploading the C#-returned buffer via
-## RenderingServer.multimesh_set_buffer. The GDScript fallback still uses the
-## same RenderingServer/MultiMesh render path, but keeps the packed buffer owned
-## by GDScript until the native handoff is reworked and proven stable.
-const STATIC_CULL_NATIVE_ENABLED: bool = false
-
 # =============================================================================
 # MEMORY LIMITS
 # =============================================================================
@@ -322,11 +298,11 @@ const IMPOSTOR_TEXTURE_WARNING_THRESHOLD := 230
 const MAX_NEAR_CELLS := 13
 
 ## Maximum number of MID tier cells loaded simultaneously
-## MID tier: fixed bridge through 300m
+## MID tier: fixed static visual bridge through 400m
 const MAX_MID_CELLS := 80
 
 ## Maximum number of FAR tier cells loaded simultaneously
-## FAR tier: 1000-5000m ring
+## FAR tier: 400-5000m ring, capped by view distance
 const MAX_FAR_CELLS := 250
 
 # =============================================================================
@@ -462,18 +438,6 @@ const POOL_PREWARM_MAX_PER_FRAME := 20
 const POOL_PREWARM_DISTANCE := 250.0
 
 # =============================================================================
-# LODMULTIMESHBATCHER OPTIMIZATION
-# =============================================================================
-
-## Initial capacity for each MultiMesh batch
-## Higher = fewer growth operations, more memory
-## 256 is good balance for typical Morrowind object density
-const INITIAL_BATCH_CAPACITY := 256
-
-## Maximum batch capacity before splitting into new batch
-const MAX_BATCH_CAPACITY := 4096
-
-# =============================================================================
 # DIAGNOSTIC FLAGS
 # =============================================================================
 
@@ -531,15 +495,6 @@ const PRELOAD_PREDICTION_TIME_S: float = 1.0
 static var DEBUG_DISABLE_JOLT_ATTACH: bool = false
 static var DEBUG_DISABLE_FADE_POOL: bool = false
 static var DEBUG_DISABLE_CELL_STATIC_COLLISION: bool = false
-
-## Phase F off-thread prototype pre-registration.
-##
-## Default-disabled after the 2026-04-28 fresh benchmark crashed before writing
-## data with Phase F enabled, while the same route completed with
-## --disable-phase-f-prereg. The worker path instantiates PackedScenes and
-## registers prototypes off-thread; that is too crash-prone on this Godot 4.6
-## setup. Keep the flag as an opt-in research switch via --enable-phase-f-prereg.
-static var DEBUG_DISABLE_PHASE_F_PREREG: bool = true
 
 # =============================================================================
 # STREAMING MODE - FULL_AAA ONLY (Simplified)

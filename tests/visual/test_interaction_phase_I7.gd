@@ -261,7 +261,7 @@ func _spawn_props() -> void:
 	door_adapter.display_name = "Iron Door"
 	door_adapter.has_destination = true
 	door_adapter.destination_name = "Test Destination"
-	door.add_child(door_adapter)
+	_wrap_prop_with_interactable(door, door_adapter)
 	door_adapter.door_activated.connect(_on_door_activated)
 
 	# Container (unlocked) — emits container_opened on tap
@@ -270,7 +270,7 @@ func _spawn_props() -> void:
 	var box_adapter := ContainerInteractableScript.new()
 	box_adapter.record_id = "crate_test_01"
 	box_adapter.display_name = "Wooden Crate"
-	box.add_child(box_adapter)
+	_wrap_prop_with_interactable(box, box_adapter)
 	box_adapter.container_opened.connect(_on_container_opened)
 
 	# Container (locked) — refuses on tap
@@ -281,7 +281,7 @@ func _spawn_props() -> void:
 	locked_adapter.display_name = "Locked Strongbox"
 	locked_adapter.locked = true
 	locked_adapter.lock_level = 50
-	locked.add_child(locked_adapter)
+	_wrap_prop_with_interactable(locked, locked_adapter)
 	locked_adapter.container_refused.connect(_on_container_refused)
 	locked_adapter.container_opened.connect(_on_container_opened)
 
@@ -292,8 +292,20 @@ func _spawn_props() -> void:
 	lever_adapter.record_id = "lever_test_01"
 	lever_adapter.display_name = "Stone Lever"
 	lever_adapter.script_id = "test_lever_script"
-	lever.add_child(lever_adapter)
+	_wrap_prop_with_interactable(lever, lever_adapter)
 	lever_adapter.activator_triggered.connect(_on_activator_triggered)
+
+
+func _wrap_prop_with_interactable(prop: Node3D, interactable: Interactable) -> void:
+	var parent := prop.get_parent()
+	if parent == null:
+		return
+	interactable.name = "%s_Interactable" % prop.name
+	interactable.transform = prop.transform
+	prop.transform = Transform3D.IDENTITY
+	parent.remove_child(prop)
+	parent.add_child(interactable)
+	interactable.add_child(prop)
 
 
 func _make_prop(label: String, pos: Vector3, color: Color, size: Vector3) -> Node3D:

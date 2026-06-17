@@ -6,10 +6,10 @@
 ## - Unified _all_records dictionary for O(1) get_any_record() lookup
 ## - Type-based dispatch table instead of if-elif chain for _store_record()
 ## - Strict typing on all dictionaries for GDScript compiler optimization
-## - Native C# ESM loader (10-30x faster) when available via NativeBridge
+## - Native C# ESM loader (10-30x faster) when available via NativeESMBridge
 extends Node
 
-const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
+const NativeESMBridgeScript := preload("res://src/core/esm/native_esm_bridge.gd")
 
 # Signals
 signal loading_started(file_path: String)
@@ -191,7 +191,7 @@ func load_file(path: String) -> Error:
 	loading_started.emit(path)
 
 	# Try native C# loader with caching first (fastest path)
-	if NativeBridgeScript.is_csharp_available():
+	if NativeESMBridgeScript.is_available():
 		var result := _load_file_native_cached(path)
 		if result == OK:
 			return OK
@@ -200,7 +200,7 @@ func load_file(path: String) -> Error:
 
 	# GDScript fallback - functional but slow
 	# Consider using Godot Mono build for better performance
-	if not NativeBridgeScript.is_csharp_available():
+	if not NativeESMBridgeScript.is_available():
 		push_warning("ESMManager: C# not available. Using GDScript loader (slow). " +
 			"For better performance, use Godot Mono build.")
 
@@ -209,7 +209,7 @@ func load_file(path: String) -> Error:
 
 ## Load using native C# loader with caching (fastest path)
 func _load_file_native_cached(path: String) -> Error:
-	var bridge := NativeBridgeScript.new()
+	var bridge := NativeESMBridgeScript.new()
 	var start_time := Time.get_ticks_msec()
 
 	# Get cache path from SettingsManager (supports custom cache locations)
@@ -253,7 +253,7 @@ func _load_file_native_cached(path: String) -> Error:
 
 ## Load using native C# loader without caching (for testing)
 func _load_file_native(path: String) -> Error:
-	var bridge := NativeBridgeScript.new()
+	var bridge := NativeESMBridgeScript.new()
 	var loader: RefCounted = bridge.load_esm_file(path, false)  # Don't lazy load for now
 
 	if loader == null:
@@ -341,7 +341,7 @@ func _populate_from_native(loader: RefCounted) -> void:
 	var t0 := Time.get_ticks_msec()
 
 	# Cache bridge instance for on-demand record creation
-	_bridge = NativeBridgeScript.new()
+	_bridge = NativeESMBridgeScript.new()
 
 	# Batch cell + reference export — ~30 packed array marshals instead of ~1.2M .get() calls
 	var packed_data: Dictionary = _bridge.export_all_cells_packed(loader)
@@ -1189,9 +1189,9 @@ func get_any_record(id: String, out_type: Array = []) -> ESMRecord:
 ## fall through to on-demand creation since that writes to `_all_records`
 ## and the type-specific dicts.
 ##
-## Used by Fix D's preregister_cell_statics dispatcher worker — workers
-## skip cache-miss refs (the main-thread instantiation path will trigger
-## on-demand creation later if the ref is actually instantiated).
+## Worker-safe cache lookup: workers skip cache-miss refs (the main-thread
+## instantiation path will trigger on-demand creation later if the ref is
+## actually instantiated).
 ##
 ## Plan: docs/plans/streaming_stutter_2026_04_25.md (Fix D follow-up).
 func get_any_record_cached(id: String, out_type: Array = []) -> ESMRecord:

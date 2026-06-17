@@ -5,7 +5,24 @@ const WorldObjectRecordScript := preload("res://src/core/world/world_object_reco
 const WorldCellManifestScript := preload("res://src/core/world/world_cell_manifest.gd")
 
 
+func get_space_manifest(space_handle: RefCounted) -> Variant:
+	if space_handle == null:
+		return null
+	if space_handle.has_method("is_interior") and bool(space_handle.call("is_interior")):
+		return get_interior_cell_manifest(str(space_handle.get("key")))
+	if space_handle.has_method("is_exterior") and bool(space_handle.call("is_exterior")):
+		var key := str(space_handle.get("key"))
+		var parts := key.split(",")
+		if parts.size() == 2:
+			return get_cell_manifest(Vector2i(int(parts[0]), int(parts[1])))
+	return null
+
+
 func get_cell_manifest(cell_grid: Vector2i) -> Variant:
+	return null
+
+
+func get_interior_cell_manifest(cell_name: String) -> Variant:
 	return null
 
 

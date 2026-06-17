@@ -320,7 +320,6 @@ func _do_grab(target: Interactable, rb: RigidBody3D) -> void:
 func release() -> void:
 	if not is_carrying():
 		return
-	var pickup := _held_pickup
 	var rb := _held_body
 	var saved_mask := _saved_collision_mask
 	var saved_gs := _saved_gravity_scale
@@ -339,8 +338,6 @@ func release() -> void:
 	_saved_linear_damp = 0.0
 	_saved_angular_damp = 0.0
 
-	if pickup == null or not is_instance_valid(pickup):
-		return
 	if rb == null or not is_instance_valid(rb):
 		return
 

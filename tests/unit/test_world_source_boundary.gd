@@ -191,6 +191,7 @@ class FakeSpawnAdapter:
 		var node := Node3D.new()
 		node.name = str(record.get("object_id"))
 		node.transform = record.get("transform") as Transform3D
+		node.set_meta("object_id", str(record.get("object_id")))
 		node.set_meta("source_type", str(record.get("source_type")))
 		node.set_meta("spawn_route", route_name)
 		node.set_meta("collision_capable", (int(record.get("capability_flags")) & WorldObjectRecord.CAP_COLLISION) != 0)
@@ -392,6 +393,7 @@ func test_cell_manager_world_cell_async_uses_fake_records_without_legacy_cell() 
 	assert_object(payload).is_not_null()
 	assert_int(int(payload.stats.get("interactive_refs", 0))).is_equal(3)
 	assert_int(int(payload.stats.get("light_refs", 0))).is_equal(1)
+	_drain_async_resource_lanes(manager, request_id)
 	assert_bool(manager.is_async_visual_playable(request_id)).is_true()
 
 
@@ -431,10 +433,10 @@ func test_cell_manager_sync_exterior_uses_world_manifest_without_legacy_cell() -
 	assert_int(int(adapter.route_counts.get("light", 0))).is_equal(1)
 	assert_int(adapter.metadata_attachment_count).is_equal(2)
 	assert_bool(node.has_meta("world_cell_manifest")).is_true()
-	var static_node := _find_child_named(node, "fake:static:1")
-	var container_node := _find_child_named(node, "fake:container:1")
-	var actor_node := _find_child_named(node, "fake:actor:1")
-	var light_node := _find_child_named(node, "fake:light:1")
+	var static_node := _find_child_by_object_id(node, "fake:static:1")
+	var container_node := _find_child_by_object_id(node, "fake:container:1")
+	var actor_node := _find_child_by_object_id(node, "fake:actor:1")
+	var light_node := _find_child_by_object_id(node, "fake:light:1")
 	assert_object(static_node).is_not_null()
 	assert_bool(bool(static_node.get_meta("collision_capable"))).is_true()
 	assert_object(container_node).is_not_null()
@@ -457,7 +459,40 @@ func test_cell_manager_metadata_only_exterior_uses_world_manifest_without_legacy
 	assert_object(node).is_not_null()
 	assert_int(object_source.manifest_requests).is_equal(1)
 	assert_bool(node.has_meta("world_cell_manifest")).is_true()
+	assert_bool(node.has_meta("cell_record")).is_false()
 	assert_bool(bool(node.get_meta("aaa_mode"))).is_true()
+	node.free()
+
+
+func test_cell_manager_character_toggle_uses_manifest_actor_records_without_legacy_cell() -> void:
+	var source := FakeWorldSource.new()
+	var object_source: FakeObjectSource = source.get_object_source() as FakeObjectSource
+	var manager: Variant = CellManagerScript.new()
+	manager.set_world_source(source)
+	manager.load_npcs = false
+	manager.load_creatures = false
+
+	var node: Node3D = manager.load_exterior_cell_metadata_only(0, 0)
+	assert_object(node).is_not_null()
+	var manifest_requests_after_metadata := object_source.manifest_requests
+
+	var loaded := int(manager.load_characters_into_cell(0, 0, node))
+
+	assert_int(loaded).is_equal(1)
+	assert_int(object_source.manifest_requests).is_equal(manifest_requests_after_metadata)
+	assert_bool(manager.load_npcs).is_false()
+	assert_bool(manager.load_creatures).is_false()
+	assert_int(node.get_child_count()).is_equal(1)
+	var actor_node := _find_child_by_object_id(node, "fake:actor:1")
+	assert_object(actor_node).is_not_null()
+	assert_str(str(actor_node.get_meta("spawn_route"))).is_equal("actor")
+	assert_bool(bool(actor_node.get_meta("is_character"))).is_true()
+
+	var stats: Dictionary = manager.get_loading_stats()
+	var routes: Dictionary = stats.get("route_usage", {})
+	var instantiator_routes: Dictionary = stats.get("instantiator_route_usage", {})
+	assert_int(int(routes.get("character_world_manifest_cells", 0))).is_equal(1)
+	assert_int(int(instantiator_routes.get("world_object_record_calls", 0))).is_equal(1)
 	node.free()
 
 
@@ -488,8 +523,16 @@ func test_fake_non_morrowind_source_instantiates_without_legacy_assets() -> void
 	node.free()
 
 
-func _find_child_named(parent: Node, child_name: String) -> Node:
+func _drain_async_resource_lanes(manager: Variant, request_id: int) -> void:
+	for _i: int in range(3):
+		manager.process_async_instantiation(100.0, Vector3.ZERO, Vector3.FORWARD, false)
+		manager.process_async_payloads(100000)
+		if manager.is_async_visual_playable(request_id):
+			return
+
+
+func _find_child_by_object_id(parent: Node, object_id: String) -> Node:
 	for child: Node in parent.get_children():
-		if child.name == child_name:
+		if child.has_meta("object_id") and str(child.get_meta("object_id")) == object_id:
 			return child
 	return null

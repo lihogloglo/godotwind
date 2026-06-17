@@ -16,7 +16,7 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
-const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+const MorrowindImpostorCandidatesScript := preload("res://src/core/world/morrowind/morrowind_impostor_candidates.gd")
 const MorrowindWorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowind_world_object_source.gd")
 
 const START_CELL := Vector2i(-2, -9)
@@ -38,7 +38,7 @@ const ACTION_RELOAD_AREA := &"impostor_stress_reload_area"
 var _camera: Camera3D
 var _hud: RichTextLabel
 var _renderer: NativeImpostorRendererScript
-var _candidates: ImpostorCandidatesScript
+var _candidates: MorrowindImpostorCandidatesScript
 var _bounds_mesh: ImmediateMesh
 var _bounds_instance: MeshInstance3D
 var _bounds_material: StandardMaterial3D
@@ -191,7 +191,7 @@ func _load_and_start() -> void:
 
 
 func _setup_renderer() -> void:
-	_candidates = ImpostorCandidatesScript.new()
+	_candidates = MorrowindImpostorCandidatesScript.new()
 	_renderer = NativeImpostorRendererScript.new()
 	_renderer.name = "NativeImpostorRendererStress"
 	_renderer.debug_enabled = false

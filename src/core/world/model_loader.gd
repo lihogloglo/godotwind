@@ -93,7 +93,7 @@ var _has_animation_cache: Dictionary[String, bool] = {}
 ## the central main-thread spike source — `get_model` → ResourceLoader.load
 ## (recursive sub-resource resolution) + `PackedScene.instantiate` (~30 ms
 ## cold) + tree-walk + `queue_free`, all on the main thread, all to read a
-## boolean. It's how `preregister_cell_statics` blew 800 ms per cell.
+## boolean. The old main-thread instantiate probe blew hundreds of ms per cell.
 ##
 ## The canonical Godot 4 pattern is `PackedScene.get_state().get_node_type(i)`
 ## — pure metadata lookup against the bundled data, no node creation. Cold
@@ -170,8 +170,7 @@ var _file_exists_cache: Dictionary = {}
 
 ## Fix D (streaming_stutter_2026_04_25 plan): mutex covering both
 ## `_file_exists_cache` AND `_has_animation_cache`. The off-thread prereg
-## dispatcher (`reference_instantiator.preregister_cell_statics` worker
-## variant) calls `resolve_disk_path` / `resolve_shape_pack_path` /
+## paths call `resolve_disk_path` / `resolve_shape_pack_path` /
 ## `has_animation` from worker threads — we mutex the dict R/W to avoid
 ## torn writes against main-thread callers (carryable spawn paths,
 ## proximity routing).
@@ -1328,8 +1327,7 @@ func _get_disk_cache_dir() -> String:
 ## NOTE: Strips item_id suffix since prebaked models don't include it
 ## Public: resolve an ESM model path to its prebaked disk cache .res path.
 ## Returns empty string if the cache file doesn't exist. Used by Phase F
-## prototype pre-registration (reference_instantiator.preregister_cell_statics)
-## to hand disk paths to worker tasks without exposing private cache internals.
+## static-collision paths without exposing private cache internals.
 ## Worker-safe: pure path math + FileAccess existence check.
 func resolve_disk_path(model_path: String) -> String:
 	var provider_path := _get_provider_resource_path(model_path)
@@ -1347,8 +1345,7 @@ func resolve_disk_path(model_path: String) -> String:
 ##
 ## Call from main thread only — mutates `_file_exists_cache`. Mirrors
 ## `resolve_disk_path` above: Phase F's main-thread dispatcher resolves the
-## pack path, hands it to `_worker_preregister_prototype` which then calls
-## `StaticShapeCache.warm_from_path` with the pre-resolved string. The
+## pack path before `StaticShapeCache.warm_from_path` loads it. The
 ## sidecar carries extracted CollisionShape3D data for the prototype; loading
 ## it avoids the 20-50ms PackedScene.instantiate that `StaticShapeCache.
 ## get_shapes` otherwise incurs on first sight.

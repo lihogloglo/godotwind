@@ -25,6 +25,8 @@ const StaticShapeCacheScript := preload("res://src/core/world/static_shape_cache
 const CellStaticCollisionScript := preload("res://src/core/world/cell_static_collision.gd")
 const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
+const WorldCellManifestScript := preload("res://src/core/world/world_cell_manifest.gd")
+const WorldSpaceHandleScript := preload("res://src/core/world/transition/world_space_handle.gd")
 # Model loader for source-model loading and caching
 var _model_loader: ModelLoader = ModelLoader.new()
 
@@ -51,6 +53,7 @@ var _cell_static_collision: CellStaticCollisionScript = CellStaticCollisionScrip
 var _world_object_source: RefCounted = null
 var _world_object_spawn_adapter: RefCounted = null
 var _asset_provider: RefCounted = null
+var _impostor_candidates: RefCounted = null
 const MAX_LIFECYCLE_EVENTS := 256
 var debug_lifecycle_capture_enabled: bool = false
 var _lifecycle_events: Array[Dictionary] = []
@@ -64,6 +67,17 @@ var _stats: Dictionary = {
 	"objects_instantiated": 0,
 	"lights_created": 0,
 	"objects_from_pool": 0,
+}
+
+var _route_usage_stats: Dictionary = {
+	"world_manifest_lookups": 0,
+	"world_manifest_hits": 0,
+	"async_world_manifest_requests": 0,
+	"async_world_manifest_interior_requests": 0,
+	"sync_world_manifest_exterior_cells": 0,
+	"sync_world_manifest_interior_cells": 0,
+	"metadata_world_manifest_exterior_cells": 0,
+	"character_world_manifest_cells": 0,
 }
 
 # Configuration
@@ -81,12 +95,12 @@ var load_creatures: bool = true: # Whether to load creature models
 		load_creatures = value
 		_sync_instantiator_config()
 var use_object_pool: bool = true # Whether to use object pooling for common models
-var use_static_renderer: bool = true  # Use RenderingServer for flora (much faster)
+var use_static_renderer: bool = true:  # Use RenderingServer for flora (much faster)
+	set(value):
+		use_static_renderer = value
+		_sync_instantiator_config()
 var use_multimesh_instancing: bool = true  # Use MultiMesh for batching identical objects
 var min_instances_for_multimesh: int = 10  # Minimum instances to use MultiMesh instead of individual nodes
-
-# Morrowind light radius to Godot light range conversion factor
-const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to meters
 
 # Pool pre-warming: fraction of max pool size to pre-create during preload
 const POOL_PREWARM_RATIO: float = 0.2
@@ -109,12 +123,11 @@ func _init() -> void:
 	# _cell_static_collision pulls shape entries from the cache + classifies
 	# refs via the instantiator (exact mirror of Phase F's static routing).
 	_static_shape_cache.set_model_loader(_model_loader)
-	_cell_static_collision.configure(_static_shape_cache, _instantiator)
+	_cell_static_collision.configure(_static_shape_cache)
 	# T.6 — expose the same shape cache to Phase F so the worker can warm
 	# `.shapes.res` sidecars off-thread before cell_static_collision asks for
 	# them at cell-activation time. Keeps CellManager as the single owner of
 	# the shape cache lifetime (mirrors the static_renderer/model_loader wiring).
-	_instantiator.shape_cache = _static_shape_cache
 
 
 func set_world_object_source(source: RefCounted) -> void:
@@ -129,10 +142,39 @@ func set_world_object_spawn_adapter(adapter: RefCounted) -> void:
 		_instantiator.call("set_world_object_spawn_adapter", adapter)
 
 
+func set_impostor_candidates(candidates: RefCounted) -> void:
+	_impostor_candidates = candidates
+	if _instantiator and _instantiator.has_method("set_impostor_candidates"):
+		_instantiator.call("set_impostor_candidates", candidates)
+
+
 func set_asset_provider(provider: RefCounted) -> void:
 	_asset_provider = provider
 	if _model_loader and _model_loader.has_method("set_asset_provider"):
 		_model_loader.call("set_asset_provider", provider)
+
+
+func set_static_renderer(renderer: Node) -> void:
+	_static_renderer = renderer
+	_sync_instantiator_config()
+
+
+func get_model_loader() -> ModelLoader:
+	return _model_loader
+
+
+func get_instantiator() -> ReferenceInstantiator:
+	return _instantiator
+
+
+func is_model_loader_runtime_mode() -> bool:
+	return _model_loader != null and _model_loader.runtime_mode
+
+
+func prewarm_model_cache_index() -> int:
+	if _model_loader == null:
+		return 0
+	return _model_loader.prewarm_disk_cache_index()
 
 
 func set_world_source(source: RefCounted) -> void:
@@ -140,6 +182,7 @@ func set_world_source(source: RefCounted) -> void:
 		set_world_object_source(null)
 		set_world_object_spawn_adapter(null)
 		set_asset_provider(null)
+		set_impostor_candidates(null)
 		return
 	if source.has_method("get_object_source"):
 		set_world_object_source(source.call("get_object_source") as RefCounted)
@@ -147,32 +190,36 @@ func set_world_source(source: RefCounted) -> void:
 		set_world_object_spawn_adapter(source.call("get_object_spawn_adapter") as RefCounted)
 	if source.has_method("get_asset_provider"):
 		set_asset_provider(source.call("get_asset_provider") as RefCounted)
-
-
-func _get_cell_record(cell_name: String) -> Variant:
-	if _world_object_source == null:
-		Log.error("streaming", "CellManager has no WorldObjectSource for cell '%s'" % cell_name)
-		return null
-	if not _world_object_source.has_method("get_source_cell"):
-		Log.error("streaming", "WorldObjectSource cannot provide source cell '%s'" % cell_name)
-		return null
-	return _world_object_source.call("get_source_cell", cell_name)
-
-
-func _get_exterior_cell_record(x: int, y: int) -> Variant:
-	if _world_object_source == null:
-		Log.error("streaming", "CellManager has no WorldObjectSource for exterior cell %d,%d" % [x, y])
-		return null
-	if not _world_object_source.has_method("get_source_exterior_cell"):
-		Log.error("streaming", "WorldObjectSource cannot provide source exterior cell %d,%d" % [x, y])
-		return null
-	return _world_object_source.call("get_source_exterior_cell", Vector2i(x, y))
+	if source.has_method("get_impostor_candidates"):
+		set_impostor_candidates(source.call("get_impostor_candidates") as RefCounted)
 
 
 func _get_world_cell_manifest(grid: Vector2i) -> Variant:
 	if _world_object_source == null or not _world_object_source.has_method("get_cell_manifest"):
 		return null
-	return _world_object_source.call("get_cell_manifest", grid)
+	_increment_route_usage_stat("world_manifest_lookups")
+	var manifest: Variant = _world_object_source.call("get_cell_manifest", grid)
+	if manifest != null:
+		_increment_route_usage_stat("world_manifest_hits")
+	return manifest
+
+
+func _get_world_space_manifest(space_handle: RefCounted) -> Variant:
+	if _world_object_source == null or not _world_object_source.has_method("get_space_manifest"):
+		return null
+	_increment_route_usage_stat("world_manifest_lookups")
+	var manifest: Variant = _world_object_source.call("get_space_manifest", space_handle)
+	if manifest != null:
+		_increment_route_usage_stat("world_manifest_hits")
+	return manifest
+
+
+func _get_interior_world_cell_manifest(cell_name: String) -> Variant:
+	return _get_world_space_manifest(WorldSpaceHandleScript.interior(cell_name))
+
+
+func _increment_route_usage_stat(key: String) -> void:
+	_route_usage_stats[key] = int(_route_usage_stats.get(key, 0)) + 1
 
 
 func _resolve_source_reference_base_record(source_ref: Variant, record_type_out: Array) -> Variant:
@@ -186,7 +233,7 @@ func _resolve_source_reference_base_record(source_ref: Variant, record_type_out:
 
 
 func _make_pending_payload(
-	ref: CellReference,
+	ref: Variant,
 	base_record: Variant,
 	type_name: String,
 	item_id: String,
@@ -220,14 +267,30 @@ func _make_pending_record_payload(
 
 
 func _make_payload_record_from_ref(
-	ref: CellReference,
+	ref: Variant,
 	type_name: String,
 	model_path: String,
 	item_id: String,
 	cache_item_id: String,
 	static_route: bool,
 	cell_grid: Vector2i,
+	base_record: Variant = null,
 ) -> RefCounted:
+	if _world_object_spawn_adapter != null \
+			and _world_object_spawn_adapter.has_method("make_world_object_record_from_source_reference"):
+		var adapter_record: RefCounted = _world_object_spawn_adapter.call(
+			"make_world_object_record_from_source_reference",
+			ref,
+			base_record,
+			type_name,
+			model_path,
+			item_id,
+			cache_item_id,
+			static_route,
+			cell_grid
+		) as RefCounted
+		if adapter_record != null:
+			return adapter_record
 	var record: RefCounted = WorldObjectRecordScript.new()
 	var ref_id := str(ref.ref_id)
 	record.object_id = WorldObjectRecordScript.make_object_id(cell_grid, ref_id, int(ref.ref_num))
@@ -248,6 +311,68 @@ func _make_payload_record_from_ref(
 	else:
 		record.capability_flags = WorldObjectRecordScript.CAP_GAMEPLAY if type_name != "static" else WorldObjectRecordScript.CAP_STATIC_VISUAL
 	return record
+
+
+func _instantiate_source_reference_record(
+	ref: Variant,
+	cell_grid: Vector2i,
+	base_record: Variant = null,
+	type_name: String = "",
+	model_path: String = "",
+	item_id: String = "",
+	cache_item_id: String = "",
+	static_route: bool = false,
+) -> Node3D:
+	if ref == null:
+		return null
+
+	var resolved_base_record: Variant = base_record
+	var resolved_type_name := type_name
+	if resolved_base_record == null or resolved_type_name.is_empty():
+		var record_type: Array = [resolved_type_name]
+		resolved_base_record = _resolve_source_reference_base_record(ref, record_type)
+		resolved_type_name = record_type[0] if record_type.size() > 0 else resolved_type_name
+	if resolved_base_record == null:
+		return null
+
+	var resolved_model_path := model_path
+	if resolved_model_path.is_empty():
+		resolved_model_path = _get_model_path(resolved_base_record)
+	var resolved_item_id := item_id
+	if resolved_item_id.is_empty() and "record_id" in resolved_base_record:
+		resolved_item_id = str(resolved_base_record.record_id)
+	var resolved_cache_item_id := cache_item_id if not cache_item_id.is_empty() else resolved_item_id
+	var resolved_static_route := static_route
+	if not resolved_static_route:
+		resolved_static_route = _should_prepare_static_ref(
+			resolved_base_record,
+			resolved_type_name,
+			resolved_model_path,
+			null,
+			resolved_item_id,
+			ref
+		)
+
+	var record: RefCounted = _make_payload_record_from_ref(
+		ref,
+		resolved_type_name,
+		resolved_model_path,
+		resolved_item_id,
+		resolved_cache_item_id,
+		resolved_static_route,
+		cell_grid,
+		resolved_base_record
+	)
+	if record == null or _instantiator == null:
+		return null
+	if _instantiator.has_method("instantiate_world_object_record"):
+		return _instantiator.call(
+			"instantiate_world_object_record",
+			record,
+			cell_grid,
+			resolved_cache_item_id
+		) as Node3D
+	return null
 
 
 func _category_for_type_name(type_name: String) -> int:
@@ -347,12 +472,13 @@ func _sync_instantiator_config() -> void:
 
 ## Load an interior cell by name and return a Node3D containing all objects
 func load_cell(cell_name: String) -> Node3D:
-	var cell_record: CellRecord = _get_cell_record(cell_name)
-	if not cell_record:
+	var manifest: Variant = _get_interior_world_cell_manifest(cell_name)
+	if manifest == null:
 		push_error("CellManager: Cell not found: '%s'" % cell_name)
 		return null
 
-	return _instantiate_cell(cell_record)
+	_increment_route_usage_stat("sync_world_manifest_interior_cells")
+	return _instantiate_world_cell_manifest(manifest, Vector2i.ZERO)
 
 
 ## Load an exterior cell by grid coordinates and return a Node3D containing all objects
@@ -360,23 +486,21 @@ func load_exterior_cell(x: int, y: int) -> Node3D:
 	var cell_grid := Vector2i(x, y)
 	var manifest: Variant = _get_world_cell_manifest(cell_grid)
 	if manifest != null:
+		_increment_route_usage_stat("sync_world_manifest_exterior_cells")
 		return _instantiate_world_cell_manifest(manifest, cell_grid)
 
-	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
-	if not cell_record:
-		push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
-		return null
-
-	return _instantiate_cell(cell_record)
+	push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
+	return null
 
 
 ## Load exterior cell metadata only (no objects) for AAA streaming mode
 ## Returns an empty Node3D container - terrain is handled separately via Terrain3D
-## Objects are streamed by ObjectStreamer via position index
+## Objects are streamed by manifest-backed async requests
 func load_exterior_cell_metadata_only(x: int, y: int) -> Node3D:
 	var cell_grid := Vector2i(x, y)
 	var manifest: Variant = _get_world_cell_manifest(cell_grid)
 	if manifest != null:
+		_increment_route_usage_stat("metadata_world_manifest_exterior_cells")
 		var manifest_node := Node3D.new()
 		manifest_node.name = "Cell_%d_%d" % [x, y]
 		manifest_node.set_meta("world_cell_manifest", manifest)
@@ -385,35 +509,15 @@ func load_exterior_cell_metadata_only(x: int, y: int) -> Node3D:
 		manifest_node.set_meta("aaa_mode", true)
 		return manifest_node
 
-	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
-	if not cell_record:
-		push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
-		return null
-
-	# Create empty container - no objects, terrain is separate
-	var cell_node := Node3D.new()
-	cell_node.name = "Cell_%d_%d" % [x, y]
-
-	# Store cell metadata for potential use (water height, ambient, etc.)
-	cell_node.set_meta("cell_record", cell_record)
-	cell_node.set_meta("grid_x", x)
-	cell_node.set_meta("grid_y", y)
-	cell_node.set_meta("aaa_mode", true)
-
-	return cell_node
+	push_error("CellManager: Exterior cell not found: %d, %d" % [x, y])
+	return null
 
 
 ## Load only NPCs/creatures into an existing cell node
 ## Used when toggling NPCs on after cells were loaded without them
 func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
-	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
-	if not cell_record:
-		push_warning("CellManager: Cannot load characters - cell not found: %d, %d" % [x, y])
-		return 0
-
 	var cell_grid := Vector2i(x, y)
 	var loaded := 0
-	var npc_refs := 0
 
 	# Temporarily enable NPC/creature loading
 	var was_loading_npcs := load_npcs
@@ -421,22 +525,14 @@ func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
 	load_npcs = true
 	load_creatures = true
 
-	for ref: CellReference in cell_record.references:
-		# Get base record and type
-		var record_type: Array = [""]
-		var base_record: Variant = _resolve_source_reference_base_record(ref, record_type)
-		if not base_record:
-			continue
+	var manifest: Variant = _get_character_load_manifest(cell_grid, cell_node)
+	if manifest != null:
+		_increment_route_usage_stat("character_world_manifest_cells")
+		loaded = _instantiate_character_records_from_manifest(manifest, cell_grid, cell_node)
+		load_npcs = was_loading_npcs
+		load_creatures = was_loading_creatures
+		return loaded
 
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-
-		# Only handle NPCs and creatures
-		if type_name in ["npc", "creature", "leveled_creature"]:
-			npc_refs += 1
-			var obj: Node3D = _instantiator.instantiate_reference(ref, cell_grid)
-			if obj:
-				cell_node.add_child(obj)
-				loaded += 1
 	# Restore original loading settings
 	load_npcs = was_loading_npcs
 	load_creatures = was_loading_creatures
@@ -444,65 +540,13 @@ func load_characters_into_cell(x: int, y: int, cell_node: Node3D) -> int:
 	return loaded
 
 
-## Instantiate a cell from its record
-func _instantiate_cell(cell: CellRecord) -> Node3D:
-	var cell_node := Node3D.new()
-
-	# Get cell grid for static renderer tracking
-	var cell_grid := Vector2i(cell.grid_x, cell.grid_y) if not cell.is_interior() else Vector2i.ZERO
-
-	# Name the cell node
-	if cell.is_interior():
-		cell_node.name = cell.name.replace(" ", "_").replace(",", "")
-	else:
-		cell_node.name = "Cell_%d_%d" % [cell.grid_x, cell.grid_y]
-
-	var loaded := 0
-	var failed := 0
-	var static_count := 0
-	var multimesh_count := 0
-
-	# Phase 1: Group references by model for potential MultiMesh batching
-	if use_multimesh_instancing:
-		var instance_groups := _group_references_for_instancing(cell.references, cell_grid)
-
-		# Phase 2: Create MultiMesh instances for suitable groups
-		multimesh_count = _create_multimesh_instances(instance_groups, cell_node)
-
-		# Phase 3: Instantiate remaining objects normally
-		for ref: CellReference in instance_groups.get("individual_refs", []):
-			var obj := _instantiator.instantiate_reference(ref, cell_grid)
-			if obj:
-				cell_node.add_child(obj)
-				loaded += 1
-			elif use_static_renderer and _static_renderer:
-				static_count += 1
-			else:
-				failed += 1
-	else:
-		# Original path: no batching
-		for ref: CellReference in cell.references:
-			var obj := _instantiator.instantiate_reference(ref, cell_grid)
-			if obj:
-				cell_node.add_child(obj)
-				loaded += 1
-			elif use_static_renderer and _static_renderer:
-				static_count += 1
-			else:
-				failed += 1
-
-	var total_objects := loaded + static_count + multimesh_count
-	Log.info("streaming", "CellManager: Loaded %d objects (%d individual, %d static, %d multimesh), %d failed" % [
-		total_objects, loaded, static_count, multimesh_count, failed
-	])
-	_stats["multimesh_instances"] = _stats.get("multimesh_instances", 0) + multimesh_count
-
-	return cell_node
-
-
 func _instantiate_world_cell_manifest(manifest: RefCounted, cell_grid: Vector2i) -> Node3D:
 	var cell_node := Node3D.new()
-	cell_node.name = "Cell_%d_%d" % [cell_grid.x, cell_grid.y]
+	var cell_name := str(manifest.get("cell_name")) if manifest != null else ""
+	if cell_name.is_empty():
+		cell_node.name = "Cell_%d_%d" % [cell_grid.x, cell_grid.y]
+	else:
+		cell_node.name = cell_name.replace(" ", "_").replace(",", "")
 	cell_node.set_meta("world_cell_manifest", manifest)
 	cell_node.set_meta("grid_x", cell_grid.x)
 	cell_node.set_meta("grid_y", cell_grid.y)
@@ -515,249 +559,74 @@ func _instantiate_world_cell_manifest(manifest: RefCounted, cell_grid: Vector2i)
 		var obj: Node3D = null
 		if _instantiator != null and _instantiator.has_method("instantiate_world_object_record"):
 			obj = _instantiator.call("instantiate_world_object_record", record, cell_grid, cache_item_id) as Node3D
+		var route_name := str(_instantiator.get("last_inst_route")) if _instantiator != null else ""
 		if obj != null:
 			cell_node.add_child(obj)
 			loaded += 1
-		elif _instantiator != null and str(_instantiator.get("last_inst_route")).begins_with("static"):
+		elif route_name.begins_with("static"):
 			routed_static += 1
 		else:
 			failed += 1
 
 	Log.info("streaming", "CellManager: Loaded manifest cell %s (%d nodes, %d static-routed, %d failed)" % [
-		cell_grid, loaded, routed_static, failed
+		cell_name if not cell_name.is_empty() else str(cell_grid),
+		loaded,
+		routed_static,
+		failed,
 	])
 	return cell_node
 
 
-## Group cell references for MultiMesh instancing
-## Returns dictionary with:
-## - "multimesh_groups": Dictionary of model_path -> Array of {ref, transform, base_record}
-## - "individual_refs": Array of references that should be instantiated individually
-func _group_references_for_instancing(references: Array, cell_grid: Vector2i) -> Dictionary:
-	var multimesh_candidates: Dictionary = {}  # model_path -> Array of {ref, base_record}
-	var individual_refs: Array = []
-	var _debug_significant_count := 0
+func _get_character_load_manifest(cell_grid: Vector2i, cell_node: Node3D) -> Variant:
+	if cell_node != null and cell_node.has_meta("world_cell_manifest"):
+		var node_manifest: Variant = cell_node.get_meta("world_cell_manifest")
+		if node_manifest != null:
+			return node_manifest
+	return _get_world_cell_manifest(cell_grid)
 
-	for ref: CellReference in references:
-		# Get base record and type
-		var record_type: Array = [""]
-		var base_record: Variant = _resolve_source_reference_base_record(ref, record_type)
 
-		if not base_record:
+func _instantiate_character_records_from_manifest(manifest: Variant, cell_grid: Vector2i, cell_node: Node3D) -> int:
+	if manifest == null or not (manifest is Object):
+		return 0
+	var records_value: Variant = manifest.get("objects")
+	if not (records_value is Array):
+		return 0
+
+	var loaded := 0
+	for record_value: Variant in records_value:
+		var record: RefCounted = record_value as RefCounted
+		if not _is_character_world_record(record):
 			continue
-
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-
-		# Skip non-model objects (lights, NPCs, creatures, leveled items)
-		if type_name in ["light", "npc", "creature", "leveled_creature", "leveled_item"]:
-			individual_refs.append(ref)
-			continue
-
-		# Get model path
-		var model_path: String = _get_model_path(base_record)
-		if model_path.is_empty():
-			continue
-
-		# Check if suitable for MultiMesh
-		if not _is_multimesh_candidate(model_path, base_record):
-			individual_refs.append(ref)
-			if _instantiator.is_significant_object(model_path):
-				_debug_significant_count += 1
-			continue
-
-		# Check if would use static renderer (skip those - already optimized)
-		if use_static_renderer and _static_renderer and _instantiator._is_static_render_model(model_path):
-			individual_refs.append(ref)
-			continue
-
-		# Add to candidates
-		var normalized := model_path.to_lower().replace("/", "\\")
-		if normalized not in multimesh_candidates:
-			multimesh_candidates[normalized] = []
-
-		var candidates_array: Array = multimesh_candidates[normalized]
-		candidates_array.append({
-			"ref": ref,
-			"base_record": base_record,
-			"model_path": model_path
-		})
-
-	# Filter groups: only keep those with enough instances
-	var multimesh_groups: Dictionary = {}
-	for model_path: String in multimesh_candidates:
-		var candidates: Array = multimesh_candidates[model_path]
-		if candidates.size() >= min_instances_for_multimesh:
-			multimesh_groups[model_path] = candidates
-		else:
-			# Too few instances - instantiate individually
-			for candidate: Dictionary in candidates:
-				individual_refs.append(candidate.ref)
-
-	if _debug_significant_count > 0:
-		Log.debug("streaming", "[ODM-GROUP] Cell %s: %d significant objects to instantiate individually" % [
-			cell_grid, _debug_significant_count
-		])
-
-	return {
-		"multimesh_groups": multimesh_groups,
-		"individual_refs": individual_refs
-	}
+		var cache_item_id := str(record.get("cache_item_id"))
+		var obj: Node3D = null
+		if _instantiator != null and _instantiator.has_method("instantiate_world_object_record"):
+			obj = _instantiator.call("instantiate_world_object_record", record, cell_grid, cache_item_id) as Node3D
+		if obj != null:
+			_tag_character_cell_child(obj)
+			cell_node.add_child(obj)
+			loaded += 1
+	return loaded
 
 
-## Check if a model is suitable for MultiMesh instancing
-## MultiMesh candidates are: small repeated objects like rocks, pots, bottles, flora
-func _is_multimesh_candidate(model_path: String, base_record: Variant) -> bool:
-	var lower := model_path.to_lower()
-
-	# Small rocks (already filtered by _is_static_render_model for flora)
-	if "terrain_rock" in lower:
-		# Only small rocks (rm_ prefix = rock medium/small)
-		if "_rm_" in lower or "small" in lower:
-			return true
+func _is_character_world_record(record: RefCounted) -> bool:
+	if record == null:
 		return false
-
-	# Containers - pots, urns, barrels, crates
-	if "contain_" in lower:
-		if "barrel" in lower or "sack" in lower or "crate" in lower or "chest" in lower:
-			return true
-		# Redware pots, urns
-		if "redware" in lower or "urn" in lower or "pot_" in lower:
-			return true
-		return false
-
-	# Misc clutter - bottles, cups, plates, etc.
-	if "misc_com" in lower or "misc_de" in lower:
-		if "bottle" in lower or "cup" in lower or "plate" in lower or "bowl" in lower:
-			return true
-		if "lantern" in lower or "candle" in lower:
-			return true
-		return false
-
-	# Light fixtures (the model, not the light itself)
-	if "light_" in lower and "com_" in lower:
+	if int(record.get("spawn_route")) == WorldObjectRecordScript.SpawnRoute.ACTOR:
 		return true
-
-	# Dwemer items (gears, pipes, etc.)
-	if "dwrv_" in lower:
-		if "gear" in lower or "pipe" in lower or "scrap" in lower:
+	match int(record.get("category")):
+		WorldObjectRecordScript.Category.NPC, WorldObjectRecordScript.Category.CREATURE:
 			return true
-
-	return false
-
-
-## Create MultiMeshInstance3D nodes for batched groups
-## Returns total count of instances created
-func _create_multimesh_instances(instance_groups: Dictionary, parent_node: Node3D) -> int:
-	var multimesh_groups := instance_groups.get("multimesh_groups", {}) as Dictionary
-	var total_count := 0
-
-	for model_path: String in multimesh_groups:
-		var candidates: Array = multimesh_groups[model_path]
-		var count := candidates.size()
-		if count == 0:
-			continue
-
-		# Get/load prototype model
-		var first_candidate: Dictionary = candidates[0]
-		var base_record: Variant = first_candidate.get("base_record", {})
-		var record_id: String = ""
-		if base_record is Dictionary:
-			var base_dict: Dictionary = base_record
-			record_id = base_dict.get("record_id", "")
-		var first_model_path: String = first_candidate.get("model_path", "")
-		var prototype: Node3D = _model_loader.get_model(first_model_path, record_id)
-
-		if not prototype:
-			# Failed to load - fall back to individual instantiation
-			for candidate: Dictionary in candidates:
-				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
-				if obj:
-					parent_node.add_child(obj)
-			continue
-
-		# Find first MeshInstance3D in prototype (skips LOD nodes)
-		var mesh_instance: MeshInstance3D = _find_first_mesh_instance(prototype)
-		if not mesh_instance or not mesh_instance.mesh:
-			Log.debug("streaming", "[DIAG] MultiMesh: No valid mesh found in %s, falling back to individual" % model_path.get_file())
-			for candidate: Dictionary in candidates:
-				var obj: Node3D = _instantiator.instantiate_reference(candidate.ref as CellReference)
-				if obj:
-					parent_node.add_child(obj)
-			continue
-
-		# Debug: Log what mesh we're using and what other meshes exist in the prototype
-		Log.debug("streaming", "[DIAG] MultiMesh using mesh '%s' from %s" % [mesh_instance.name, model_path.get_file()])
-		_debug_log_all_meshes(prototype, model_path.get_file())
-
-		# Create MultiMesh
-		var multimesh := MultiMesh.new()
-		multimesh.transform_format = MultiMesh.TRANSFORM_3D
-		multimesh.instance_count = count
-		multimesh.mesh = mesh_instance.mesh
-
-		# Set transforms for each instance
-		for i in range(count):
-			var ref := candidates[i].ref as CellReference
-			multimesh.set_instance_transform(i, _calculate_transform(ref))
-
-		# Create MultiMeshInstance3D node
-		var mmi := MultiMeshInstance3D.new()
-		mmi.name = "MultiMesh_%s_%d" % [model_path.get_file().get_basename(), count]
-		mmi.multimesh = multimesh
-		mmi.material_override = mesh_instance.material_override
-		mmi.cast_shadow = GeometryInstance3D.SHADOW_CASTING_SETTING_ON
-
-		# Render-tier visibility_range - single MID band ending at DU.MID_END.
-		mmi.visibility_range_begin = 0.0
-		mmi.visibility_range_end = DU.MID_END
-		mmi.visibility_range_begin_margin = 0.0
-		mmi.visibility_range_end_margin = DU.FADE_MARGIN_LOD3_FAR
-		mmi.visibility_range_fade_mode = GeometryInstance3D.VISIBILITY_RANGE_FADE_SELF
-
-		parent_node.add_child(mmi)
-		total_count += count
-
-		Log.debug("streaming", "  MultiMesh: %d x %s" % [count, model_path.get_file()])
-
-	return total_count
+	var source_type := str(record.get("source_type"))
+	return source_type in ["npc", "creature", "leveled_creature"]
 
 
-## Find first MeshInstance3D in a node hierarchy.
-## Post-B-wide refactor: there are no sibling `_LODn` nodes — LODs live inside
-## the ArrayMesh via surface_lod_indices — so the old skip clause is gone.
-## (Narrow-scope Priority-0-allowed edit, LOD_REFACTOR_B_WIDE.md Part 3.3.)
-func _find_first_mesh_instance(node: Node) -> MeshInstance3D:
-	if node is MeshInstance3D:
-		return node as MeshInstance3D
-
-	for child in node.get_children():
-		var found := _find_first_mesh_instance(child)
-		if found:
-			return found
-
-	return null
-
-
-## Debug: Log all MeshInstance3D nodes in a prototype (to audit LOD nodes)
-func _debug_log_all_meshes(node: Node, model_name: String, depth: int = 0) -> void:
-	if node is MeshInstance3D:
-		var mi := node as MeshInstance3D
-		var is_lod := mi.name.ends_with("_LOD1") or mi.name.ends_with("_LOD2") or mi.name.ends_with("_LOD3")
-		var mat_info := "no_material"
-		if mi.material_override:
-			mat_info = "override"
-		elif mi.mesh and mi.mesh.get_surface_count() > 0:
-			var surf_mat := mi.mesh.surface_get_material(0)
-			mat_info = "surface_mat" if surf_mat else "no_surf_mat"
-		Log.debug("streaming", "[DIAG]   %s%s: visible=%s, is_lod=%s, mat=%s" % [
-			"  ".repeat(depth), mi.name, mi.visible, is_lod, mat_info
-		])
-	for child in node.get_children():
-		_debug_log_all_meshes(child, model_name, depth + 1)
+func _tag_character_cell_child(node: Node3D) -> void:
+	if node != null:
+		node.set_meta("is_character", true)
 
 
 ## Calculate transform for a cell reference
-func _calculate_transform(ref: CellReference) -> Transform3D:
+func _calculate_transform(ref: Variant) -> Transform3D:
 	var pos := CS.vector_to_godot(ref.position)
 	var scale := CS.scale_to_godot(ref.scale)
 	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
@@ -906,80 +775,6 @@ func _check_preload_completion(task_id: int, result: Variant) -> bool:
 
 
 # =============================================================================
-# DEFERRED CELL LOADING (For Per-Object Distance Management)
-# =============================================================================
-# Loads cell reference DATA without instantiating Node3D objects.
-# Objects are registered with ObjectStreamer as "deferred" and will
-# be instantiated when they enter NEAR range.
-#
-# This enables radius-based cell loading where:
-# - All cells within FAR range have their data loaded
-# - Only objects in NEAR range get Node3D instantiated
-# - MID/FAR objects show LOD meshes or impostors via ObjectStreamer
-# =============================================================================
-
-## Get cell references for a given grid position
-func get_cell_references(x: int, y: int) -> Array:
-	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
-	if not cell_record:
-		return []
-	return cell_record.references
-
-
-## Instantiate a single deferred object by its data
-## Called when ObjectStreamer requests instantiation (object entering NEAR)
-## Returns the instantiated Node3D or null on failure
-func instantiate_deferred_object(
-	model_path: String,
-	world_transform: Transform3D,
-	cell_grid: Vector2i,
-	ref_id: String,
-	ref_num: int
-) -> Node3D:
-	# Get record_id for collision shape lookup
-	var record_type: Array = [""]
-	var base_record: Variant = _resolve_source_reference_base_record({"ref_id": ref_id}, record_type)
-
-	var record_id: String = ""
-	if base_record and "record_id" in base_record:
-		record_id = base_record.record_id
-
-	# Try to get from object pool first
-	if use_object_pool and _object_pool:
-		var pooled: Node3D = _object_pool.call("acquire", model_path)
-		if pooled:
-			pooled.name = ref_id + "_" + str(ref_num)
-			pooled.global_transform = world_transform
-			_hide_lod_nodes(pooled)  # CRITICAL: Hide LODs on pooled objects
-			ModelLoader._disable_collision_shapes_in_tree(pooled)  # reset: may have been NEAR before pool release
-			_stats["objects_from_pool"] += 1
-			return pooled
-
-	# Load — get_model() returns a fresh Node3D (collision disabled) from PackedScene cache.
-	var instance: Node3D = _model_loader.get_model(model_path, record_id)
-	if not instance:
-		return null
-
-	instance.name = ref_id + "_" + str(ref_num)
-	instance.global_transform = world_transform
-
-	# CRITICAL: Hide LOD nodes to prevent white mesh overlays
-	_hide_lod_nodes(instance)
-
-	# Add metadata for console object picker
-	if base_record:
-		if "record_id" in base_record:
-			instance.set_meta("form_id", base_record.record_id)
-		instance.set_meta("ref_id", ref_id)
-		instance.set_meta("ref_num", ref_num)
-		instance.set_meta("model_path", model_path)
-
-	_stats["objects_instantiated"] += 1
-
-	return instance
-
-
-# =============================================================================
 # ASYNC CELL LOADING API
 # =============================================================================
 # Uses BackgroundProcessor to parse source models on worker threads.
@@ -1125,7 +920,7 @@ class LoadProfile:
 
 ## Async cell request tracking
 class AsyncCellRequest:
-	var cell_record: CellRecord
+	var cell_record: Variant
 	var grid: Vector2i  # For exterior cells
 	var is_interior: bool
 	var request_id: int
@@ -1160,7 +955,7 @@ var _async_requests: Dictionary[int, AsyncCellRequest] = {}
 ## Entry in the instantiation queue
 class InstantiationEntry:
 	var request_id: int
-	var ref: CellReference
+	var ref: Variant
 	var world_object_record: RefCounted = null
 	var world_object_id: StringName = &""
 	var model_path: String
@@ -1387,7 +1182,7 @@ func _should_prepare_static_ref(
 	model_path: String,
 	profile: LoadProfile,
 	item_id: String = "",
-	ref: CellReference = null,
+	ref: Variant = null,
 ) -> bool:
 	if _instantiator == null or _static_renderer == null:
 		return false
@@ -1413,7 +1208,7 @@ func _should_prepare_static_ref(
 	return false
 
 
-func _is_model_dimension_mid_worthy(max_dim: float, ref: CellReference = null) -> bool:
+func _is_model_dimension_mid_worthy(max_dim: float, ref: Variant = null) -> bool:
 	var scale_max := 1.0
 	if ref != null:
 		var scale := CS.scale_to_godot(ref.scale)
@@ -1715,14 +1510,31 @@ func _publish_payload_model_callbacks(payload: CellPayloadScript, budget_usec: i
 			if bool(ref_info.get("static_only", false)):
 				continue
 			var record: RefCounted = ref_info.get("record", null) as RefCounted
-			var ref: CellReference = ref_info.get("ref", null)
-			var ref_item_id: String = ref_info.item_id
+			var ref: Variant = ref_info.get("ref", null)
+			var base_record: Variant = ref_info.get("base_record", null)
+			var ref_item_id: String = str(ref_info.get("item_id", ""))
 			var cache_item_id: String = ref_info.get("cache_item_id", item_id)
 			var type_name: String = str(ref_info.get("type_name", ""))
 			var object_id: StringName = ref_info.get("object_id", &"")
 			if record != null:
 				object_id = _object_id_for_record(record)
-			_queue_instantiation(request_id, ref, model_path, ref_item_id, cache_item_id, type_name, object_id, record)
+			elif ref != null:
+				if base_record == null:
+					var record_type: Array = [type_name]
+					base_record = _resolve_source_reference_base_record(ref, record_type)
+					type_name = record_type[0] if record_type.size() > 0 else type_name
+				record = _make_payload_record_from_ref(
+					ref,
+					type_name,
+					model_path,
+					ref_item_id,
+					cache_item_id,
+					false,
+					request.grid,
+					base_record
+				)
+				object_id = _object_id_for_record(record) if record != null else object_id
+			_queue_instantiation(request_id, null if record != null else ref, model_path, ref_item_id, cache_item_id, type_name, object_id, record)
 		if _is_request_complete(request):
 			_finalize_request(request)
 		completed += 1
@@ -2022,7 +1834,7 @@ func _classify_request_refs(
 
 		var iter_start_us := Time.get_ticks_usec()
 		var object_record: RefCounted = null
-		var ref: CellReference = null
+		var ref: Variant = null
 		var base_record: Variant = null
 		var type_name: String = ""
 		var object_id: StringName = &""
@@ -2066,16 +1878,17 @@ func _classify_request_refs(
 		if not using_world_objects and model_path.is_empty():
 			model_path = _get_model_path(base_record)
 		if model_path.is_empty():
+			var payload_record: RefCounted = object_record if using_world_objects else _make_payload_record_from_ref(
+				ref,
+				type_name,
+				"",
+				"",
+				"",
+				false,
+				request.grid,
+				base_record
+			)
 			if request.payload != null:
-				var payload_record: RefCounted = object_record if using_world_objects else _make_payload_record_from_ref(
-					ref,
-					type_name,
-					"",
-					"",
-					"",
-					false,
-					request.grid
-				)
 				if using_world_objects and type_name == "light":
 					request.payload.add_light_record("", "", payload_record)
 				elif using_world_objects:
@@ -2084,7 +1897,7 @@ func _classify_request_refs(
 					request.payload.add_light_record("", "", payload_record)
 				else:
 					request.payload.add_interactive_record(type_name, "", "", payload_record)
-			_queue_instantiation(request.request_id, ref, "", "", "", type_name, object_id, object_record)
+			_queue_instantiation(request.request_id, ref, "", "", "", type_name, object_id, payload_record)
 			profile_route_us += Time.get_ticks_usec() - route_start_us
 			continue
 
@@ -2119,7 +1932,8 @@ func _classify_request_refs(
 				item_id,
 				load_item_id,
 				static_route,
-				request.grid
+				request.grid,
+				base_record
 			)
 			if static_route:
 				request.payload.add_static_record(model_path, load_item_id, payload_record)
@@ -2166,6 +1980,7 @@ func _classify_request_refs(
 				else:
 					pending_payload = {
 						"ref": ref,
+						"base_record": base_record,
 						"item_id": item_id,
 						"cache_item_id": load_item_id,
 						"type_name": type_name,
@@ -2273,7 +2088,7 @@ func _object_id_for_record(record: RefCounted) -> StringName:
 	return StringName(str(value))
 
 
-func _debug_ref_id(ref: CellReference, record: RefCounted) -> String:
+func _debug_ref_id(ref: Variant, record: RefCounted) -> String:
 	if ref != null:
 		return str(ref.ref_id)
 	if record != null:
@@ -2456,36 +2271,7 @@ func _static_entry_waiting_for_prepare(entry: InstantiationEntry) -> bool:
 ## `profile` — optional per-request override of instantiator defaults. Pass
 ## null (default) to use the shared instantiator flags (current behavior).
 func request_exterior_cell_async(x: int, y: int, profile: LoadProfile = null) -> int:
-	if _world_object_source != null and _world_object_source.has_method("get_cell_manifest"):
-		var world_request_id := request_world_cell_async(Vector2i(x, y), profile)
-		if world_request_id > 0:
-			return world_request_id
-
-	if not _background_processor:
-		# Only warn once per session about missing processor
-		if not _stats.get("_warned_no_processor", false):
-			push_warning("CellManager: No background processor set, falling back to sync load")
-			_stats["_warned_no_processor"] = true
-		return -1
-
-	# Check concurrent load-slot limit. Resident playable cells may keep an
-	# AsyncCellRequest alive for deferred interactives, but they must not block
-	# the loader from filling the rest of the selected streaming radius.
-	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
-		return -1
-
-	var cell_record: CellRecord = _get_exterior_cell_record(x, y)
-	if not cell_record:
-		return -1
-
-	# Phase F — dispatch prototype pre-registration tasks in parallel with the
-	# cell's ResourceLoader pipeline. Warms _mesh_types off-thread before the
-	# static refs hit the instantiation queue, eliminating the ~20ms cold
-	# PackedScene.instantiate per unique prototype that previously hit main.
-	if _instantiator != null:
-		_instantiator.preregister_cell_statics(cell_record)
-
-	return _start_async_request(cell_record, Vector2i(x, y), false, profile)
+	return request_world_cell_async(Vector2i(x, y), profile)
 
 
 func request_world_cell_async(grid: Vector2i, profile: LoadProfile = null) -> int:
@@ -2513,10 +2299,46 @@ func request_world_cell_async(grid: Vector2i, profile: LoadProfile = null) -> in
 			if (int(record.get("capability_flags")) & capability_mask) != 0:
 				objects.append(record)
 
-	if _instantiator != null and _instantiator.has_method("preregister_world_cell_statics"):
-		_instantiator.call("preregister_world_cell_statics", objects)
+	var request_id := _start_async_request(null, grid, false, profile, objects, true)
+	if request_id > 0:
+		_increment_route_usage_stat("async_world_manifest_requests")
+	return request_id
 
-	return _start_async_request(null, grid, false, profile, objects, true)
+
+func request_world_space_async(space_handle: RefCounted, profile: LoadProfile = null) -> int:
+	if space_handle == null:
+		return -1
+	if not _background_processor:
+		if not _stats.get("_warned_no_processor", false):
+			push_warning("CellManager: No background processor set, falling back to sync load")
+			_stats["_warned_no_processor"] = true
+		return -1
+
+	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
+		return -1
+
+	var manifest: Variant = _get_world_space_manifest(space_handle)
+	if manifest == null:
+		return -1
+
+	var capability_mask: int = WorldObjectRecordScript.CAP_GAMEPLAY | WorldObjectRecordScript.CAP_STATIC_VISUAL
+	var objects: Array = []
+	if manifest.has_method("get_capable_objects"):
+		objects = manifest.call("get_capable_objects", capability_mask)
+	else:
+		for record: RefCounted in manifest.objects:
+			if (int(record.get("capability_flags")) & capability_mask) != 0:
+				objects.append(record)
+
+	var grid: Vector2i = manifest.get("cell_grid") if manifest is Object else Vector2i.ZERO
+	var is_interior := bool(space_handle.call("is_interior")) if space_handle.has_method("is_interior") else false
+	var request_id := _start_async_request(null, grid, is_interior, profile, objects, true, str(space_handle.get("key")))
+	if request_id > 0:
+		if is_interior:
+			_increment_route_usage_stat("async_world_manifest_interior_requests")
+		else:
+			_increment_route_usage_stat("async_world_manifest_requests")
+	return request_id
 
 
 ## Request async loading of an interior cell
@@ -2525,31 +2347,7 @@ func request_world_cell_async(grid: Vector2i, profile: LoadProfile = null) -> in
 ## `LoadProfile.interior_pocket()` so RS/static-renderer batching is disabled
 ## (RS instances render at ESM world position, not pocket offset).
 func request_cell_async(cell_name: String, profile: LoadProfile = null) -> int:
-	if not _background_processor:
-		# Only warn once per session about missing processor
-		if not _stats.get("_warned_no_processor", false):
-			push_warning("CellManager: No background processor set, falling back to sync load")
-			_stats["_warned_no_processor"] = true
-		return -1
-
-	# Check concurrent load-slot limit. Resident playable cells may keep an
-	# AsyncCellRequest alive for deferred interactives, but they must not block
-	# the loader from filling the rest of the selected streaming radius.
-	if _get_active_async_load_slot_count() >= MAX_ASYNC_REQUESTS:
-		return -1
-
-	var cell_record: CellRecord = _get_cell_record(cell_name)
-	if not cell_record:
-		return -1
-
-	# Phase F — pre-register prototypes off-thread (same as exterior path).
-	# Interior pockets still benefit: pocket contents are often dense (tavern,
-	# shop) and the first-entry cold-register stall is exactly what breaks
-	# pocket load latency.
-	if _instantiator != null:
-		_instantiator.preregister_cell_statics(cell_record)
-
-	return _start_async_request(cell_record, Vector2i.ZERO, true, profile)
+	return request_world_space_async(WorldSpaceHandleScript.interior(cell_name), profile)
 
 
 ## Check if an async request is complete
@@ -2748,8 +2546,6 @@ func _maybe_log_per_type_breakdown() -> void:
 ## by the shutdown path. Mirrors Phase F's drain — same wait_for_task_completion
 ## contract on every WorkerThreadPool task we own.
 func fast_cleanup() -> void:
-	if _instantiator != null:
-		_instantiator.drain_prereg_tasks()
 	# Win 1 — drain any in-flight per-cell collision workers.
 	for request_id: int in _async_requests:
 		var request: AsyncCellRequest = _async_requests[request_id]
@@ -3106,6 +2902,21 @@ func _drain_pending_child_attaches(max_count: int, budget_usec: float) -> int:
 	return attached
 
 
+func _get_pending_child_attach_count_for_request(request_id: int) -> int:
+	var count := 0
+	for entry: Dictionary in _pending_child_attaches:
+		if int(entry.get("request_id", -1)) == request_id:
+			count += 1
+	return count
+
+
+func _finalize_requests_completed_by_child_attaches() -> void:
+	for request_id: int in _async_requests:
+		var request: AsyncCellRequest = _async_requests[request_id]
+		if request != null and _is_request_complete(request):
+			_finalize_request(request)
+
+
 func _discard_pending_child_attaches_for_request(request_id: int) -> void:
 	if _pending_child_attaches.is_empty():
 		return
@@ -3277,8 +3088,10 @@ func process_async_instantiation(
 		SC.CHILD_ATTACH_BUDGET_MS * 1000.0,
 		maxf(0.0, budget_usec - float(attach_start - start_time))
 	)
-	_drain_pending_child_attaches(SC.CHILD_ATTACH_MAX_PER_FRAME, attach_budget_pre)
+	var pre_attached_children := _drain_pending_child_attaches(SC.CHILD_ATTACH_MAX_PER_FRAME, attach_budget_pre)
 	attach_time_us += Time.get_ticks_usec() - attach_start
+	if pre_attached_children > 0:
+		_finalize_requests_completed_by_child_attaches()
 
 	if _instantiation_queue.is_empty():
 		if not allow_collision_finalize:
@@ -3360,7 +3173,7 @@ func process_async_instantiation(
 
 		var entry: InstantiationEntry = _instantiation_queue.pop_back()
 		var request_id: int = entry.request_id
-		var ref: CellReference = entry.ref
+		var ref: Variant = entry.ref
 		var model_path: String = entry.model_path
 		var item_id: String = entry.item_id
 		var cache_item_id: String = entry.cache_item_id
@@ -3424,8 +3237,9 @@ func process_async_instantiation(
 		var inst_start := Time.get_ticks_usec()
 		var inst_cell_grid: Vector2i = request.grid if not request.is_interior else Vector2i.ZERO
 		var obj: Node3D = null
+		var inst_result: Variant = null
 		# Phase A §7.5 + §7.6 — dispatched entries NEVER fall back to sync
-		# instantiate_reference. Either:
+		# normalized instantiate fallback. Either:
 		#   (a) worker_instance != null → run main-thread tail and publish.
 		#   (b) worker_instance == null → worker produced nothing (malformed
 		#       PackedScene, non-Node3D root, can_instantiate false). Drop
@@ -3475,19 +3289,49 @@ func process_async_instantiation(
 			# else: worker failed (e.g. type unregistered at precompute time,
 			# e.g. clear() ran mid-flight). Drop silently.
 		else:
-			if entry.world_object_record != null and _instantiator.has_method("instantiate_world_object_record"):
-				obj = _instantiator.call("instantiate_world_object_record", entry.world_object_record, inst_cell_grid, cache_item_id) as Node3D
+			if entry.world_object_record != null and _instantiator.has_method("instantiate_world_object_record_result"):
+				inst_result = _instantiator.call("instantiate_world_object_record_result", entry.world_object_record, inst_cell_grid, cache_item_id)
+				if inst_result != null:
+					obj = inst_result.get("node") as Node3D
 			elif entry.world_object_id != &"" and _instantiator.has_method("instantiate_world_object"):
 				obj = _instantiator.call("instantiate_world_object", entry.world_object_id, inst_cell_grid, cache_item_id) as Node3D
 			else:
-				obj = _instantiator.instantiate_reference(ref, inst_cell_grid, cache_item_id)
+				var fallback_record: RefCounted = null
+				if ref != null:
+					var fallback_type_name: String = entry.type_name
+					var fallback_base_record: Variant = null
+					var fallback_record_type: Array = [fallback_type_name]
+					fallback_base_record = _resolve_source_reference_base_record(ref, fallback_record_type)
+					fallback_type_name = fallback_record_type[0] if fallback_record_type.size() > 0 else fallback_type_name
+					if fallback_base_record != null:
+						var fallback_item_id := item_id
+						if fallback_item_id.is_empty() and "record_id" in fallback_base_record:
+							fallback_item_id = str(fallback_base_record.record_id)
+						var fallback_cache_item_id := cache_item_id if not cache_item_id.is_empty() else fallback_item_id
+						fallback_record = _make_payload_record_from_ref(
+							ref,
+							fallback_type_name,
+							model_path,
+							fallback_item_id,
+							fallback_cache_item_id,
+							false,
+							inst_cell_grid,
+							fallback_base_record
+						)
+				if fallback_record != null and _instantiator.has_method("instantiate_world_object_record_result"):
+					inst_result = _instantiator.call("instantiate_world_object_record_result", fallback_record, inst_cell_grid, cache_item_id)
+					if inst_result != null:
+						obj = inst_result.get("node") as Node3D
 		var inst_elapsed := Time.get_ticks_usec() - inst_start
-		var route_name: String = _instantiator.last_inst_route
+		var route_name: String = str(inst_result.get("route")) if inst_result != null else _instantiator.last_inst_route
 		if route_name.is_empty():
 			route_name = "unknown"
-		route_model_load_us += int(_instantiator.last_model_load_us)
-		route_static_register_us += int(_instantiator.last_static_register_us)
-		route_static_add_us += int(_instantiator.last_static_add_us)
+		var route_model_load_delta_us := int(inst_result.get("model_load_us")) if inst_result != null else int(_instantiator.last_model_load_us)
+		var route_static_register_delta_us := int(inst_result.get("static_register_us")) if inst_result != null else int(_instantiator.last_static_register_us)
+		var route_static_add_delta_us := int(inst_result.get("static_add_us")) if inst_result != null else int(_instantiator.last_static_add_us)
+		route_model_load_us += route_model_load_delta_us
+		route_static_register_us += route_static_register_delta_us
+		route_static_add_us += route_static_add_delta_us
 		if route_name.begins_with("static_"):
 			route_static_us += inst_elapsed
 			route_static_count += 1
@@ -3518,7 +3362,7 @@ func process_async_instantiation(
 		_diag_instantiate_time_total_us += inst_elapsed
 		_diag_instantiate_count += 1
 		# Per-type breakdown — direct attribution of inst: cost to specific ref types.
-		var t_name: String = _instantiator.last_type_name
+		var t_name: String = str(inst_result.get("type_name")) if inst_result != null else _instantiator.last_type_name
 		if t_name.is_empty():
 			t_name = "unknown"
 		_diag_per_type_time_us[t_name] = _diag_per_type_time_us.get(t_name, 0) + inst_elapsed
@@ -3532,7 +3376,7 @@ func process_async_instantiation(
 				_frame_inst_door_us += inst_elapsed
 			"light":
 				_frame_inst_light_us += inst_elapsed
-				_frame_inst_light_modelload_us += int(_instantiator.last_model_load_us)
+				_frame_inst_light_modelload_us += route_model_load_delta_us
 			"container":
 				_frame_inst_container_us += inst_elapsed
 			"activator":
@@ -3545,7 +3389,8 @@ func process_async_instantiation(
 		# pending counter (see below). Push to the deferred list; it'll be
 		# re-queued when the camera is within its proximity threshold via
 		# tick_proximity_deferred.
-		if obj == null and _instantiator.last_proximity_deferred:
+		var proximity_deferred := bool(inst_result.get("proximity_deferred")) if inst_result != null else _instantiator.last_proximity_deferred
+		if obj == null and proximity_deferred:
 			_proximity_deferred.append(entry)
 			# Rewind the pending counter — this ref isn't instantiated OR failed,
 			# it's paused. `_is_request_complete` must still see it as in-flight.
@@ -3595,6 +3440,8 @@ func process_async_instantiation(
 		attach_budget_post
 	)
 	attach_time_us += Time.get_ticks_usec() - add_child_start
+	if attached_children > 0:
+		_finalize_requests_completed_by_child_attaches()
 	if allow_collision_finalize:
 		collision_finalize_us = _maybe_finalize_static_collision_when_idle(start_time, budget_usec)
 
@@ -3705,7 +3552,7 @@ func _phase_a_dispatch_pass() -> void:
 			continue
 		if entry.worker_instance != null or entry.worker_static_precomp != null:
 			continue
-		if entry.world_object_record != null:
+		if entry.ref == null:
 			continue
 
 		# Resolve base_record + type_name on main thread — both Phase A and
@@ -3723,6 +3570,19 @@ func _phase_a_dispatch_pass() -> void:
 		# returns null on miss / null sentinel / non-PackedScene entry.
 		var packed_scene: PackedScene = ml.call("get_cached_packed_scene", entry.model_path, entry.cache_item_id)
 		if packed_scene != null and _instantiator.should_dispatch_to_worker(entry, base_record, type_name):
+			if entry.world_object_record == null:
+				entry.world_object_record = _make_payload_record_from_ref(
+					entry.ref,
+					type_name,
+					entry.model_path,
+					entry.item_id,
+					entry.cache_item_id,
+					false,
+					entry.cell_grid,
+					base_record
+				)
+				if entry.world_object_record == null:
+					continue
 			# Stash resolved records so the drain's main-thread tail can reuse
 			# them (avoids duplicate ESMManager lookup in complete_worker_instantiate).
 			entry.phase_a_base_record = base_record
@@ -3954,6 +3814,7 @@ func _start_async_request(
 	profile: LoadProfile = null,
 	world_objects: Array = [],
 	uses_world_manifest: bool = false,
+	cell_name: String = "",
 ) -> int:
 	var request := AsyncCellRequest.new()
 	request.cell_record = cell
@@ -3975,7 +3836,12 @@ func _start_async_request(
 	# Create the cell node
 	request.cell_node = Node3D.new()
 	if is_interior:
-		request.cell_node.name = cell.name.replace(" ", "_").replace(",", "")
+		var interior_name := cell_name
+		if interior_name.is_empty() and cell != null and "name" in cell:
+			interior_name = str(cell.name)
+		if interior_name.is_empty():
+			interior_name = "Interior"
+		request.cell_node.name = interior_name.replace(" ", "_").replace(",", "")
 	else:
 		request.cell_node.name = "Cell_%d_%d" % [grid.x, grid.y]
 
@@ -4060,7 +3926,7 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 	for pending: Variant in request.references_to_process:
 		var payload: Dictionary = pending if pending is Dictionary else {}
 		var record: RefCounted = payload.get("record", null) as RefCounted
-		var ref: CellReference = payload.get("ref", pending)
+		var ref: Variant = payload.get("ref", pending)
 		var base_record: Variant = payload.get("base_record", null)
 		var type_name: String = str(payload.get("type_name", ""))
 		var item_id: String = str(payload.get("item_id", ""))
@@ -4087,7 +3953,18 @@ func _queue_references_for_model(request: AsyncCellRequest, model_path: String) 
 		var ref_model_path: String = _get_model_path(base_record)
 		if ref_model_path.to_lower().replace("/", "\\") == model_path.to_lower().replace("/", "\\"):
 			# This reference uses the model that was just parsed
-			_queue_instantiation(request.request_id, ref, model_path, item_id, cache_item_id, type_name, object_id)
+			record = _make_payload_record_from_ref(
+				ref,
+				type_name,
+				model_path,
+				item_id,
+				cache_item_id,
+				false,
+				request.grid,
+				base_record
+			)
+			object_id = _object_id_for_record(record) if record != null else object_id
+			_queue_instantiation(request.request_id, null if record != null else ref, model_path, item_id, cache_item_id, type_name, object_id, record)
 		else:
 			remaining.append(pending)
 
@@ -4102,6 +3979,7 @@ func _is_request_complete(request: AsyncCellRequest) -> bool:
 		and _get_pending_model_load_count_for_request(request) <= 0 \
 		and static_prepare_count <= 0 \
 		and request.references_to_process.is_empty() \
+		and _get_pending_child_attach_count_for_request(request.request_id) <= 0 \
 		and request.pending_instantiations <= 0
 
 
@@ -4145,16 +4023,10 @@ func _on_disk_load_completed(request_id: int, model_path: String, item_id: Strin
 func _get_model_path(record: Variant) -> String:
 	return _instantiator._get_model_path(record)
 
-func _apply_transform(node: Node3D, ref: CellReference, apply_model_rotation: bool) -> void:
-	_instantiator._apply_transform(node, ref, apply_model_rotation)
-
-func _create_placeholder(ref: CellReference) -> Node3D:
-	return _instantiator._create_placeholder(ref)
-
 
 # REMOVED: _instantiate_reference_from_parsed (duplicate fast-path).
-# Streaming now routes directly through _instantiator.instantiate_reference()
-# at the single call site in _process_instantiation_queue. The duplicate
+# Raw source refs are now wrapped through the spawn adapter as WorldObjectRecord
+# payloads before publication. The duplicate
 # silently skipped DoorInteractable attach (I.7), carryable RigidBody
 # conversion (I.1), _apply_metadata, and _auto_play_nif_animation — see
 # the "Simplicity Over Over-Engineering" principle in .claude/CLAUDE.md
@@ -4515,7 +4387,7 @@ func cancel_collision_build_for_request(request_id: int) -> void:
 ## tier is the axis of variation, every queued ref becomes a Node3D.
 func _queue_instantiation(
 	request_id: int,
-	ref: CellReference,
+	ref: Variant,
 	model_path: String,
 	item_id: String,
 	cache_item_id: String = "",
@@ -4688,6 +4560,9 @@ func get_loading_stats() -> Dictionary:
 		if request != null:
 			pending_model_loads += _get_pending_model_load_count_for_request(request)
 	var pending_conversions := maxi(0, _pending_conversions.size() - _pending_conversion_index)
+	var instantiator_route_usage: Dictionary = {}
+	if _instantiator != null and _instantiator.has_method("get_route_usage_stats"):
+		instantiator_route_usage = _instantiator.call("get_route_usage_stats")
 	return {
 		"instantiation_queue_size": _instantiation_queue.size() + _pending_child_attaches.size(),
 		"pending_child_attaches": _pending_child_attaches.size(),
@@ -4706,6 +4581,8 @@ func get_loading_stats() -> Dictionary:
 		"burst_budget_ms": _burst_budget_ms,
 		"burst_max_instantiations": _burst_max_instantiations,
 		"prewarm_pending_count": _prewarm_pending.size(),
+		"route_usage": _route_usage_stats.duplicate(),
+		"instantiator_route_usage": instantiator_route_usage,
 		"objects_instantiated": int(_stats.get("objects_instantiated", 0)) + int(_instantiator.stats.get("objects_instantiated", 0)),
 		"objects_from_pool": int(_stats.get("objects_from_pool", 0)) + int(_instantiator.stats.get("objects_from_pool", 0)),
 		"avg_instantiate_time_us": (_diag_instantiate_time_total_us / _diag_instantiate_count) if _diag_instantiate_count > 0 else 0
@@ -4715,6 +4592,9 @@ func get_loading_stats() -> Dictionary:
 ## Get overall stats including pool stats
 func get_stats() -> Dictionary:
 	var result := _stats.duplicate()
+	result["route_usage"] = _route_usage_stats.duplicate()
+	if _instantiator != null and _instantiator.has_method("get_route_usage_stats"):
+		result["instantiator_route_usage"] = _instantiator.call("get_route_usage_stats")
 
 	# Merge instantiator stats. Post-drift-fix the instantiator owns the
 	# objects_instantiated / objects_from_pool / lights_created counters for

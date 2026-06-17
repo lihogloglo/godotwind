@@ -20,7 +20,8 @@ Interior transitions are encoded in ESM door references:
 
 - `is_teleport` flag marks a reference as a door transition
 - `DODT` subrecord: destination position + rotation (player arrival facing, yaw only)
-- `DNAM` subrecord: destination cell name (string for interiors, grid coords for exteriors)
+- `DNAM` subrecord: destination interior cell name. Exterior destinations leave
+  `DNAM` empty and resolve the exterior grid from the global `DODT` position.
 - Interior cells have their own `water_height`, `ambient_color`, `sunlight_color`, `fog_color`, `fog_density`
 - `is_quasi_exterior()` flag: some interiors share exterior sky/weather (e.g., Vivec plazas)
 

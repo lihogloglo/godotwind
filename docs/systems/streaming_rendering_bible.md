@@ -321,7 +321,7 @@ An object belongs to exactly one visual tier at a time.
 | NEAR | 0-150m | Sparse `Node3D` only for interactives, static visuals server-direct, cell static collision server-direct | Active stabilization |
 | MID | 150-400m bridge | Spatially local `CellStaticBucket` draw groups: groups use local MultiMeshes; singleton groups use single-slot transform uploads; Godot C++ chooses embedded sub-LOD | Working |
 | HLOD | Optional 400-1000m overlap | Runtime-merged static geometry per chunk, one RS instance per chunk | Working but default-off for the 400m MID/FAR experiment |
-| FAR | 1000-5000m | Octahedral impostors in spatial MultiMesh pages | Working, default-on |
+| FAR | 400-5000m, capped by view distance | Octahedral impostors in spatial MultiMesh pages | Working, default-on |
 
 Rules:
 

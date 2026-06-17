@@ -11,7 +11,9 @@
 class_name OceanControls
 extends RefCounted
 
-const WATER_RENDER_LAYER_MASK: int = 1 << 19
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
+
+const WATER_RENDER_LAYER_MASK: int = RenderLayersScript.WATER_SURFACE
 const MAIN_SCENE_WATER_QUALITY: int = OceanMesh.QualityMode.HIGH
 const MAIN_SCENE_MESH_MODE: int = OceanMesh.MeshMode.CLIPMAP
 const MAIN_SCENE_SURFACE_SHADER: int = OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL
@@ -44,6 +46,7 @@ var underwater_features: Dictionary = {
 var _ocean_configured: bool = false
 var _underwater_attached_target: Node = null
 var _underwater_particle_defaults_applied: bool = false
+var _world_space_ocean_visible: bool = true
 var _panels: ExplorerPanels = null
 
 ## Callback dictionary — keys are action names, values are Callables on world_explorer
@@ -84,7 +87,7 @@ func set_enabled(enabled: bool) -> void:
 
 ## Per-frame ocean sync hook.
 func process(_delta: float) -> void:
-	if not all_water_enabled or not show_ocean:
+	if not all_water_enabled or not show_ocean or not _world_space_ocean_visible:
 		return
 	_sync_main_scene_underwater()
 
@@ -96,24 +99,38 @@ func on_show_ocean_toggled(enabled: bool) -> void:
 	if _panels and _panels.ocean_controls_container:
 		_panels.ocean_controls_container.visible = all_water_enabled
 
-	if enabled:
-		# Force-initialize if the system hasn't been started yet
-		# (ocean/enabled defaults to false in project settings)
-		if not WaterSystem.is_initialized():
-			WaterSystem.force_initialize()
-		if not _ocean_configured:
-			_configure_global_ocean()
-		if WaterSystem.has_method("set_enabled") and not WaterSystem.is_system_enabled():
-			WaterSystem.set_enabled(true)
-		if WaterSystem.has_method("set_water_layer_enabled"):
-			WaterSystem.set_water_layer_enabled(&"ocean_surface", true)
-		_sync_ocean_sliders()
-	else:
-		if WaterSystem and WaterSystem.has_method("set_water_layer_enabled"):
-			WaterSystem.set_water_layer_enabled(&"ocean_surface", false)
+	set_world_space_ocean_visible(enabled)
 
 	_log("Ocean: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()
+
+
+## Temporarily show/hide exterior ocean rendering without destroying resources
+## or changing the user's Ocean toggle preference.
+func set_world_space_ocean_visible(visible: bool) -> void:
+	_world_space_ocean_visible = visible
+	if not WaterSystem:
+		return
+	if not visible:
+		if WaterSystem.has_method("set_water_layer_enabled"):
+			WaterSystem.set_water_layer_enabled(&"ocean_surface", false)
+		_set_main_scene_underwater_enabled(false)
+		return
+	if not all_water_enabled or not show_ocean:
+		return
+	if not WaterSystem.is_initialized():
+		WaterSystem.force_initialize()
+	if not _ocean_configured:
+		_configure_global_ocean()
+	var active_camera := _get_active_camera()
+	if active_camera:
+		set_camera(active_camera)
+	if WaterSystem.has_method("set_enabled") and not WaterSystem.is_system_enabled():
+		WaterSystem.set_enabled(true)
+	if WaterSystem.has_method("set_water_layer_enabled"):
+		WaterSystem.set_water_layer_enabled(&"ocean_surface", true)
+	_sync_ocean_render_layers()
+	_sync_ocean_sliders()
 
 
 func set_all_water_enabled(enabled: bool) -> void:

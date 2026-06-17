@@ -7,16 +7,16 @@ const InteriorPocketManagerScript := preload("res://src/core/world/interior_pock
 func test_door_interactable_emits_instance_key() -> void:
 	var door: DoorInteractable = DoorInteractableScript.new()
 	var player := Node3D.new()
-	var emitted_key := ""
+	var emitted_key: Array[String] = [""]
 	door.record_id = "ex_common_door"
 	door.door_instance_key = "ext:-2,-9:ex_common_door:42"
 	door.door_activated.connect(func(key: String, _record: Variant, _player: Node3D) -> void:
-		emitted_key = key
+		emitted_key[0] = key
 	)
 
 	door.interact(player)
 
-	assert_bool(emitted_key == "ext:-2,-9:ex_common_door:42").is_true()
+	assert_str(emitted_key[0]).is_equal("ext:-2,-9:ex_common_door:42")
 	door.free()
 	player.free()
 

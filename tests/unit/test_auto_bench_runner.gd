@@ -24,7 +24,6 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 	var runner := AutoBenchRunnerScript.new()
 	var samples: Array[Dictionary] = [{
 		"fps": 60.0, "draws": 7000, "objs": 10000,
-		"registry_batches": 500, "registry_slots": 14000,
 		"total_impostors": 800, "hlod_cells": 12,
 		"chunks_tier_1": 4, "chunks_tier_2": 1,
 	}]
@@ -34,8 +33,8 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 	assert_float(summary["fps_max"]).is_equal(60.0)
 	assert_float(summary["fps_avg"]).is_equal(60.0)
 	assert_float(summary["draws_avg"]).is_equal(7000.0)
-	assert_int(summary["registry_batches_max"]).is_equal(500)
-	assert_int(summary["registry_slots_max"]).is_equal(14000)
+	assert_bool(summary.has("registry_" + "batches_max")).is_false()
+	assert_bool(summary.has("registry_" + "slots_max")).is_false()
 	assert_int(summary["impostors_max"]).is_equal(800)
 	assert_int(summary["hlod_cells_max"]).is_equal(12)
 	assert_int(summary["chunks_tier_1_max"]).is_equal(4)
@@ -46,9 +45,9 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 func test_summarize_multi_sample_aggregates() -> void:
 	var runner := AutoBenchRunnerScript.new()
 	var samples: Array[Dictionary] = [
-		{"fps": 50.0, "draws": 6000, "objs":  9000, "registry_batches": 400, "registry_slots": 12000, "total_impostors": 500, "hlod_cells":  8, "chunks_tier_1": 2, "chunks_tier_2": 0},
-		{"fps": 60.0, "draws": 7000, "objs": 10000, "registry_batches": 500, "registry_slots": 14000, "total_impostors": 700, "hlod_cells": 10, "chunks_tier_1": 3, "chunks_tier_2": 1},
-		{"fps": 40.0, "draws": 8000, "objs": 11000, "registry_batches": 600, "registry_slots": 15000, "total_impostors": 900, "hlod_cells": 12, "chunks_tier_1": 4, "chunks_tier_2": 1},
+		{"fps": 50.0, "draws": 6000, "objs":  9000, "total_impostors": 500, "hlod_cells":  8, "chunks_tier_1": 2, "chunks_tier_2": 0},
+		{"fps": 60.0, "draws": 7000, "objs": 10000, "total_impostors": 700, "hlod_cells": 10, "chunks_tier_1": 3, "chunks_tier_2": 1},
+		{"fps": 40.0, "draws": 8000, "objs": 11000, "total_impostors": 900, "hlod_cells": 12, "chunks_tier_1": 4, "chunks_tier_2": 1},
 	]
 	var summary: Dictionary = runner._summarize(samples)
 	assert_int(summary["samples"]).is_equal(3)
@@ -58,8 +57,8 @@ func test_summarize_multi_sample_aggregates() -> void:
 	assert_float(summary["draws_avg"]).is_equal_approx(7000.0, 0.001)
 	assert_float(summary["objs_avg"]).is_equal_approx(10000.0, 0.001)
 	# Max fields pick the highest across samples regardless of ordering.
-	assert_int(summary["registry_batches_max"]).is_equal(600)
-	assert_int(summary["registry_slots_max"]).is_equal(15000)
+	assert_bool(summary.has("registry_" + "batches_max")).is_false()
+	assert_bool(summary.has("registry_" + "slots_max")).is_false()
 	assert_int(summary["impostors_max"]).is_equal(900)
 	assert_int(summary["hlod_cells_max"]).is_equal(12)
 	assert_int(summary["chunks_tier_1_max"]).is_equal(4)
@@ -93,8 +92,8 @@ func test_summarize_output_is_json_serializable() -> void:
 	# patch dumps a RID into a sample).
 	var runner := AutoBenchRunnerScript.new()
 	var samples: Array[Dictionary] = [
-		{"fps": 55.0, "draws": 6500, "objs": 9500, "registry_batches": 400, "registry_slots": 12000, "total_impostors": 500, "hlod_cells": 8, "chunks_tier_1": 2, "chunks_tier_2": 0},
-		{"fps": 60.0, "draws": 6700, "objs": 9700, "registry_batches": 450, "registry_slots": 12500, "total_impostors": 600, "hlod_cells": 10, "chunks_tier_1": 3, "chunks_tier_2": 1},
+		{"fps": 55.0, "draws": 6500, "objs": 9500, "total_impostors": 500, "hlod_cells": 8, "chunks_tier_1": 2, "chunks_tier_2": 0},
+		{"fps": 60.0, "draws": 6700, "objs": 9700, "total_impostors": 600, "hlod_cells": 10, "chunks_tier_1": 3, "chunks_tier_2": 1},
 	]
 	var summary: Dictionary = runner._summarize(samples)
 	var text: String = JSON.stringify(summary)

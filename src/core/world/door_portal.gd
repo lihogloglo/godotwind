@@ -22,6 +22,7 @@ extends RefCounted
 
 const CS := preload("res://src/core/coordinate_system.gd")
 const DoorUtils := preload("res://src/core/world/door_utils.gd")
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
 const DOOR_CLIP_SHADER := preload("res://src/core/world/shaders/door_clip.gdshader")
 
 #region Constants
@@ -35,9 +36,9 @@ const PORTAL_RANGE: float = 20.0
 const PORTAL_RANGE_SQ: float = PORTAL_RANGE * PORTAL_RANGE
 
 ## Render layers (must match InteriorPocketManager)
-const EXTERIOR_RENDER_LAYERS: int = 0x3  # Layers 1-2
-const INTERIOR_RENDER_LAYERS: int = 0xC  # Layers 3-4
-const COMBINED_RENDER_LAYERS: int = 0xF  # Layers 1-4 (exterior + interior)
+const EXTERIOR_RENDER_LAYERS: int = RenderLayersScript.EXTERIOR_WORLD
+const INTERIOR_RENDER_LAYERS: int = RenderLayersScript.INTERIOR_WORLD
+const COMBINED_RENDER_LAYERS: int = RenderLayersScript.COMBINED_WORLD
 
 ## Stencil reference value for this portal
 const STENCIL_REF: int = 1
@@ -175,7 +176,7 @@ func activate(door_info: Variant, pocket_slot: Variant,
 
 	# Expand camera cull_mask to include interior layers
 	if _main_camera:
-		_main_camera.cull_mask = COMBINED_RENDER_LAYERS
+		_main_camera.cull_mask = RenderLayersScript.replace_world_layers(_main_camera.cull_mask, COMBINED_RENDER_LAYERS)
 
 	# Expand interior lights to illuminate combined layers so they're visible
 	# through the stencil portal (otherwise exterior ambient overpowers them)
@@ -199,7 +200,7 @@ func deactivate(keep_pocket_position: bool = false) -> void:
 	# the caller manages the camera cull_mask)
 	if not keep_pocket_position:
 		if _main_camera and is_instance_valid(_main_camera):
-			_main_camera.cull_mask = EXTERIOR_RENDER_LAYERS
+			_main_camera.cull_mask = RenderLayersScript.replace_world_layers(_main_camera.cull_mask, EXTERIOR_RENDER_LAYERS)
 
 	# Remove stencil-read from interior materials
 	_remove_stencil_read_from_pocket()

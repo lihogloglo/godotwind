@@ -4,14 +4,18 @@
 ## Best for objects that are purely visual with no interaction.
 ##
 ## LOD Support (post-B-wide refactor):
-## Each object is **one** RS instance. LODs live inside the ArrayMesh via
-## `surface_lod_indices`, stamped at prebake time by `nif_converter`. Godot's
+## Static MID visuals are cell-local CellStaticBucket draw groups. Repeated
+## transforms sharing submesh/material use local MultiMeshes; singleton groups
+## use the same ownership path with one slot. Mesh LODs live inside the
+## ArrayMesh via `surface_lod_indices`, stamped at prebake time by
+## `nif_converter`. Godot's
 ## C++ LOD selector picks the right level per frame from screen-space coverage
-## + `lod_bias` — no sibling LOD nodes, no manual distance cascade, no
+## + `lod_bias` - no sibling LOD nodes, no manual distance cascade, no
 ## per-LOD RS instances.
 ##
-## The instance carries a single hard-cull `visibility_range` at MID_END for the
-## default MID->FAR tier handoff; sub-LOD selection is fully engine-driven.
+## Buckets/direct fallback instances carry a hard-cull `visibility_range` at
+## MID_END for the default MID->FAR tier handoff; sub-LOD selection is fully
+## engine-driven.
 ##
 ## Usage:
 ##   var renderer := StaticObjectRenderer.new()
@@ -25,17 +29,8 @@ extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const SC := preload("res://src/core/world/streaming_config.gd")
-const PrototypeRegistryScript := preload("res://src/core/world/prototype_registry.gd")
-const PrototypeBatchScript := preload("res://src/core/world/prototype_batch.gd")
 const CellStaticBucketScript := preload("res://src/core/world/cell_static_bucket.gd")
-const CS := preload("res://src/core/coordinate_system.gd")
 const EXTERIOR_RENDER_LAYER_MASK := 1
-
-## Parked legacy PrototypeRegistry path. It is world-scoped, which is the wrong
-## shape for a large open world because one MultiMesh is spatially indexed as
-## one object. Keep USE_PROTOTYPE_REGISTRY false unless this is rewritten into
-## spatially local buckets per the streaming/rendering bible.
-var _prototype_registry: RefCounted = null
 
 ## Registered mesh types: type_name -> MeshType
 var _mesh_types: Dictionary[String, MeshType] = {}
@@ -81,17 +76,7 @@ var _visual_proxy_by_source: Dictionary[String, int] = {}
 var _visual_proxy_dirty_reason: Dictionary[String, String] = {}
 var _visual_proxy_suppressed: Dictionary[String, bool] = {}
 
-## Phase 3 registry fade duration (seconds). Matches Phase 2's NEAR fade
-## default — see lod_crossfade.gdshader. The shader reads this per-slot via
-## INSTANCE_CUSTOM.y so it could be tuned per-instance in the future; today
-## every slot uses this single value.
-const REGISTRY_FADE_DURATION_S: float = 0.3
 const DESCRIPTOR_BUILD_BUDGET_USEC: int = 1000
-## Safety gate for the parked world-scoped PrototypeRegistry/MultiMesh path.
-## The active static path is the per-cell CellStaticBucket path above. Re-enable
-## only after replacing the registry with spatially local buckets and re-running
-## the bible's MID/HLOD/FAR verification gates.
-const USE_PROTOTYPE_REGISTRY: bool = false
 
 
 ## Next instance ID
@@ -187,7 +172,7 @@ class DescriptorBuildTask:
 ## Phase E — precomputed instance data produced off-thread.
 ##
 ## The worker fills every field of this struct using thread-safe reads only
-## (`_mesh_types[type_name]` + pure math via `CS.*` static functions). The
+## (`_mesh_types[type_name]` + an already-normalized world transform). The
 ## main-thread drain then publishes the struct via `add_instance_precomputed`
 ## which does the MultiMesh buffer writes + dict bookkeeping that can't run
 ## off-thread (per research doc §2.1 — MultiMesh.set_instance_transform is
@@ -202,7 +187,6 @@ class PrecomputedInstance:
 	var type_name: String                             ## Lowercased normalized model path
 	var world_transform: Transform3D                  ## Full world-space xform (world)
 	var sub_mesh_combined_xforms: Array[Transform3D] = []  ## world * sub.local_transform, per sub-mesh
-	var custom_data: Color                            ## (spawn_time, fade_duration, 0, 0) for the shader
 	var aabb: AABB                                    ## Union AABB (copied from MeshType)
 	var cell_grid: Vector2i
 	var model_path: String
@@ -221,16 +205,11 @@ class InstanceData:
 	var visible: bool = true
 	var promoted: bool = false  ## True when a NEAR Node3D exists for this instance
 	var cell_grid: Vector2i    ## Which cell this belongs to
-	## Parked PrototypeRegistry routing. When >= 0, this instance's slots live
-	## inside the legacy world-scoped registry. The active cell-bucket path does
-	## not allocate InstanceData for every static draw; these fields remain for
-	## legacy add_instance/debug-tool compatibility.
-	var registry_id: int = -1
 	## Metadata for MID→NEAR promotion (Phase 5b)
 	var model_path: String     ## Original model path for prototype lookup
 	var item_id: String        ## Item variant ID
-	var ref_id: StringName     ## ESM reference ID (e.g., "barrel_01")
-	var ref_num: int           ## ESM unique reference number
+	var ref_id: StringName     ## Source reference ID (e.g., "barrel_01")
+	var ref_num: int           ## Source unique reference number
 	var source_key: String = "" ## Stable placed-reference key for proxy handoff.
 	var visual_proxy: bool = false
 
@@ -300,9 +279,9 @@ func register_mesh_type(type_name: String, mesh: Mesh, material: Material = null
 ## Register a mesh type from a Node3D prototype.
 ##
 ## Post-B-wide: walks ALL visible MeshInstance3D children in the prototype tree
-## and stores each as a SubMeshEntry. Multi-mesh buildings (3-8 children) get
-## one RS instance per child at add_instance time, all tracked under one ID.
-## Single-mesh prototypes (flora, small clutter) work exactly as before.
+## and stores each as a SubMeshEntry. CellStaticBucket is the normal MID owner;
+## the direct-instance fallback still tracks all child submeshes under one
+## source ID for visual proxies and tests.
 func register_from_prototype(type_name: String, prototype: Node3D) -> void:
 	# Fast-path check under lock — prevents worker tearing on a rehash mid-
 	# register. Releasing the lock before the expensive build is safe because
@@ -717,59 +696,6 @@ func _get_relative_transform(node: Node3D, ancestor: Node3D) -> Transform3D:
 
 #region Instance Add/Remove
 
-## Per-frame cull tick. Returns the visible slot total, or -1 when the
-## registry skipped the tick (camera didn't move + nothing dirty), or 0
-## when the registry hasn't been instantiated yet.
-##
-## Driver: native_streaming_manager._process. Passes current camera position
-## and the active max-visible-distance squared (visibility_range_end²).
-func tick_prototype_cull(cam_pos: Vector3, max_dist_sq: float, batch_budget: int = 0) -> int:
-	if not USE_PROTOTYPE_REGISTRY:
-		return 0
-	if _prototype_registry == null:
-		return 0
-	# When invisible: only run if dirty (flushes hide_instance zero-scale transforms to GPU).
-	# Skip movement-driven re-culls entirely — no per-frame cost while MID is off.
-	if not _globally_visible and not _prototype_registry.is_cull_dirty():
-		return 0
-	return _prototype_registry.tick_cull_if_needed(cam_pos, max_dist_sq, batch_budget)
-
-
-## Pause registry MultiMesh uploads for a few frames around unload membership
-## churn. This keeps set_buffer away from the same frame as hide/release work.
-func defer_prototype_uploads(frames: int) -> void:
-	if _prototype_registry == null:
-		return
-	if _prototype_registry.has_method("defer_uploads"):
-		_prototype_registry.call("defer_uploads", frames)
-
-
-## Lazily instantiate the PrototypeRegistry on first registry-routed add.
-## Returns null if the scenario isn't set yet.
-func _ensure_registry() -> RefCounted:
-	if _prototype_registry != null:
-		return _prototype_registry
-	if not _scenario.is_valid():
-		return null
-	_prototype_registry = PrototypeRegistryScript.new(_scenario)
-	return _prototype_registry
-
-
-## Convert MeshType.sub_meshes into the dict-shape the registry expects.
-## Mirrors prototype_registry.gd add_instance() input schema.
-func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
-	var out: Array = []
-	out.resize(mesh_type.sub_meshes.size())
-	for i in range(mesh_type.sub_meshes.size()):
-		var entry: SubMeshEntry = mesh_type.sub_meshes[i]
-		out[i] = {
-			"mesh": entry.mesh_resource,
-			"material": entry.material_resource,
-			"local_transform": entry.local_transform,
-		}
-	return out
-
-
 ## Phase E — worker-safe precompute for the STAT off-thread path.
 ##
 ## Runs on WorkerThreadPool (called by cell_manager's dispatch pass). Reads
@@ -790,9 +716,6 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 ##   - `_mesh_types` read: dict access, Godot Dictionary reads on a dict
 ##     whose layout is stable are safe (no concurrent writer, see §8 of the
 ##     plan). Gate in dispatcher blocks cold register race.
-##   - `CS.vector_to_godot/scale_to_godot/esm_rotation_to_godot_basis`: all
-##     static functions on CoordinateSystem, pure math (line 88/141/216 of
-##     coordinate_system.gd). No shared state.
 ##   - `Transform3D` / `Basis` / `Vector3` constructors: thread-safe math.
 ##   - `Time.get_ticks_msec()`: thread-safe.
 ##
@@ -800,8 +723,10 @@ func _build_registry_sub_meshes(mesh_type: MeshType) -> Array:
 # PHASE_E:WORKER_SAFE
 func precompute_instance(
 	type_name: String,
-	ref: CellReference,
 	cell_grid: Vector2i,
+	world_transform: Transform3D,
+	ref_id: StringName = &"",
+	ref_num: int = 0,
 ) -> PrecomputedInstance:
 	# Short critical section: grab the MeshType reference under lock, release
 	# immediately. MeshType fields (sub_meshes, aabb, etc.) are frozen after
@@ -817,40 +742,24 @@ func precompute_instance(
 	if not _scenario.is_valid():
 		return null
 
-	# Transform math (mirrors _instantiate_static_object lines 640-644).
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
-	var world_transform := Transform3D(basis, pos)
-
-	# Sub-mesh world xforms — pre-multiply world * local. Saves the main-thread
-	# portion of the hot loop in PrototypeRegistry.add_instance. Reg add expects
-	# to compute `p_world_transform * local_xform` per sub-mesh; if we hand it
-	# the combined xform directly (§3.5 `add_instance_precomputed`), it skips
-	# that per-sub multiply. Cost moved off-thread: 3-5 Transform3D mults × N
-	# sub-meshes per ref.
+	# Sub-mesh world xforms: pre-multiply world * local so the main-thread
+	# publish path can avoid per-sub-mesh transform composition.
 	var combined: Array[Transform3D] = []
 	combined.resize(mesh_type.sub_meshes.size())
 	for i in range(mesh_type.sub_meshes.size()):
 		var entry: SubMeshEntry = mesh_type.sub_meshes[i]
 		combined[i] = world_transform * entry.local_transform
 
-	# Shader custom data — spawn time + fade duration for lod_crossfade_multimesh.
-	var spawn_time: float = float(Time.get_ticks_msec()) / 1000.0
-	var custom_data := Color(spawn_time, REGISTRY_FADE_DURATION_S, 0.0, 0.0)
-
 	var precomp := PrecomputedInstance.new()
 	precomp.type_name = type_name
 	precomp.world_transform = world_transform
 	precomp.sub_mesh_combined_xforms = combined
-	precomp.custom_data = custom_data
 	precomp.aabb = mesh_type.aabb
 	precomp.cell_grid = cell_grid
-	precomp.model_path = ""  # Caller fills in via ref.model_path if needed
+	precomp.model_path = ""
 	precomp.item_id = ""
-	precomp.ref_id = StringName(str(ref.ref_id))
-	precomp.ref_num = ref.ref_num
+	precomp.ref_id = ref_id
+	precomp.ref_num = ref_num
 	return precomp
 
 
@@ -870,7 +779,7 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	# the renderer is the universal static-render path (NEAR + flora + rocks +
 	# arch + clutter). Dropping spawns when invisible = losing statics that a
 	# subsequent `set_all_visible(true)` can never recover. Hide-on-add is
-	# handled below at the registry (line ~399) + legacy (line ~495) branches.
+	# handled by _create_rs_instance below.
 
 	if type_name not in _mesh_types:
 		return -1
@@ -880,7 +789,6 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 		return -1
 
 	var mesh_type: MeshType = _mesh_types[type_name]
-	var rs := RenderingServer
 	var id := _next_id
 	_next_id += 1
 
@@ -897,42 +805,7 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	data.source_key = source_key
 	data.visual_proxy = visual_proxy
 
-	# Phase 3 registry path. Always taken for prototypes registered via
-	# register_from_prototype (which populates sub_meshes). The legacy
-	# register_mesh_type direct path (no sub_meshes) falls through to the
-	# RS-instance branch below — that's kept for debug tools / tests that
-	# instantiate a Mesh resource directly without a Node3D prototype.
-	if USE_PROTOTYPE_REGISTRY and not mesh_type.sub_meshes.is_empty():
-		var registry := _ensure_registry()
-		if registry != null:
-			var subs: Array = _build_registry_sub_meshes(mesh_type)
-			## spawn_time + fade_duration drive the shader crossfade (see
-			## lod_crossfade_multimesh.gdshader). fade_duration is seconds,
-			## not metres — DU.FADE_MARGIN_LOD3_FAR was the wrong constant.
-			var spawn_time: float = float(Time.get_ticks_msec()) / 1000.0
-			registry.add_instance(id, subs, transform, spawn_time, REGISTRY_FADE_DURATION_S)
-			# Registry path mirror of the legacy-path `_globally_visible` check
-			# (line 476). Without this, instances added via the registry after
-			# `set_all_visible(false)` come back as visible MultiMesh slots —
-			# the "groups of meshes appear when moving after toggle none" bug.
-			if not _globally_visible:
-				registry.hide_instance(id)
-				data.visible = false
-			data.registry_id = id
-			_instances[id] = data
-			mesh_type.instance_count += 1
-			_stats["total_instances"] += 1
-			if _globally_visible:
-				_stats["visible_instances"] += 1
-			if cell_grid not in _cell_index:
-				_cell_index[cell_grid] = [] as Array[int]
-			_cell_index[cell_grid].append(id)
-			if visual_proxy and not source_key.is_empty():
-				_visual_proxy_by_source[source_key] = id
-				_stats["visual_proxy_instances"] = int(_stats.get("visual_proxy_instances", 0)) + 1
-			return id
-
-	# Legacy fallback: per-sub-mesh RS instance path for register_mesh_type
+	# Direct RS instance path: per-sub-mesh RS instance path for register_mesh_type
 	# callers (no prototype sub_meshes). Rare in production, used mainly by
 	# tests and low-level debug tools.
 	# Multi-mesh buildings (cantons, huts) get N RS instances; single-mesh
@@ -944,11 +817,11 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 	if sub_entries.is_empty():
 		# Fallback: legacy registration path (register_mesh_type called directly).
 		# If we have the mesh resource, re-derive; else trust the owned/cached RID.
-		var legacy_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
+		var direct_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
 			else mesh_type.mesh_rid
-		var legacy_material_rid: RID = mesh_type.material_resource.get_rid() if mesh_type.material_resource \
+		var direct_material_rid: RID = mesh_type.material_resource.get_rid() if mesh_type.material_resource \
 			else mesh_type.material_rid
-		var rid := _create_rs_instance(legacy_mesh_rid, legacy_material_rid,
+		var rid := _create_rs_instance(direct_mesh_rid, direct_material_rid,
 			mesh_type.surface_materials, transform, mesh_type.aabb)
 		if rid.is_valid():
 			data.sub_rids.append(rid)
@@ -967,10 +840,14 @@ func add_instance(type_name: String, transform: Transform3D, cell_grid: Vector2i
 			# Primary RID = first (backwards compat)
 			data.instance_rid = data.sub_rids[0]
 
+	if not _globally_visible:
+		data.visible = false
+
 	_instances[id] = data
 	mesh_type.instance_count += 1
 	_stats["total_instances"] += 1
-	_stats["visible_instances"] += 1
+	if data.visible:
+		_stats["visible_instances"] += 1
 
 	# Maintain spatial index
 	if cell_grid not in _cell_index:
@@ -1040,17 +917,11 @@ func is_proxy_dirty(source_key: String) -> bool:
 
 ## Phase E — main-thread consumer of a worker-prepared PrecomputedInstance.
 ##
-## Mirrors the registry-path branch of `add_instance` (§3.5 of plan) but
-## skips all the work that `precompute_instance` already did on the worker:
-##   - transform math (pos, scale, basis, compose) — worker
-##   - sub-mesh `world * local` composition — worker
-##   - custom_data Color construction — worker
+## Publishes worker-prepared transforms through the direct RS instance path.
 ##
 ## Main-thread-bound work that remains:
 ##   - `_next_id` increment (shared counter)
 ##   - InstanceData struct population
-##   - `PrototypeRegistry.add_instance_precombined` (MultiMesh slot acquire +
-##     slot transform/custom_data writes — main-thread per research doc §2.1)
 ##   - `_instances` / `_cell_index` / `_stats` dict updates
 ##
 ## `precomp.model_path` + `precomp.item_id` carry the ref metadata for
@@ -1330,74 +1201,37 @@ func add_instance_precomputed(precomp: PrecomputedInstance) -> int:
 	data.ref_id = precomp.ref_id
 	data.ref_num = precomp.ref_num
 
-	# Registry path — always used for prototypes registered via
-	# register_from_prototype. `sub_meshes` empty ⇒ mismatched registration
-	# state (rare) ⇒ bail; legacy path wouldn't use precomputed data anyway.
-	if USE_PROTOTYPE_REGISTRY and mesh_type.sub_meshes.is_empty():
-		return -1
-
-	# Build the registry input, feeding pre-combined world transforms (worker
-	# already computed `world * local`). `local_transform` is still stored so
-	# future set_instance_transform re-compositions work.
-	if USE_PROTOTYPE_REGISTRY:
-		var registry := _ensure_registry()
-		if registry == null:
-			return -1
-		var subs: Array = []
-		subs.resize(mesh_type.sub_meshes.size())
-		for i in range(mesh_type.sub_meshes.size()):
-			var entry: SubMeshEntry = mesh_type.sub_meshes[i]
-			var world_xf: Transform3D = precomp.sub_mesh_combined_xforms[i] \
-				if i < precomp.sub_mesh_combined_xforms.size() else precomp.world_transform
-			subs[i] = {
-				"mesh": entry.mesh_resource,
-				"material": entry.material_resource,
-				"world_transform": world_xf,
-				"local_transform": entry.local_transform,
-			}
-
-		registry.add_instance_precombined(
-			id, subs,
-			precomp.custom_data.r,  # spawn_time packed into custom_data.r
-			precomp.custom_data.g,  # fade_duration packed into custom_data.g
-		)
-
-		if not _globally_visible:
-			registry.hide_instance(id)
-			data.visible = false
-		data.registry_id = id
+	var sub_entries := mesh_type.sub_meshes
+	if sub_entries.is_empty():
+		var direct_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
+			else mesh_type.mesh_rid
+		var direct_material_rid: RID = mesh_type.material_resource.get_rid() if mesh_type.material_resource \
+			else mesh_type.material_rid
+		var rid := _create_rs_instance(direct_mesh_rid, direct_material_rid,
+			mesh_type.surface_materials, precomp.world_transform, mesh_type.aabb)
+		if rid.is_valid():
+			data.sub_rids.append(rid)
+		data.instance_rid = rid
 	else:
-		var sub_entries := mesh_type.sub_meshes
-		if sub_entries.is_empty():
-			var legacy_mesh_rid: RID = mesh_type.mesh_resource.get_rid() if mesh_type.mesh_resource \
-				else mesh_type.mesh_rid
-			var legacy_material_rid: RID = mesh_type.material_resource.get_rid() if mesh_type.material_resource \
-				else mesh_type.material_rid
-			var rid := _create_rs_instance(legacy_mesh_rid, legacy_material_rid,
-				mesh_type.surface_materials, precomp.world_transform, mesh_type.aabb)
+		for i in range(sub_entries.size()):
+			var entry: SubMeshEntry = sub_entries[i]
+			if entry.mesh_resource == null:
+				continue
+			var child_xform: Transform3D = precomp.sub_mesh_combined_xforms[i] \
+				if i < precomp.sub_mesh_combined_xforms.size() \
+				else precomp.world_transform * entry.local_transform
+			var material_rid: RID = entry.material_resource.get_rid() if entry.material_resource else RID()
+			var rid := _create_rs_instance(entry.mesh_resource.get_rid(), material_rid,
+				entry.surface_materials, child_xform, entry.mesh_resource.get_aabb())
 			if rid.is_valid():
 				data.sub_rids.append(rid)
-			data.instance_rid = rid
-		else:
-			for i in range(sub_entries.size()):
-				var entry: SubMeshEntry = sub_entries[i]
-				if entry.mesh_resource == null:
-					continue
-				var child_xform: Transform3D = precomp.sub_mesh_combined_xforms[i] \
-					if i < precomp.sub_mesh_combined_xforms.size() \
-					else precomp.world_transform * entry.local_transform
-				var material_rid: RID = entry.material_resource.get_rid() if entry.material_resource else RID()
-				var rid := _create_rs_instance(entry.mesh_resource.get_rid(), material_rid,
-					entry.surface_materials, child_xform, entry.mesh_resource.get_aabb())
-				if rid.is_valid():
-					data.sub_rids.append(rid)
-			if not data.sub_rids.is_empty():
-				data.instance_rid = data.sub_rids[0]
-		if not _globally_visible:
-			for rid: RID in data.sub_rids:
-				if rid.is_valid():
-					RenderingServer.instance_set_visible(rid, false)
-			data.visible = false
+		if not data.sub_rids.is_empty():
+			data.instance_rid = data.sub_rids[0]
+	if not _globally_visible:
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_set_visible(rid, false)
+		data.visible = false
 	_instances[id] = data
 	mesh_type.instance_count += 1
 	_stats["total_instances"] += 1
@@ -1482,15 +1316,10 @@ func remove_instance(id: int) -> void:
 		_visual_proxy_suppressed.erase(data.source_key)
 		_stats["visual_proxy_instances"] = maxi(0, int(_stats.get("visual_proxy_instances", 0)) - 1)
 
-	if data.registry_id >= 0 and _prototype_registry != null:
-		# Registry owns the slots — release them back to the freelist. MultiMesh
-		# + RS instance stay live (shared across all instances of the prototype).
-		_prototype_registry.remove_instance(data.registry_id)
-	else:
-		# Legacy register_mesh_type path — free the per-sub-mesh RS RIDs.
-		for rid: RID in data.sub_rids:
-			if rid.is_valid():
-				RenderingServer.free_rid(rid)
+	# Free the per-sub-mesh RS RIDs.
+	for rid: RID in data.sub_rids:
+		if rid.is_valid():
+			RenderingServer.free_rid(rid)
 
 	if data.type_name in _mesh_types:
 		var mesh_type: MeshType = _mesh_types[data.type_name]
@@ -1606,12 +1435,9 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 			if id not in _instances:
 				continue
 			var data: InstanceData = _instances[id]
-			if data.registry_id >= 0 and _prototype_registry != null:
-				_prototype_registry.hide_instance(data.registry_id)
-			else:
-				for rid: RID in data.sub_rids:
-					if rid.is_valid():
-						RenderingServer.instance_set_visible(rid, false)
+			for rid: RID in data.sub_rids:
+				if rid.is_valid():
+					RenderingServer.instance_set_visible(rid, false)
 			data.visible = false
 			count += 1
 
@@ -1651,12 +1477,9 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		if id in _instances:
 			var data: InstanceData = _instances[id]
 			if data.visible:
-				if data.registry_id >= 0 and _prototype_registry != null:
-					_prototype_registry.hide_instance(data.registry_id)
-				else:
-					for rid: RID in data.sub_rids:
-						if rid.is_valid():
-							RenderingServer.instance_set_visible(rid, false)
+				for rid: RID in data.sub_rids:
+					if rid.is_valid():
+						RenderingServer.instance_set_visible(rid, false)
 				data.visible = false
 				hidden += 1
 		i += 1
@@ -1690,8 +1513,7 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 
 
 ## NOTE: the old scene-node per-cell MultiMesh batch path
-## (batch_cell_into_multimesh, _cell_batches, CellBatch) was removed. It was not
-## replaced by the parked world-scoped PrototypeRegistry for production use.
+## (batch_cell_into_multimesh, _cell_batches, CellBatch) was removed.
 ## The active NEAR/MID static path is CellStaticBucket: per cell/payload,
 ## server-direct, resource-owning, and cleanup-detached before RID free.
 
@@ -1712,15 +1534,9 @@ func set_instance_visible(id: int, visible: bool) -> void:
 
 	data.visible = visible
 
-	if data.registry_id >= 0 and _prototype_registry != null:
-		if visible:
-			_prototype_registry.show_instance(data.registry_id, data.transform)
-		else:
-			_prototype_registry.hide_instance(data.registry_id)
-	else:
-		for rid: RID in data.sub_rids:
-			if rid.is_valid():
-				RenderingServer.instance_set_visible(rid, visible)
+	for rid: RID in data.sub_rids:
+		if rid.is_valid():
+			RenderingServer.instance_set_visible(rid, visible)
 
 	if visible:
 		_stats["visible_instances"] += 1
@@ -1743,15 +1559,9 @@ func set_instance_promoted(id: int, is_promoted: bool, _near_has_lods: bool = tr
 		return
 	data.promoted = is_promoted
 
-	if data.registry_id >= 0 and _prototype_registry != null:
-		if is_promoted:
-			_prototype_registry.hide_instance(data.registry_id)
-		else:
-			_prototype_registry.show_instance(data.registry_id, data.transform)
-	else:
-		for rid: RID in data.sub_rids:
-			if rid.is_valid():
-				RenderingServer.instance_set_visible(rid, not is_promoted)
+	for rid: RID in data.sub_rids:
+		if rid.is_valid():
+			RenderingServer.instance_set_visible(rid, not is_promoted)
 
 
 ## Set instance transform (updates all sub-mesh RS instances or MultiMesh slot)
@@ -1762,13 +1572,6 @@ func set_instance_transform(id: int, transform: Transform3D) -> void:
 	var data: InstanceData = _instances[id]
 	data.transform = transform
 
-	if data.registry_id >= 0 and _prototype_registry != null:
-		# Skip writing live transform to the registry while the instance is
-		# hidden/promoted — the registry hide path zero-scaled the slots;
-		# restoring them here would resurrect a promoted object.
-		if data.visible and not data.promoted:
-			_prototype_registry.set_instance_transform(data.registry_id, transform)
-		return
 
 	if data.type_name in _mesh_types:
 		var mt: MeshType = _mesh_types[data.type_name]
@@ -1833,15 +1636,9 @@ func set_all_visible(visible: bool) -> void:
 			instance_visible = visible \
 				and data.source_key not in _visual_proxy_dirty_reason \
 				and not bool(_visual_proxy_suppressed.get(data.source_key, false))
-		if data.registry_id >= 0 and _prototype_registry != null:
-			if instance_visible:
-				_prototype_registry.show_instance(data.registry_id, data.transform)
-			else:
-				_prototype_registry.hide_instance(data.registry_id)
-		else:
-			for rid: RID in data.sub_rids:
-				if rid.is_valid():
-					RenderingServer.instance_set_visible(rid, instance_visible)
+		for rid: RID in data.sub_rids:
+			if rid.is_valid():
+				RenderingServer.instance_set_visible(rid, instance_visible)
 		data.visible = instance_visible
 		if instance_visible:
 			visible_direct_instances += 1
@@ -1857,10 +1654,6 @@ func set_all_visible(visible: bool) -> void:
 func clear(clear_mesh_types: bool = true) -> void:
 	var rs := RenderingServer
 
-	# Tear down the registry first — it owns its own RS instances + MultiMeshes.
-	if _prototype_registry != null:
-		_prototype_registry.cleanup()
-		_prototype_registry = null
 
 	for bucket_key: String in _cell_bucket_build_tasks.keys():
 		cancel_cell_bucket_build(bucket_key)
@@ -1928,18 +1721,15 @@ func _drain_descriptor_build_tasks() -> void:
 
 #region Queries
 
-## Get statistics, including active CellStaticBucket counters and parked
-## PrototypeRegistry counters.
+## Get statistics, including active CellStaticBucket counters.
 ##
 ## Extra fields:
 ##   `cell_buckets`        — active spatially local static buckets
 ##   `bucket_draw_groups`  — draw groups inside active buckets
 ##   `bucket_rs_instances` — RS instances owned by active buckets
-##   `registry_batches`    — legacy PrototypeRegistry MultiMeshes, normally 0
-##   `registry_slots`      — legacy registry live slots, normally 0
 ##
 ## Legacy mm_batches/mm_slots/mm_cells fields are retained and set to 0 for
-## any callers that still probe them (heartbeat log, benchmark readers) —
+## any callers that still probe them —
 ## they'll be cleaned up in a follow-up pass.
 func get_stats() -> Dictionary:
 	_refresh_hlod_bucket_override_stats()
@@ -1947,14 +1737,8 @@ func get_stats() -> Dictionary:
 	result["mm_batches"] = 0
 	result["mm_slots"] = 0
 	result["mm_cells"] = 0
-
-	if _prototype_registry != null:
-		result["registry_batches"] = _prototype_registry.get_batch_count()
-		result["registry_slots"] = _prototype_registry.get_total_live_slots()
-	else:
-		result["registry_batches"] = 0
-		result["registry_slots"] = 0
 	return result
+
 
 
 ## Get mesh type info

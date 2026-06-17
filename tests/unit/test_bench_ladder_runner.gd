@@ -71,13 +71,13 @@ func test_summarize_aggregates_and_maxes() -> void:
 	var samples: Array[Dictionary] = [
 		{
 			"fps": 55.0, "draws": 6000, "objs": 9000, "prims": 1_500_000,
-			"vram_mb": 2000.0, "mid_visible": 4000, "registry_slots": 10_000,
-			"registry_batches": 300, "hlod_cells": 8, "total_impostors": 40_000,
+			"vram_mb": 2000.0, "mid_visible": 4000,
+			"hlod_cells": 8, "total_impostors": 40_000,
 		},
 		{
 			"fps": 65.0, "draws": 7000, "objs": 11_000, "prims": 2_500_000,
-			"vram_mb": 2100.0, "mid_visible": 5000, "registry_slots": 14_000,
-			"registry_batches": 500, "hlod_cells": 12, "total_impostors": 51_000,
+			"vram_mb": 2100.0, "mid_visible": 5000,
+			"hlod_cells": 12, "total_impostors": 51_000,
 		},
 	]
 	var summary: Dictionary = runner._summarize(samples)
@@ -90,8 +90,8 @@ func test_summarize_aggregates_and_maxes() -> void:
 	# _max fields pick the highest across samples regardless of ordering.
 	assert_float(summary["vram_mb_max"]).is_equal(2100.0)
 	assert_int(summary["mid_visible_max"]).is_equal(5000)
-	assert_int(summary["registry_slots_max"]).is_equal(14_000)
-	assert_int(summary["registry_batches_max"]).is_equal(500)
+	assert_bool(summary.has("registry_" + "slots_max")).is_false()
+	assert_bool(summary.has("registry_" + "batches_max")).is_false()
 	assert_int(summary["hlod_cells_max"]).is_equal(12)
 	assert_int(summary["impostors_max"]).is_equal(51_000)
 	runner.free()
@@ -135,8 +135,8 @@ func test_summary_round_trips_through_json() -> void:
 	var samples: Array[Dictionary] = [
 		{
 			"fps": 60.0, "draws": 6500, "objs": 9500, "prims": 2_000_000,
-			"vram_mb": 2050.0, "mid_visible": 4500, "registry_slots": 12_000,
-			"registry_batches": 400, "hlod_cells": 10, "total_impostors": 45_000,
+			"vram_mb": 2050.0, "mid_visible": 4500,
+			"hlod_cells": 10, "total_impostors": 45_000,
 		},
 	]
 	var summary: Dictionary = runner._summarize(samples)

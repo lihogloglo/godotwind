@@ -73,10 +73,10 @@ Constants in `src/core/world/distance_utils.gd`.
 
 | Tier | Range | Technique |
 |------|-------|-----------|
-| NEAR | 0-150m | Full Node3D + physics in the scene tree. Root `visibility_range` band on each Node3D. |
-| MID | 0-500m fallback | Cell-local `CellStaticBucket` draw groups. Groups use local `MultiMesh` buckets under one ownership path; singleton groups use the single-slot transform API instead of a bulk buffer upload. Embedded mesh LOD stays engine-driven. |
-| HLOD | Opt-in, currently visible 300-1000m | One RS instance per ObjectPaging chunk: runtime-merged static geometry from the adaptive 1x1 / 2x2 / 4x4 chunk walker. Fully covered MID buckets cap at 300m; uncovered MID and FAR remain available from 500m until exact coverage ownership removes overlap safely. |
-| FAR | 500-5km | Custom octahedral impostors via spatial `MultiMeshInstance3D` pages. Default-on. |
+| NEAR gameplay | 0-150m | Sparse `Node3D` for gameplay, interaction, static collision, physics, and scene-tree behavior. |
+| Static visuals | 150-400m bridge | Cell-local `CellStaticBucket` draw groups. Groups use local `MultiMesh` buckets under one ownership path; singleton groups use the single-slot transform API instead of a bulk buffer upload. Embedded mesh LOD stays engine-driven. |
+| FAR impostors | 400-5km, capped by view distance | Custom octahedral impostors via spatial `MultiMeshInstance3D` pages. Default-on. |
+| HLOD | Optional 400-1000m comparison tier | One raw RS instance per ObjectPaging chunk: runtime-merged static geometry from the adaptive 1x1 / 2x2 / 4x4 chunk walker. Default-off in `Godotwind.tscn`; `hlod_enable` keeps it available for cost/coverage comparison while MID and FAR keep the fixed 400m handoff. |
 
 **MID→NEAR promotion at 250m, demotion at 280m** (20m hysteresis, `streaming_config.gd:78-81`) — physics bodies and scene-tree NEAR nodes are pre-created while the MID RS instance stays visible, then the RS instance is hidden and the Node3D becomes the active renderer when the camera enters the 150m band.
 

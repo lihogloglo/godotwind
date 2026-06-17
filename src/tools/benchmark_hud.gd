@@ -281,7 +281,12 @@ func _rebuild_labels(frame_ms: float) -> void:
 	var cells := int(sm_stats.get("loaded_cells", 0))
 	var queue := int(sm_stats.get("instantiation_queue", 0))
 	var async_req := int(sm_stats.get("async_requests", 0))
-	_label_streaming.text = "cells: %d | queue: %d | async: %d" % [cells, queue, async_req]
+	var mode_meta: Dictionary = sm_stats.get("benchmark_mode_metadata", {})
+	var mode_name := str(mode_meta.get("mode_name", "unknown"))
+	var mode_valid := bool(mode_meta.get("valid_for_performance_baseline", true))
+	_label_streaming.text = "cells: %d | queue: %d | async: %d | mode: %s%s" % [
+		cells, queue, async_req, mode_name, "" if mode_valid else " INVALID"
+	]
 
 	# Active toggles — list only the ones currently OFF (inverted default).
 	# "[ALL ON]" is the common case during an idle HUD view.

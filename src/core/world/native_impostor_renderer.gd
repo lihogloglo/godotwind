@@ -652,10 +652,6 @@ func set_visibility_range(begin_distance: float, end_distance: float, fade_margi
 		begin_distance, _visibility_end_distance, fade_margin])
 
 
-func set_hlod_covered_ref_nums(covered_ref_nums: Dictionary) -> void:
-	set_hlod_covered_object_ids(covered_ref_nums)
-
-
 func set_hlod_covered_object_ids(covered_object_ids: Dictionary) -> void:
 	_hlod_covered_object_ids = covered_object_ids.duplicate()
 	_apply_visibility_ranges_to_pages()

@@ -29,6 +29,8 @@ const DoorUtils := preload("res://src/core/world/door_utils.gd")
 const DOOR_CLIP_SHADER := preload("res://src/core/world/shaders/door_clip.gdshader")
 const LightAnimatorScript := preload("res://src/core/world/light_animator.gd")
 const LightShadowBudgetScript := preload("res://src/core/world/light_shadow_budget.gd")
+const WorldSpaceHandleScript := preload("res://src/core/world/transition/world_space_handle.gd")
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
 
 #region Constants
 
@@ -67,9 +69,9 @@ const INTERIOR_LOAD_TIMEOUT: float = 20.0
 const FAST_PATH_RADIUS_MULT: float = 2.0
 
 ## Render layer masks
-const EXTERIOR_RENDER_LAYERS: int = 0x3      # Layers 1-2 (bits 0-1)
-const INTERIOR_RENDER_LAYERS: int = 0xC      # Layers 3-4 (bits 2-3)
-const COMBINED_RENDER_LAYERS: int = 0xF     # Layers 1-4 (exterior + interior)
+const EXTERIOR_RENDER_LAYERS: int = RenderLayersScript.EXTERIOR_WORLD
+const INTERIOR_RENDER_LAYERS: int = RenderLayersScript.INTERIOR_WORLD
+const COMBINED_RENDER_LAYERS: int = RenderLayersScript.COMBINED_WORLD
 const ALL_RENDER_LAYERS: int = 0xFFFFF       # All 20 layers
 
 ## Physics layer assignments (per slot)
@@ -129,11 +131,13 @@ const BUILDING_SEARCH_RADIUS: float = 5.0
 const BUILDING_SEARCH_RADIUS_SQ: float = BUILDING_SEARCH_RADIUS * BUILDING_SEARCH_RADIUS
 
 #endregion
-
 #region Types
 
 ## Registered door information
 class DoorInfo:
+	var descriptor: RefCounted = null
+	var source_space: RefCounted = null
+	var target_space: RefCounted = null
 	var instance_key: StringName     ## Stable placed-door identity
 	var ref_id: StringName           ## Base door object ID (legacy/mesh lookup)
 	var base_ref_id: StringName      ## Base door object ID
@@ -150,11 +154,20 @@ class DoorInfo:
 	var building_model_path: String = ""   ## Model path of the building (for logging/debugging)
 	var supports_seamless: bool = true     ## False for caves, tombs, terrain entrances → use fade-to-black
 
+	var target_position_godot: Vector3 = Vector3.ZERO
+	var target_basis_godot: Basis = Basis.IDENTITY
+	var target_yaw_basis_godot: Basis = Basis.IDENTITY
+	var has_descriptor_transform: bool = false
+
 	func get_teleport_pos_godot() -> Vector3:
+		if has_descriptor_transform:
+			return target_position_godot
 		return CS.vector_to_godot(teleport_pos_mw)
 
 	## Full 3-axis rotation basis — use for OBJECT placement, not player facing.
 	func get_teleport_basis_godot() -> Basis:
+		if has_descriptor_transform:
+			return target_basis_godot
 		return CS.esm_rotation_to_godot_basis(teleport_rot_mw)
 
 	## Player-facing yaw-only basis — use for teleport destinations.
@@ -164,10 +177,18 @@ class DoorInfo:
 	## NEGATIVE Z. quaternion_to_godot() swaps (x,z,-y,w), which negates
 	## the Y component, effectively giving Basis(UP, -angle) in Godot space.
 	func get_teleport_yaw_basis_godot() -> Basis:
+		if has_descriptor_transform:
+			return target_yaw_basis_godot
 		return Basis(Vector3.UP, -teleport_rot_mw.z)
 
 	func get_door_basis_godot() -> Basis:
 		return CS.esm_rotation_to_godot_basis(door_rotation_mw)
+
+	func get_target_space_key() -> String:
+		return str(target_space.get("key")) if target_space != null else target_cell_name
+
+	func has_interior_target() -> bool:
+		return target_space != null and bool(target_space.call("is_interior"))
 
 
 static func make_exterior_door_instance_key(cell_grid: Vector2i, base_ref_id: StringName, ref_num: int) -> StringName:
@@ -183,7 +204,8 @@ class PocketSlot:
 	var slot_index: int = -1
 	var cell_name: String = ""
 	var cell_node: Node3D = null
-	var cell_record: CellRecord = null
+	var cell_record: Variant = null
+	var space_handle: RefCounted = null
 	var interior_environment: Environment = null
 	var is_occupied: bool = false
 	var is_loading: bool = false
@@ -214,6 +236,7 @@ class PocketSlot:
 			cell_node.queue_free()
 		cell_node = null
 		cell_record = null
+		space_handle = null
 		interior_environment = null
 		cell_name = ""
 		is_occupied = false
@@ -225,7 +248,6 @@ class PocketSlot:
 		doors_inside.clear()
 
 #endregion
-
 #region State
 
 ## Dependencies (set via initialize())
@@ -235,6 +257,7 @@ var _world_environment: WorldEnvironment = null
 var _camera: Camera3D = null
 var _sun: DirectionalLight3D = null
 var _sun_original_cull_mask: int = 0
+var _transition_provider: RefCounted = null
 
 ## Container for all pocket geometry
 var _pocket_container: Node3D = null
@@ -339,12 +362,14 @@ signal interior_load_timeout(cell_name: String, request_id: int)
 ## Note: This node must be added to the scene tree before calling initialize()
 func initialize(cell_manager: CellManagerScript,
 				world_env: WorldEnvironment = null, camera: Camera3D = null,
-				sun: DirectionalLight3D = null) -> void:
+				sun: DirectionalLight3D = null,
+				transition_provider: RefCounted = null) -> void:
 	_cell_manager = cell_manager
 	_scene_root = get_parent() as Node3D
 	_world_environment = world_env
 	_camera = camera
 	_sun = sun
+	_transition_provider = transition_provider
 	if _sun:
 		_sun_original_cull_mask = _sun.light_cull_mask
 
@@ -375,6 +400,10 @@ func initialize(cell_manager: CellManagerScript,
 	Log.info("streaming", "InteriorPocketManager initialized: %d slots" % MAX_POCKET_SLOTS)
 
 
+func set_transition_provider(provider: RefCounted) -> void:
+	_transition_provider = provider
+
+
 ## Set the player's physics body for collision layer swapping during transitions
 func set_player_body(body: CollisionObject3D) -> void:
 	_player_body = body
@@ -396,33 +425,19 @@ func _exit_tree() -> void:
 
 ## Register doors from a loaded exterior cell
 ## Call this when an exterior cell is loaded into the streaming system
-func register_exterior_cell_doors(cell_record: CellRecord, cell_grid: Vector2i) -> int:
+func register_exterior_cell_doors(cell_payload: Variant, cell_grid: Vector2i) -> int:
+	if _transition_provider == null or not _transition_provider.has_method("get_exterior_transition_portals"):
+		Log.warn("streaming", "No transition provider; cannot register exterior portals for cell %s" % cell_grid)
+		return 0
+	var descriptors: Array = _transition_provider.call("get_exterior_transition_portals", cell_payload, cell_grid)
+	return register_transition_portals(descriptors, null)
+
+
+func register_transition_portals(descriptors: Array, search_root: Node = null) -> int:
 	var count := 0
 
-	for ref: CellReference in cell_record.references:
-		if not ref.is_teleport:
-			continue
-		if ref.teleport_cell.is_empty():
-			continue
-
-		# Verify destination is an interior cell
-		var dest_cell: CellRecord = ESMManager.get_cell(ref.teleport_cell)
-		if not dest_cell or not dest_cell.is_interior():
-			continue
-
-		var door := DoorInfo.new()
-		door.ref_id = ref.ref_id
-		door.base_ref_id = ref.ref_id
-		door.ref_num = ref.ref_num
-		door.instance_key = make_exterior_door_instance_key(cell_grid, door.base_ref_id, door.ref_num)
-		door.world_position = CS.vector_to_godot(ref.position)
-		door.door_rotation_mw = ref.rotation
-		door.target_cell_name = ref.teleport_cell
-		door.teleport_pos_mw = ref.teleport_pos
-		door.teleport_rot_mw = ref.teleport_rot
-		door.exterior_grid = cell_grid
-		door.is_interior_door = false
-
+	for descriptor in descriptors:
+		var door := _door_info_from_descriptor(descriptor)
 		# Check for duplicates (same door registered from overlapping cell loads)
 		var already_registered := false
 		for existing: DoorInfo in _exterior_doors:
@@ -431,15 +446,40 @@ func register_exterior_cell_doors(cell_record: CellRecord, cell_grid: Vector2i) 
 				break
 
 		if not already_registered:
-			# Identify the building containing this door from ESM data
-			_identify_building_for_door(door, cell_record)
 			_exterior_doors.append(door)
-			_sync_door_interactable_instance_key(door)
+			_sync_door_interactable_instance_key(door, search_root)
 			count += 1
 
 	if count > 0:
-		Log.debug("streaming", "Registered %d doors from cell %s" % [count, cell_grid])
+		Log.debug("streaming", "Registered %d transition portals" % count)
 	return count
+
+
+func _door_info_from_descriptor(descriptor: RefCounted) -> DoorInfo:
+	var door := DoorInfo.new()
+	door.descriptor = descriptor
+	door.source_space = descriptor.get("source_space")
+	door.target_space = descriptor.get("target_space")
+	door.instance_key = descriptor.get("portal_key")
+	door.ref_id = descriptor.get("affordance_key")
+	door.base_ref_id = door.ref_id
+	door.ref_num = int(descriptor.get("affordance_ordinal"))
+	door.world_position = descriptor.get("source_position")
+	door.target_cell_name = str(door.target_space.get("key")) if door.target_space != null else ""
+	door.source_cell_name = str(door.source_space.get("key")) if door.source_space != null else ""
+	door.is_interior_door = door.source_space != null and bool(door.source_space.call("is_interior"))
+	door.target_position_godot = descriptor.get("target_position")
+	door.target_basis_godot = descriptor.get("target_basis")
+	door.target_yaw_basis_godot = descriptor.get("target_yaw_basis")
+	door.has_descriptor_transform = true
+	door.building_ref_id = descriptor.get("shell_key")
+	door.building_model_path = str(descriptor.get("shell_model_path"))
+	door.supports_seamless = bool(descriptor.get("supports_seamless"))
+	if door.source_space != null and bool(door.source_space.call("is_exterior")):
+		var parts := str(door.source_space.get("key")).split(",")
+		if parts.size() == 2:
+			door.exterior_grid = Vector2i(int(parts[0]), int(parts[1]))
+	return door
 
 
 ## Unregister doors from an unloaded exterior cell
@@ -458,39 +498,30 @@ func unregister_exterior_cell_doors(cell_grid: Vector2i) -> void:
 
 ## Register doors found inside a loaded interior pocket
 func _register_interior_doors(pocket: PocketSlot) -> void:
-	if not pocket.cell_record:
+	if not pocket.cell_record or _transition_provider == null:
 		return
 
 	pocket.doors_inside.clear()
-	for ref: CellReference in pocket.cell_record.references:
-		if not ref.is_teleport:
-			continue
-		# Note: teleport_cell CAN be empty for interior→exterior doors.
-		# Morrowind stores exterior destinations as world-space coordinates
-		# in DODT without a DNAM cell name. These are exit doors.
-
-		var door := DoorInfo.new()
-		door.ref_id = ref.ref_id
-		door.base_ref_id = ref.ref_id
-		door.ref_num = ref.ref_num
-		door.instance_key = make_interior_door_instance_key(pocket.cell_name, door.base_ref_id, door.ref_num)
-		# Interior door position is relative to pocket offset
-		door.world_position = CS.vector_to_godot(ref.position) + pocket.get_offset()
-		door.door_rotation_mw = ref.rotation
-		door.target_cell_name = ref.teleport_cell  # Empty string = exterior exit
-		door.teleport_pos_mw = ref.teleport_pos
-		door.teleport_rot_mw = ref.teleport_rot
-		door.is_interior_door = true
-		door.source_cell_name = pocket.cell_name
-
-		pocket.doors_inside.append(door)
-		_sync_door_interactable_instance_key(door, pocket.cell_node)
+	if not _transition_provider.has_method("get_interior_transition_portals"):
+		return
+	var source_space: RefCounted = pocket.space_handle
+	if source_space == null:
+		source_space = WorldSpaceHandleScript.interior(pocket.cell_name)
+	var descriptors: Array = _transition_provider.call(
+		"get_interior_transition_portals",
+		source_space,
+		pocket.cell_record,
+		pocket.get_offset()
+	)
+	for descriptor in descriptors:
+		var descriptor_door := _door_info_from_descriptor(descriptor)
+		pocket.doors_inside.append(descriptor_door)
+		_sync_door_interactable_instance_key(descriptor_door, pocket.cell_node)
 
 	if not pocket.doors_inside.is_empty():
 		Log.debug("streaming", "Found %d doors inside '%s'" % [
 			pocket.doors_inside.size(), pocket.cell_name
 		])
-
 
 func _sync_door_interactable_instance_key(door: DoorInfo, search_root: Node = null) -> void:
 	var root: Node = search_root if search_root != null else _scene_root
@@ -503,105 +534,6 @@ func _sync_door_interactable_instance_key(door: DoorInfo, search_root: Node = nu
 	if door_node.get_script() != null:
 		door_node.set("door_instance_key", str(door.instance_key))
 
-
-## Identify the building STAT that contains a door, using ESM cell reference data.
-## Searches all STAT references in the cell, finds ones with building model patterns
-## within BUILDING_SEARCH_RADIUS, then picks the one whose model path best matches
-## known building patterns. Falls back to largest nearby STAT if no pattern matches.
-## Sets door.building_ref_id, door.building_model_path, and door.supports_seamless.
-func _identify_building_for_door(door: DoorInfo, cell_record: CellRecord) -> void:
-	var door_pos_mw: Vector3 = CS.vector_to_mw(door.world_position)
-	var best_ref_id: StringName = &""
-	var best_model_path: String = ""
-	var best_dist_sq: float = INF
-	var is_non_seamless: bool = false
-
-	# First pass: find all STAT refs near the door and check their model paths
-	for ref: CellReference in cell_record.references:
-		# Skip the door itself and non-static refs
-		if ref.ref_id == door.ref_id:
-			continue
-
-		# Look up the record to get its type and model
-		var record_type: Array = [""]
-		var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-		if not base_record:
-			continue
-		var type_name: String = record_type[0]
-
-		# Only consider STAT (static) and ACTI (activator) records — buildings/structures
-		if type_name != "static" and type_name != "activator":
-			continue
-
-		# Get model path
-		var model_path: String = ""
-		if "model" in base_record and base_record.model:
-			model_path = str(base_record.model).to_lower()
-		if model_path.is_empty():
-			continue
-
-		# Check distance (in MW coords to avoid conversion overhead for every ref)
-		var dist_sq: float = ref.position.distance_squared_to(door_pos_mw)
-		if dist_sq > BUILDING_SEARCH_RADIUS_SQ * CS.UNITS_PER_METER * CS.UNITS_PER_METER:  # MW units²
-			continue
-
-		# Check for non-seamless entrance patterns (caves, tombs)
-		for pattern: String in NON_SEAMLESS_PATTERNS:
-			if model_path.contains(pattern):
-				is_non_seamless = true
-				break
-
-		# Check building patterns — prefer building matches over generic proximity
-		var is_building: bool = false
-		for pattern: String in BUILDING_PATTERNS:
-			if model_path.contains(pattern):
-				is_building = true
-				break
-
-		if is_building and dist_sq < best_dist_sq:
-			best_dist_sq = dist_sq
-			best_ref_id = ref.ref_id
-			best_model_path = model_path
-
-	# Fallback: if no building pattern matched, try the closest large STAT within range
-	# (handles mod content and unusual building names)
-	if best_ref_id == &"" and not is_non_seamless:
-		for ref: CellReference in cell_record.references:
-			if ref.ref_id == door.ref_id:
-				continue
-			var record_type: Array = [""]
-			var base_record: Variant = ESMManager.get_any_record(str(ref.ref_id), record_type)
-			if not base_record or record_type[0] != "static":
-				continue
-			var model_path: String = ""
-			if "model" in base_record and base_record.model:
-				model_path = str(base_record.model).to_lower()
-			if model_path.is_empty():
-				continue
-			var dist_sq: float = ref.position.distance_squared_to(door_pos_mw)
-			# Tighter radius for fallback (3m Godot in MW units)
-			var fallback_radius_mw: float = 3.0 * CS.UNITS_PER_METER
-			if dist_sq > fallback_radius_mw * fallback_radius_mw:
-				continue
-			if dist_sq < best_dist_sq:
-				best_dist_sq = dist_sq
-				best_ref_id = ref.ref_id
-				best_model_path = model_path
-
-	# Apply results
-	door.building_ref_id = best_ref_id
-	door.building_model_path = best_model_path
-	door.supports_seamless = not is_non_seamless and best_ref_id != &""
-
-	# Diagnostic logging
-	if best_ref_id != &"":
-		var dist_godot: float = sqrt(best_dist_sq) * CS.SCALE_FACTOR  # Convert MW to meters
-		Log.info("streaming", "Door '%s' -> building '%s' (%s, dist=%.1fm, seamless=%s)" % [
-			door.ref_id, best_ref_id, best_model_path.get_file(),
-			dist_godot, door.supports_seamless])
-	else:
-		Log.warn("streaming", "Door '%s' -> NO building found (seamless=%s, non_seamless_match=%s)" % [
-			door.ref_id, door.supports_seamless, is_non_seamless])
 
 #endregion
 
@@ -649,7 +581,7 @@ func _update_exterior(player_pos: Vector3, _delta: float) -> void:
 
 		# Track best candidate for portal rendering (closest door with loaded pocket)
 		if dist_sq < best_portal_dist_sq:
-			var slot: PocketSlot = _get_slot_for_cell(door.target_cell_name)
+			var slot: PocketSlot = _get_slot_for_cell(door.get_target_space_key())
 			if slot and slot.is_occupied:
 				best_portal_dist_sq = dist_sq
 				best_portal_door = door
@@ -657,7 +589,7 @@ func _update_exterior(player_pos: Vector3, _delta: float) -> void:
 	# Preload only the CLOSEST door's pocket (not all doors in range).
 	# Avoids thrashing the 2 pocket slots in dense areas with many nearby doors.
 	if _closest_door and _closest_door_distance_sq < PRELOAD_RADIUS_SQ:
-		_ensure_pocket_loaded(_closest_door.target_cell_name)
+		_ensure_pocket_loaded(_closest_door.get_target_space_key())
 		if not _doors_in_preload_range.has(_closest_door.instance_key):
 			_doors_in_preload_range[_closest_door.instance_key] = true
 			door_preload_range.emit(_closest_door)
@@ -729,9 +661,8 @@ func _update_interior(player_pos: Vector3, _delta: float) -> void:
 
 		# Preload destination (could be exterior or another interior)
 		if dist_sq < PRELOAD_RADIUS_SQ:
-			var dest_cell: CellRecord = ESMManager.get_cell(door.target_cell_name)
-			if dest_cell and dest_cell.is_interior():
-				_ensure_pocket_loaded(door.target_cell_name)
+			if door.has_interior_target():
+				_ensure_pocket_loaded(door.get_target_space_key())
 
 		if dist_sq < INTERACT_RADIUS_SQ:
 			door_in_range.emit(door, sqrt(dist_sq))
@@ -753,6 +684,13 @@ func _update_eviction(delta: float) -> void:
 
 ## Ensure a pocket is loaded for the given interior cell
 func _ensure_pocket_loaded(cell_name: String) -> void:
+	_ensure_pocket_space_loaded(WorldSpaceHandleScript.interior(cell_name))
+
+
+func _ensure_pocket_space_loaded(space_handle: RefCounted) -> void:
+	if space_handle == null:
+		return
+	var cell_name := str(space_handle.get("key"))
 	# Already loaded?
 	for slot: PocketSlot in _slots:
 		if slot.is_occupied and slot.cell_name == cell_name:
@@ -774,7 +712,7 @@ func _ensure_pocket_loaded(cell_name: String) -> void:
 			Log.warn("streaming", "No pocket slots available for '%s'" % cell_name)
 			return
 
-	_load_pocket(free_slot, cell_name)
+	_load_pocket(free_slot, space_handle)
 
 
 func _find_free_slot() -> PocketSlot:
@@ -782,6 +720,30 @@ func _find_free_slot() -> PocketSlot:
 		if not slot.is_occupied and not slot.is_loading:
 			return slot
 	return null
+
+
+func _get_transition_space_payload(space_handle: RefCounted) -> Variant:
+	if _transition_provider == null or space_handle == null:
+		return null
+	if not _transition_provider.has_method("get_transition_space_payload"):
+		return null
+	return _transition_provider.call("get_transition_space_payload", space_handle)
+
+
+func _premark_transition_portals_for_spawn(slot: PocketSlot) -> void:
+	if _transition_provider == null or slot == null or slot.cell_record == null:
+		return
+	if not _transition_provider.has_method("get_interior_transition_portals"):
+		return
+	var source_space: RefCounted = slot.space_handle
+	if source_space == null:
+		source_space = WorldSpaceHandleScript.interior(slot.cell_name)
+	_transition_provider.call(
+		"get_interior_transition_portals",
+		source_space,
+		slot.cell_record,
+		Vector3.ZERO
+	)
 
 
 func _evict_oldest_pocket() -> PocketSlot:
@@ -833,25 +795,27 @@ func _evict_oldest_pocket() -> PocketSlot:
 ##
 ## If async is unavailable (no background processor or capacity full), runtime
 ## travel fails/tries later instead of falling back to sync load_cell().
-func _load_pocket(slot: PocketSlot, cell_name: String) -> void:
+func _load_pocket(slot: PocketSlot, space_handle: RefCounted) -> void:
+	var cell_name := str(space_handle.get("key")) if space_handle != null else ""
 	slot.is_loading = true
 	slot.cell_name = cell_name
+	slot.space_handle = space_handle
 	slot.async_request_id = -1
 	slot.finish_up_phase = -1
 
 	Log.info("streaming", "[POCKET] Loading '%s' into slot %d" % [cell_name, slot.slot_index])
 
-	# Get cell record
-	var cell_record: CellRecord = ESMManager.get_cell(cell_name)
-	if not cell_record:
-		Log.error("streaming", "[POCKET] Cell not found in ESM: '%s'" % cell_name)
+	var cell_record: Variant = _get_transition_space_payload(space_handle)
+	if cell_record == null:
+		Log.error("streaming", "[POCKET] Transition space payload not found: '%s'" % cell_name)
 		slot.is_loading = false
 		slot.cell_name = ""
+		slot.space_handle = null
 		return
 
 	slot.cell_record = cell_record
-	Log.info("streaming", "[POCKET] Cell record found: '%s' (%d references, interior=%s)" % [
-		cell_name, cell_record.references.size(), cell_record.is_interior()])
+	Log.info("streaming", "[POCKET] Space payload found: '%s'" % cell_name)
+	_premark_transition_portals_for_spawn(slot)
 
 	# Validate cell_manager before accessing private members
 	if not _cell_manager:
@@ -859,6 +823,7 @@ func _load_pocket(slot: PocketSlot, cell_name: String) -> void:
 		slot.is_loading = false
 		slot.cell_name = ""
 		slot.cell_record = null
+		slot.space_handle = null
 		return
 
 	# Build the per-request LoadProfile for interior pockets. This replaces
@@ -871,7 +836,7 @@ func _load_pocket(slot: PocketSlot, cell_name: String) -> void:
 
 	# Try async first
 	if _cell_manager.has_async_capacity():
-		var request_id: int = _cell_manager.request_cell_async(cell_name, profile)
+		var request_id: int = _cell_manager.request_world_space_async(space_handle, profile)
 		if request_id >= 0:
 			slot.async_request_id = request_id
 			Log.info("streaming", "[POCKET] async load started (req=%d) for '%s'" % [request_id, cell_name])
@@ -912,12 +877,13 @@ func _update_async_loads() -> void:
 			Log.debug("streaming", "[POCKET] _update_async_loads: slot %d '%s' req=%d complete=%s visual=%s queue=%d" % [
 				slot.slot_index, slot.cell_name, request_id, complete, visual_playable,
 				_cell_manager.get_instantiation_queue_size()])
-		if not visual_playable:
+		# Interior pockets are gameplay spaces, not distant visual shells: wait
+		# for the full async request so the door scan sees every scene-tree child.
+		if not complete:
 			continue
 
-		var cell_node: Node3D = _cell_manager.get_async_result(request_id) if complete else _cell_manager.get_async_cell_node(request_id)
-		if complete:
-			slot.async_request_id = -1
+		var cell_node: Node3D = _cell_manager.get_async_result(request_id)
+		slot.async_request_id = -1
 
 		if not cell_node:
 			Log.error("streaming", "[POCKET] async result null for req=%d, cell='%s'" % [
@@ -969,7 +935,7 @@ func _begin_pocket_finish_up(slot: PocketSlot, collapse: bool) -> void:
 	)
 
 	# F0 — Build interior environment from AMBI data
-	slot.interior_environment = _build_interior_environment(slot.cell_record)
+	slot.interior_environment = _build_interior_environment(slot.space_handle, slot.cell_record)
 
 	# F0 — Register doors inside this interior
 	_register_interior_doors(slot)
@@ -1113,7 +1079,7 @@ func _find_closest_door_for_cell(cell_name: String) -> DoorInfo:
 	var closest_dist_sq := INF
 	var player_pos := _camera.global_position
 	for door: DoorInfo in _exterior_doors:
-		if door.target_cell_name != cell_name:
+		if door.get_target_space_key() != cell_name:
 			continue
 		var d := player_pos.distance_squared_to(door.world_position)
 		if d < closest_dist_sq:
@@ -1184,7 +1150,7 @@ func _check_orphaned_pockets() -> void:
 		# Check if any registered door still points to this pocket's cell
 		var has_door := false
 		for door: DoorInfo in _exterior_doors:
-			if door.target_cell_name == slot.cell_name:
+			if door.get_target_space_key() == slot.cell_name:
 				has_door = true
 				break
 
@@ -1199,16 +1165,17 @@ func _check_orphaned_pockets() -> void:
 #region Transitions
 
 func _prepare_target_pocket_for_transition(door: DoorInfo, log_tag: String, failure_completion_cell: String) -> PocketSlot:
-	Log.info("streaming", "[%s] Step 1: _ensure_pocket_loaded('%s')" % [log_tag, door.target_cell_name])
-	_ensure_pocket_loaded(door.target_cell_name)
+	var target_cell_name := door.get_target_space_key()
+	Log.info("streaming", "[%s] Step 1: _ensure_pocket_loaded('%s')" % [log_tag, target_cell_name])
+	_ensure_pocket_loaded(target_cell_name)
 
-	var slot: PocketSlot = _get_slot_for_cell_any(door.target_cell_name)
+	var slot: PocketSlot = _get_slot_for_cell_any(target_cell_name)
 	if not slot:
-		Log.error("streaming", "[%s] FAILED - no slot for '%s'" % [log_tag, door.target_cell_name])
+		Log.error("streaming", "[%s] FAILED - no slot for '%s'" % [log_tag, target_cell_name])
 		return null
 
 	_is_transitioning = true
-	transition_started.emit(door.target_cell_name)
+	transition_started.emit(target_cell_name)
 
 	var needs_wait := slot.is_loading or slot.finish_up_phase >= 0 or not _is_pocket_transition_ready(slot)
 	if needs_wait:
@@ -1225,13 +1192,13 @@ func _prepare_target_pocket_for_transition(door: DoorInfo, log_tag: String, fail
 				var rid: int = slot.async_request_id
 				var blocker := _get_pocket_transition_blocker(slot)
 				Log.error("streaming", "[%s] Transition-ready timeout (%.1fs) for '%s' (req=%d, blocker=%s)" % [
-					log_tag, INTERIOR_LOAD_TIMEOUT, door.target_cell_name, rid, blocker])
+					log_tag, INTERIOR_LOAD_TIMEOUT, target_cell_name, rid, blocker])
 				if rid >= 0 and _cell_manager:
 					var visual_ready := bool(_cell_manager.call("is_async_visual_playable", rid)) if _cell_manager.has_method("is_async_visual_playable") else false
 					var cm_stats: Dictionary = _cell_manager.get_stats() if _cell_manager.has_method("get_stats") else {}
 					Log.error("streaming", "[%s] Timeout stats: visual_ready=%s cm=%s" % [
 						log_tag, visual_ready, str(cm_stats)])
-				interior_load_timeout.emit(door.target_cell_name, rid)
+				interior_load_timeout.emit(target_cell_name, rid)
 				if rid >= 0 and _cell_manager:
 					_cell_manager.cancel_async_request(rid)
 				slot.clear()
@@ -1242,7 +1209,7 @@ func _prepare_target_pocket_for_transition(door: DoorInfo, log_tag: String, fail
 			await get_tree().process_frame
 
 	if not slot.is_occupied or not slot.cell_node or not is_instance_valid(slot.cell_node):
-		Log.error("streaming", "[%s] FAILED - slot invalid for '%s'" % [log_tag, door.target_cell_name])
+		Log.error("streaming", "[%s] FAILED - slot invalid for '%s'" % [log_tag, target_cell_name])
 		await _fade(1.0, 0.0, FADE_DURATION)
 		_is_transitioning = false
 		transition_completed.emit(failure_completion_cell)
@@ -1437,9 +1404,9 @@ func _do_transition(target_slot: PocketSlot, dest_pos: Vector3,
 	# Swap render layers on camera
 	if _camera and is_instance_valid(_camera):
 		if entering_interior:
-			_camera.cull_mask = INTERIOR_RENDER_LAYERS
+			_camera.cull_mask = RenderLayersScript.replace_world_layers(_camera.cull_mask, INTERIOR_RENDER_LAYERS)
 		else:
-			_camera.cull_mask = EXTERIOR_RENDER_LAYERS
+			_camera.cull_mask = RenderLayersScript.replace_world_layers(_camera.cull_mask, EXTERIOR_RENDER_LAYERS)
 		Log.info("streaming", "[TRANSITION] Camera cull_mask set to 0x%X" % _camera.cull_mask)
 
 	# Swap environment
@@ -1500,7 +1467,7 @@ func _seamless_enter(door: DoorInfo, slot: PocketSlot, door_forward: Vector3) ->
 
 	# 3. Keep camera on COMBINED layers — player sees both exterior and interior.
 	if _camera:
-		_camera.cull_mask = COMBINED_RENDER_LAYERS
+		_camera.cull_mask = RenderLayersScript.replace_world_layers(_camera.cull_mask, COMBINED_RENDER_LAYERS)
 
 	# 3b. Hide interior door meshes near the door opening.
 	# Portal deactivation restored them; hide again for seamless mode.
@@ -1565,7 +1532,7 @@ func _seamless_exit() -> void:
 
 	# 2. Restore camera to exterior-only (portal will re-enable COMBINED when close)
 	if _camera:
-		_camera.cull_mask = EXTERIOR_RENDER_LAYERS
+		_camera.cull_mask = RenderLayersScript.replace_world_layers(_camera.cull_mask, EXTERIOR_RENDER_LAYERS)
 
 	# 3. Restore player physics to exterior-only
 	if _player_body:
@@ -1677,16 +1644,26 @@ func _blend_environment(target_env: Environment) -> void:
 
 #region Environment Building
 
-## Build an Environment resource from interior cell AMBI data
-func _build_interior_environment(cell: CellRecord) -> Environment:
+## Build an Environment resource from source-neutral transition space data.
+func _build_interior_environment(space_handle: RefCounted, cell: Variant) -> Environment:
+	if _transition_provider != null and _transition_provider.has_method("build_transition_environment"):
+		var provided: Variant = _transition_provider.call(
+			"build_transition_environment",
+			space_handle,
+			cell,
+			_exterior_environment
+		)
+		if provided is Environment:
+			return provided
+
 	var env := Environment.new()
 
-	if cell.has_ambient:
+	if cell != null and bool(cell.get("has_ambient")):
 		# Interior ambient from AMBI record, with OpenMW-style luminance floor.
 		# Port of `apps/openmw/mwrender/renderingmanager.cpp::configureAmbient`:
 		# Rec.709 relative luminance, scale up to MIN_INTERIOR_LUMA if darker.
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
-		var c: Color = cell.ambient_color
+		var c: Color = cell.get("ambient_color")
 		var luma: float = 0.2126 * c.r + 0.7152 * c.g + 0.0722 * c.b
 		if luma < MIN_INTERIOR_LUMA:
 			if luma < 0.001:
@@ -1700,10 +1677,11 @@ func _build_interior_environment(cell: CellRecord) -> Environment:
 		env.ambient_light_energy = 0.8
 
 		# Fog from AMBI
-		if cell.fog_density > 0.001:
+		var fog_density := float(cell.get("fog_density"))
+		if fog_density > 0.001:
 			env.fog_enabled = true
-			env.fog_light_color = cell.fog_color
-			env.fog_density = cell.fog_density * INTERIOR_FOG_DENSITY_SCALE
+			env.fog_light_color = cell.get("fog_color")
+			env.fog_density = fog_density * INTERIOR_FOG_DENSITY_SCALE
 	else:
 		# Default interior: dim ambient, no fog
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
@@ -1711,7 +1689,7 @@ func _build_interior_environment(cell: CellRecord) -> Environment:
 		env.ambient_light_energy = 0.5
 
 	# No sky for interiors (unless quasi-exterior)
-	if cell.is_quasi_exterior():
+	if cell != null and cell.has_method("is_quasi_exterior") and bool(cell.call("is_quasi_exterior")):
 		env.background_mode = Environment.BG_SKY
 		if _exterior_environment:
 			env.sky = _exterior_environment.sky

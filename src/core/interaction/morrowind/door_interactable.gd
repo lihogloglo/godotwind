@@ -72,6 +72,10 @@ func interact(player: Node3D) -> void:
 		display_name if not display_name.is_empty() else record_id,
 		(" → " + destination_name) if has_destination else "",
 	])
-	var activation_key := door_instance_key if not door_instance_key.is_empty() else record_id
+	var activation_key: String = str(self.door_instance_key)
+	if activation_key.is_empty() and has_meta("door_instance_key"):
+		activation_key = str(get_meta("door_instance_key"))
+	if activation_key.is_empty():
+		activation_key = str(record_id)
 	door_activated.emit(activation_key, door_record, player)
 	super.interact(player)

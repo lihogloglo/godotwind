@@ -43,7 +43,6 @@ Console surface:
 | `src/core/world/world_object_source.gd` | Generic manifest/source interface used by HLOD, FAR impostors, distant lights, and streaming orchestration |
 | `src/core/world/morrowind/morrowind_world_object_source.gd` | Morrowind adapter that converts ESM cell refs into generic object records |
 | `src/core/world/distance_utils.gd` | Paging constants, chunk keys, chunk centers, tier helpers |
-| `src/core/world/object_position_index.gd` | Immutable spatial index queried by chunk |
 | `tests/unit/test_object_paging_kernel.gd` | Kernel and paging math coverage |
 | `tests/visual/test_hlod_benchmark.gd` | Interactive HLOD benchmark scene |
 
@@ -112,7 +111,6 @@ through proxy-material and atlas work.
 
 | Operation | Thread |
 | --- | --- |
-| `ObjectPositionIndex` reads | worker-safe after build |
 | Prototype availability checks and async `.res` requests | main thread, via `ModelLoader` indexed cache |
 | Candidate math and packed transform/array preparation | worker |
 | `NativeObjectPagingKernel` merge | worker |

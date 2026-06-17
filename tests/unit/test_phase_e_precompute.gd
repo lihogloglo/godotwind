@@ -9,7 +9,33 @@
 extends GdUnitTestSuite
 
 const SOR := preload("res://src/core/world/static_object_renderer.gd")
-const CellReferenceScript := preload("res://src/core/esm/records/cell_reference.gd")
+const CS := preload("res://src/core/coordinate_system.gd")
+const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
+const ReferenceInstantiatorScript := preload("res://src/core/world/reference_instantiator.gd")
+
+
+class FakeStaticPrecomputeRenderer:
+	extends Node
+
+	var captured_type_name: String = ""
+	var captured_cell_grid: Vector2i = Vector2i.ZERO
+	var captured_transform: Transform3D = Transform3D.IDENTITY
+	var captured_ref_id: StringName = &""
+	var captured_ref_num: int = 0
+
+	func precompute_instance(
+		type_name: String,
+		cell_grid: Vector2i,
+		world_transform: Transform3D,
+		ref_id: StringName = &"",
+		ref_num: int = 0,
+	) -> Variant:
+		captured_type_name = type_name
+		captured_cell_grid = cell_grid
+		captured_transform = world_transform
+		captured_ref_id = ref_id
+		captured_ref_num = ref_num
+		return null
 
 
 func _build_simple_prototype() -> Node3D:
@@ -27,23 +53,12 @@ func _build_simple_prototype() -> Node3D:
 	return root
 
 
-func _build_ref(ref_id: String, ref_num: int, mw_position: Vector3, mw_rotation: Vector3, mw_scale: float) -> CellReference:
-	var ref := CellReferenceScript.new()
-	ref.ref_id = StringName(ref_id)
-	ref.ref_num = ref_num
-	ref.position = mw_position
-	ref.rotation = mw_rotation
-	ref.scale = mw_scale
-	return ref
-
-
 func test_precompute_instance_returns_null_for_unregistered_type() -> void:
 	var renderer := SOR.new()
 	auto_free(renderer)
 	add_child(renderer)
 
-	var ref := _build_ref("test_ref", 1, Vector3(100, 0, 200), Vector3.ZERO, 1.0)
-	var precomp: Variant = renderer.precompute_instance("missing_type", ref, Vector2i.ZERO)
+	var precomp: Variant = renderer.precompute_instance("missing_type", Vector2i.ZERO, Transform3D.IDENTITY)
 	assert_that(precomp).is_null()
 
 
@@ -57,20 +72,47 @@ func test_precompute_instance_populates_fields() -> void:
 	add_child(proto)
 	renderer.register_from_prototype("test_precomp", proto)
 
-	var ref := _build_ref("ref_xyz", 7, Vector3(100, 200, 50), Vector3.ZERO, 2.0)
-	var precomp: Variant = renderer.precompute_instance("test_precomp", ref, Vector2i(3, -1))
+	var transform := Transform3D(Basis.IDENTITY.scaled(Vector3(2, 2, 2)), Vector3(100, 50, -200))
+	var precomp: Variant = renderer.precompute_instance("test_precomp", Vector2i(3, -1), transform, &"ref_xyz", 7)
 	assert_that(precomp).is_not_null()
 	assert_that(precomp.type_name).is_equal("test_precomp")
 	assert_that(precomp.cell_grid).is_equal(Vector2i(3, -1))
 	assert_that(precomp.ref_num).is_equal(7)
 	assert_that(precomp.sub_mesh_combined_xforms.size()).is_equal(1)
-	# custom_data carries (spawn_time, fade_duration, 0, 0) — spawn_time may
-	# vary per run; assert fade_duration is approximately the renderer constant.
-	# Color stores f32 which causes tiny precision drift vs f64 constant.
-	assert_that(absf(precomp.custom_data.g - SOR.REGISTRY_FADE_DURATION_S)).is_less(0.001)
-	# Scale is applied via esm_rotation_to_godot_basis(...).scaled(scale).
-	# Position passes through CS.vector_to_godot which swaps Y/Z.
-	assert_that(precomp.world_transform.origin).is_not_equal(Vector3.ZERO)
+	assert_that(precomp.aabb.size).is_not_equal(Vector3.ZERO)
+	assert_that(precomp.world_transform).is_equal(transform)
+
+
+func test_worker_static_precompute_uses_source_neutral_renderer_contract() -> void:
+	var instantiator := ReferenceInstantiatorScript.new()
+	var renderer := FakeStaticPrecomputeRenderer.new()
+	auto_free(renderer)
+	add_child(renderer)
+	instantiator.static_renderer = renderer
+
+	var ref := CellReference.new()
+	ref.ref_id = "test_ref"
+	ref.ref_num = 99
+	ref.position = Vector3(70.0, 140.0, 210.0)
+	ref.rotation = Vector3.ZERO
+	ref.scale = 2.0
+
+	var entry := CellManagerScript.InstantiationEntry.new()
+	entry.ref = ref
+	entry.model_path = "Meshes/Test/Static.NIF"
+	entry.item_id = "test_item"
+
+	instantiator.call("_worker_static_precompute", entry, Vector2i(4, -2))
+
+	var expected_basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	expected_basis = expected_basis.scaled(CS.scale_to_godot(ref.scale))
+	var expected := Transform3D(expected_basis, CS.vector_to_godot(ref.position))
+	assert_str(renderer.captured_type_name).is_equal("meshes\\test\\static.nif")
+	assert_that(renderer.captured_cell_grid).is_equal(Vector2i(4, -2))
+	assert_vector(renderer.captured_transform.origin).is_equal_approx(expected.origin, Vector3.ONE * 0.001)
+	assert_vector(renderer.captured_transform.basis.x).is_equal_approx(expected.basis.x, Vector3.ONE * 0.001)
+	assert_str(str(renderer.captured_ref_id)).is_equal("test_ref")
+	assert_int(renderer.captured_ref_num).is_equal(99)
 
 
 func test_add_instance_precomputed_matches_add_instance() -> void:
@@ -90,20 +132,14 @@ func test_add_instance_precomputed_matches_add_instance() -> void:
 	renderer_sync.register_from_prototype("test_match", proto_a)
 	renderer_pc.register_from_prototype("test_match", proto_b)
 
-	var ref := _build_ref("ref_match", 1, Vector3(100, 0, 200), Vector3.ZERO, 1.0)
+	var transform := Transform3D(Basis.IDENTITY, Vector3(100, 200, 50))
 
-	# Sync path — derive transform the same way _instantiate_static_object does.
-	var CS := preload("res://src/core/coordinate_system.gd")
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
-	var transform := Transform3D(basis, pos)
+	# Sync path uses the same normalized transform as the precompute path.
 	var id_sync := renderer_sync.add_instance("test_match", transform, Vector2i(0, 0))
 
 	# Precompute path. The worker would normally fill these from the
 	# InstantiationEntry; tests populate directly to match the contract.
-	var precomp: Variant = renderer_pc.precompute_instance("test_match", ref, Vector2i(0, 0))
+	var precomp: Variant = renderer_pc.precompute_instance("test_match", Vector2i(0, 0), transform, &"ref_match", 1)
 	precomp.model_path = "meshes/test_match.nif"
 	precomp.item_id = ""
 	var id_pc := renderer_pc.add_instance_precomputed(precomp)

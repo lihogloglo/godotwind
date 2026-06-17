@@ -89,12 +89,18 @@ func test_near_streaming_uses_world_object_payload_boundary() -> void:
 	assert_bool("get_source_base_record" in instantiator_code).override_failure_message(
 		"ReferenceInstantiator must resolve source-shaped records through the spawn adapter"
 	).is_false()
+	assert_bool("get_source_cell" in cell_manager_code).override_failure_message(
+		"CellManager must consume parser-shaped cells through an injected parser bridge, not the WorldObjectSource port"
+	).is_false()
+	assert_bool("get_source_exterior_cell" in cell_manager_code).override_failure_message(
+		"CellManager must consume parser-shaped exterior cells through an injected parser bridge, not the WorldObjectSource port"
+	).is_false()
 
 
 func test_cell_preloader_without_world_object_source_is_ready_no_legacy_global() -> void:
 	var preloader: Variant = CellPreloaderScript.new()
 	var model_loader := FakeModelLoader.new()
-	preloader.configure(null, model_loader)
+	preloader.configure(model_loader)
 
 	preloader._begin_preload(Vector2i(9, -4), Time.get_ticks_msec())
 

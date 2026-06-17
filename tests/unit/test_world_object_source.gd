@@ -39,11 +39,9 @@ func test_fake_source_filters_by_capability() -> void:
 
 func test_native_world_object_index_queries_cell_and_radius() -> void:
 	var bridge := NativeBridgeScript.new()
-	var factory: RefCounted = bridge.get("_factory")
-	assert_object(factory).is_not_null()
-	assert_bool(factory.has_method("CreateWorldObjectIndex")).is_true()
+	assert_bool(bridge.has_native_factory_method(&"CreateWorldObjectIndex")).is_true()
 
-	var index: RefCounted = factory.call("CreateWorldObjectIndex")
+	var index: RefCounted = bridge.create_native_service(&"CreateWorldObjectIndex")
 	index.call("AddObject", &"near_static", Vector3.ZERO, Vector2i.ZERO, WorldObjectRecord.CAP_HLOD)
 	index.call("AddObject", &"far_light", Vector3(100.0, 0.0, 0.0), Vector2i(1, 0), WorldObjectRecord.CAP_DISTANT_LIGHT)
 

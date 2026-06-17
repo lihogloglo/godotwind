@@ -5,6 +5,7 @@ const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const MorrowindDataProviderScript := preload("res://src/core/world/morrowind/morrowind_data_provider.gd")
 const GpuHydrologyBakerScript := preload("res://src/core/world/morrowind/morrowind_gpu_hydrology_baker.gd")
 const MorrowindHydrologyProviderScript := preload("res://src/core/world/morrowind/morrowind_hydrology_provider.gd")
+const MorrowindNativeBridgeScript := preload("res://src/core/world/morrowind/morrowind_native_bridge.gd")
 
 const TERRAIN_STRIDE: int = 8
 const BAKE_BUDGET_USEC: int = 18000
@@ -27,6 +28,14 @@ const OVERLAY_ACCEPTED_RIVERS := 9
 const OVERLAY_OUTLET_DISTANCE := 10
 const OVERLAY_REJECTION_REASON := 11
 const OVERLAY_LOCAL_WIDTH := 12
+const OVERLAY_BODY_TYPE := 13
+const OVERLAY_FLOW_ACCUMULATION := 14
+const OVERLAY_COMPONENT_ID := 15
+const OVERLAY_GRAPH_LINK := 16
+const OVERLAY_STREAM_RANK := 17
+const OVERLAY_SINK_ID := 18
+const OVERLAY_BASIN_NODES := 19
+const OVERLAY_COUNT := 20
 
 var _terrain_provider: MorrowindDataProvider = null
 var _hydrology_provider: MorrowindHydrologyProvider = null
@@ -57,8 +66,16 @@ var _accepted_nodes: Array[MeshInstance3D] = []
 var _outlet_nodes: Array[MeshInstance3D] = []
 var _rejection_nodes: Array[MeshInstance3D] = []
 var _local_width_nodes: Array[MeshInstance3D] = []
+var _body_type_nodes: Array[MeshInstance3D] = []
+var _flow_accumulation_nodes: Array[MeshInstance3D] = []
+var _component_id_nodes: Array[MeshInstance3D] = []
+var _graph_link_nodes: Array[MeshInstance3D] = []
+var _stream_rank_nodes: Array[MeshInstance3D] = []
+var _sink_id_nodes: Array[MeshInstance3D] = []
+var _basin_node_nodes: Array[MeshInstance3D] = []
 var _flow_arrow_nodes: Array[MeshInstance3D] = []
 var _debug_images_by_region: Dictionary[Vector2i, Dictionary] = {}
+var _runtime_atlas_regions: Dictionary[Vector2i, Dictionary] = {}
 var _overlay_mode: int = OVERLAY_CLASSIFICATION
 var _flow_arrows_visible: bool = true
 var _river_pixels: int = 0
@@ -94,24 +111,22 @@ func _ready() -> void:
 
 	_hydrology_provider = MorrowindHydrologyProviderScript.new()
 	_hydrology_provider.configure(_terrain_provider, null)
-	_hydrology_provider.cache_enabled = true
+	_hydrology_provider.cache_enabled = false
 	_hydrology_provider.use_prebaked_hydrology = false
-	_hydrology_provider.debug_hydrology_outputs = true
+	_hydrology_provider.allow_runtime_hydrology_bake = false
 	var provider_err := _hydrology_provider.initialize()
 	if provider_err != OK:
-		_hud.text = "Runtime GPU hydrology unavailable; error %d." % provider_err
-		Log.warn("water", "Water classification visual: runtime GPU hydrology unavailable (%d)" % provider_err)
+		_hud.text = "Hydrology provider unavailable; error %d." % provider_err
+		Log.warn("water", "Water classification visual: hydrology provider failed (%d)" % provider_err)
 		return
 
-	_classification_mode = "Runtime/GPU provider"
-	_hud.text = "Building runtime GPU hydrology..."
+	_classification_mode = "Runtime/native hydrology atlas"
+	_hud.text = "Building native global hydrology atlas..."
 	await get_tree().process_frame
-	var start_usec := Time.get_ticks_usec()
-	var build_err := _hydrology_provider.prepare_region(BALMORA_REGION)
-	_global_build_ms = float(Time.get_ticks_usec() - start_usec) / 1000.0
-	if build_err != OK:
-		_hud.text = "Runtime GPU hydrology build failed; error %d." % build_err
-		Log.warn("water", "Water classification visual: runtime GPU hydrology build failed (%d)" % build_err)
+	var atlas_err := _build_runtime_native_hydrology_atlas()
+	if atlas_err != OK:
+		_hud.text = "Native hydrology atlas build failed; error %d." % atlas_err
+		Log.warn("water", "Water classification visual: native hydrology atlas failed (%d)" % atlas_err)
 		return
 
 	_pending_regions = _terrain_provider.get_all_terrain_regions()
@@ -138,7 +153,7 @@ func _unhandled_input(event: InputEvent) -> void:
 		_mouse_captured = not _mouse_captured
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _mouse_captured else Input.MOUSE_MODE_VISIBLE
 	if event.is_action_pressed(&"ui_accept"):
-		_overlay_mode = (_overlay_mode + 1) % 13
+		_overlay_mode = (_overlay_mode + 1) % OVERLAY_COUNT
 		_apply_overlay_visibility()
 
 
@@ -211,6 +226,13 @@ func _setup_hud() -> void:
 	overlay_picker.add_item("Outlet distance", OVERLAY_OUTLET_DISTANCE)
 	overlay_picker.add_item("Rejection reason", OVERLAY_REJECTION_REASON)
 	overlay_picker.add_item("Local width", OVERLAY_LOCAL_WIDTH)
+	overlay_picker.add_item("Body type", OVERLAY_BODY_TYPE)
+	overlay_picker.add_item("Flow accumulation", OVERLAY_FLOW_ACCUMULATION)
+	overlay_picker.add_item("Component id", OVERLAY_COMPONENT_ID)
+	overlay_picker.add_item("Graph link", OVERLAY_GRAPH_LINK)
+	overlay_picker.add_item("Stream rank", OVERLAY_STREAM_RANK)
+	overlay_picker.add_item("Sink id", OVERLAY_SINK_ID)
+	overlay_picker.add_item("Basin nodes", OVERLAY_BASIN_NODES)
 	overlay_picker.item_selected.connect(func(index: int) -> void:
 		_overlay_mode = overlay_picker.get_item_id(index)
 		_apply_overlay_visibility()
@@ -243,7 +265,65 @@ func _process_region_bakes() -> void:
 			break
 
 
+func _build_runtime_native_hydrology_atlas() -> Error:
+	var bridge: RefCounted = MorrowindNativeBridgeScript.new()
+	var builder := bridge.create_hydrology_atlas_builder()
+	if builder == null:
+		return ERR_UNAVAILABLE
+	var regions := _terrain_provider.get_all_terrain_regions()
+	if regions.is_empty():
+		return ERR_DOES_NOT_EXIST
+	var tiles: Array[Dictionary] = []
+	for region_coord: Vector2i in regions:
+		var heightmap: Image = _terrain_provider.get_heightmap_for_region(region_coord)
+		if heightmap == null:
+			continue
+		tiles.append({
+			"region": region_coord,
+			"heightmap": heightmap,
+		})
+	if tiles.is_empty():
+		return ERR_DOES_NOT_EXIST
+	var start_usec := Time.get_ticks_usec()
+	var result: Dictionary = builder.call(
+		"BuildAtlas",
+		tiles,
+		float(_terrain_provider.vertex_spacing),
+		float(_terrain_provider.sea_level),
+		0.0,
+		1.4,
+		MAX_ENCODED_SPEED_MPS
+	)
+	_global_build_ms = float(Time.get_ticks_usec() - start_usec) / 1000.0
+	if int(result.get("error", FAILED)) != OK:
+		return int(result.get("error", FAILED))
+	_runtime_atlas_regions.clear()
+	for region_v: Variant in result.get("regions", []):
+		if not region_v is Dictionary:
+			continue
+		var region_result: Dictionary = region_v as Dictionary
+		var region_coord: Vector2i = region_result.get("region", Vector2i(2147483647, 2147483647))
+		var flow_image: Image = region_result.get("image") as Image
+		if flow_image == null:
+			continue
+		var cached := {
+			"flow_image": flow_image,
+			"components": _hydrology_provider._components_from_bake_result(region_result),
+			"river_count": int(region_result.get("river_count", 0)),
+			"bounds": _hydrology_provider._region_bounds(region_coord),
+			"cache_key": "runtime_native_atlas_%d_%d" % [region_coord.x, region_coord.y],
+			"algorithm": "morrowind_hydrology_atlas_v2",
+			"debug_images": region_result.get("debug_images", {}),
+		}
+		_runtime_atlas_regions[region_coord] = cached
+		_hydrology_provider._region_cache[region_coord] = cached
+	return OK
+
+
 func _bake_region(region_coord: Vector2i) -> void:
+	if _classification_mode == "Runtime/native hydrology atlas":
+		_load_runtime_native_atlas_region(region_coord)
+		return
 	if _classification_mode == "Runtime/GPU provider":
 		_load_runtime_gpu_region(region_coord)
 		return
@@ -295,6 +375,18 @@ func _load_runtime_gpu_region(region_coord: Vector2i) -> void:
 	_add_region_overlays(region_coord, flow_image, cached.get("debug_images", {}))
 
 
+func _load_runtime_native_atlas_region(region_coord: Vector2i) -> void:
+	var heightmap: Image = _terrain_provider.get_heightmap_for_region(region_coord)
+	var cached: Dictionary = _runtime_atlas_regions.get(region_coord, {})
+	var flow_image: Image = cached.get("flow_image") as Image
+	if heightmap == null or flow_image == null:
+		_failed_regions[region_coord] = true
+		return
+	_baked_regions[region_coord] = true
+	_add_region_terrain(region_coord, heightmap)
+	_add_region_overlays(region_coord, flow_image, cached.get("debug_images", {}))
+
+
 func _load_atlas_region(region_coord: Vector2i) -> void:
 	var heightmap: Image = _terrain_provider.get_heightmap_for_region(region_coord)
 	var metadata: Dictionary = _atlas_regions.get(region_coord, {})
@@ -322,7 +414,7 @@ func _try_load_global_hydrology_atlas() -> bool:
 	if not parsed is Dictionary:
 		return false
 	var manifest: Dictionary = parsed as Dictionary
-	if String(manifest.get("algorithm", "")) != "morrowind_gpu_hydrology_region_v1":
+	if String(manifest.get("algorithm", "")) != "morrowind_hydrology_atlas_v2":
 		return false
 	var regions: Array = manifest.get("regions", [])
 	for region_v: Variant in regions:
@@ -424,6 +516,13 @@ func _add_region_overlays(region_coord: Vector2i, flow_image: Image, debug_image
 		_add_debug_overlay_node(region_coord, debug_images, "outlet_distance", "OutletDistanceOverlay", _outlet_nodes, 0.80)
 		_add_debug_overlay_node(region_coord, debug_images, "rejection_reason", "RejectionReasonOverlay", _rejection_nodes, 0.82)
 		_add_debug_overlay_node(region_coord, debug_images, "local_width", "LocalWidthOverlay", _local_width_nodes, 0.84)
+		_add_debug_overlay_node(region_coord, debug_images, "body_type", "BodyTypeOverlay", _body_type_nodes, 0.86)
+		_add_debug_overlay_node(region_coord, debug_images, "flow_accumulation", "FlowAccumulationOverlay", _flow_accumulation_nodes, 0.88)
+		_add_debug_overlay_node(region_coord, debug_images, "component_id", "ComponentIdOverlay", _component_id_nodes, 0.90)
+		_add_debug_overlay_node(region_coord, debug_images, "graph_link", "GraphLinkOverlay", _graph_link_nodes, 0.92)
+		_add_debug_overlay_node(region_coord, debug_images, "stream_rank", "StreamRankOverlay", _stream_rank_nodes, 0.94)
+		_add_debug_overlay_node(region_coord, debug_images, "sink_id", "SinkIdOverlay", _sink_id_nodes, 0.96)
+		_add_debug_overlay_node(region_coord, debug_images, "basin_nodes", "BasinNodeOverlay", _basin_node_nodes, 0.98)
 	var arrow_node := _make_flow_arrow_overlay(region_coord, flow_image)
 	if arrow_node != null:
 		add_child(arrow_node)
@@ -576,9 +675,7 @@ func _make_flow_arrow_overlay(region_coord: Vector2i, flow_image: Image) -> Mesh
 	if width <= 0 or height <= 0:
 		return null
 	var stride := maxi(6, ceili(float(maxi(width, height)) / 24.0))
-	var mesh := ImmediateMesh.new()
-	mesh.surface_begin(Mesh.PRIMITIVE_LINES)
-	var added := 0
+	var arrows: Array[Dictionary] = []
 	var offset := int(stride / 2)
 	for y in range(offset, height, stride):
 		for x in range(offset, width, stride):
@@ -593,11 +690,14 @@ func _make_flow_arrow_overlay(region_coord: Vector2i, flow_image: Image) -> Mesh
 			var length_px := lerpf(float(stride) * 0.55, float(stride) * 1.65, clampf(speed_mps / MAX_ENCODED_SPEED_MPS, 0.0, 1.0))
 			var start := Vector2(float(x), float(y)) - dir * length_px * 0.35
 			var end := Vector2(float(x), float(y)) + dir * length_px * 0.65
-			_add_debug_arrow(mesh, region_coord, start, end, width, height, speed_mps)
-			added += 1
-	mesh.surface_end()
-	if added == 0:
+			arrows.append({"start": start, "end": end, "speed": speed_mps})
+	if arrows.is_empty():
 		return null
+	var mesh := ImmediateMesh.new()
+	mesh.surface_begin(Mesh.PRIMITIVE_LINES)
+	for arrow: Dictionary in arrows:
+		_add_debug_arrow(mesh, region_coord, arrow["start"] as Vector2, arrow["end"] as Vector2, width, height, float(arrow["speed"]))
+	mesh.surface_end()
 	var node := MeshInstance3D.new()
 	node.name = "FlowArrows_%d_%d" % [region_coord.x, region_coord.y]
 	node.mesh = mesh
@@ -742,6 +842,13 @@ func _apply_overlay_visibility() -> void:
 	_set_nodes_visible(_outlet_nodes, _overlay_mode == OVERLAY_OUTLET_DISTANCE)
 	_set_nodes_visible(_rejection_nodes, _overlay_mode == OVERLAY_REJECTION_REASON)
 	_set_nodes_visible(_local_width_nodes, _overlay_mode == OVERLAY_LOCAL_WIDTH)
+	_set_nodes_visible(_body_type_nodes, _overlay_mode == OVERLAY_BODY_TYPE)
+	_set_nodes_visible(_flow_accumulation_nodes, _overlay_mode == OVERLAY_FLOW_ACCUMULATION)
+	_set_nodes_visible(_component_id_nodes, _overlay_mode == OVERLAY_COMPONENT_ID)
+	_set_nodes_visible(_graph_link_nodes, _overlay_mode == OVERLAY_GRAPH_LINK)
+	_set_nodes_visible(_stream_rank_nodes, _overlay_mode == OVERLAY_STREAM_RANK)
+	_set_nodes_visible(_sink_id_nodes, _overlay_mode == OVERLAY_SINK_ID)
+	_set_nodes_visible(_basin_node_nodes, _overlay_mode == OVERLAY_BASIN_NODES)
 	_set_nodes_visible(_flow_arrow_nodes, _flow_arrows_visible and (_overlay_mode == OVERLAY_SPEED or _overlay_mode == OVERLAY_DIRECTION or _overlay_mode == OVERLAY_RAW_RGBA or _overlay_mode == OVERLAY_ACCEPTED_RIVERS or _overlay_mode == OVERLAY_OUTLET_DISTANCE))
 
 
@@ -796,6 +903,20 @@ func _overlay_mode_name() -> String:
 			return "rejection reason"
 		OVERLAY_LOCAL_WIDTH:
 			return "local width"
+		OVERLAY_BODY_TYPE:
+			return "body type"
+		OVERLAY_FLOW_ACCUMULATION:
+			return "flow accumulation"
+		OVERLAY_COMPONENT_ID:
+			return "component id"
+		OVERLAY_GRAPH_LINK:
+			return "graph link"
+		OVERLAY_STREAM_RANK:
+			return "stream rank"
+		OVERLAY_SINK_ID:
+			return "sink id"
+		OVERLAY_BASIN_NODES:
+			return "basin nodes"
 		_:
 			return "classification"
 
@@ -845,20 +966,23 @@ func _debug_probe_for_world(region_coord: Vector2i, world_pos: Vector3) -> Strin
 		return "debug=unavailable"
 	var x := clampi(roundi(u * float(image.get_width() - 1)), 0, image.get_width() - 1)
 	var y := clampi(roundi(v * float(image.get_height() - 1)), 0, image.get_height() - 1)
-	var corridor := _debug_alpha(debug_images, "corridor_candidates", x, y)
 	var accepted := _debug_alpha(debug_images, "accepted_rivers", x, y)
 	var ocean := _debug_alpha(debug_images, "ocean_core", x, y)
 	var bank := _debug_luma(debug_images, "bank_distance", x, y)
 	var outlet := _debug_luma(debug_images, "outlet_distance", x, y)
+	var graph := _debug_alpha(debug_images, "graph_link", x, y)
+	var rank := _debug_luma(debug_images, "stream_rank", x, y)
+	var sink := _debug_luma(debug_images, "sink_id", x, y)
 	var reason_image: Image = debug_images.get("rejection_reason") as Image
 	var reason_color := reason_image.get_pixel(x, y) if reason_image != null else Color.TRANSPARENT
 	var reason := _reason_name_from_color(reason_color)
-	return "corridor=%d accepted=%d ocean=%.0f bank=%.2f outlet=%.2f reason=%s" % [
-		1 if corridor > 0.05 else 0,
+	return "graph=%d accepted=%d ocean=%.0f bank=%.2f rank=%.2f sink=%.2f reason=%s" % [
+		1 if graph > 0.05 else 0,
 		1 if accepted > 0.05 else 0,
 		ocean,
 		bank,
-		outlet,
+		rank,
+		sink if sink > 0.0 else outlet,
 		reason,
 	]
 

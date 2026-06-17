@@ -1,27 +1,30 @@
 extends Node3D
 
-## Interior Transition Test — Pocket Mode Only
+## Interior Transition Test - Pocket Mode Only
 ##
 ## Loads Seyda Neen exterior cells, registers doors with InteriorPocketManager,
-## then lets you fly to doors and press ENTER to transition in/out.
+## then lets you fly to visible DoorInteractable nodes and press E to transition.
 ##
 ## Controls:
-##   WASD + mouse — fly camera
-##   ENTER — enter/exit door (within 3m)
-##   TAB — cycle through discovered doors (teleports camera)
-##   ESC — release mouse
-
+##   InputMap movement + mouse - fly camera
+##   E - interact with the visible door under the crosshair
+##   TAB - cycle discovered doors and preload the selected interior
+##   ESC - release mouse
 const CS := preload("res://src/core/coordinate_system.gd")
+const InputActionsScript := preload("res://src/core/input/input_actions.gd")
 const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
+const InteractionRaycasterScript := preload("res://src/core/interaction/interaction_raycaster.gd")
 const LoadingScreenScript := preload("res://src/core/ui/loading_screen.gd")
 const BackgroundProcessorScript := preload("res://src/core/streaming/background_processor.gd")
 const MorrowindWorldSourceScript := preload("res://src/core/world/morrowind/morrowind_world_source.gd")
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
 
 # Scene nodes
 var _camera: Camera3D
 var _environment: WorldEnvironment
 var _sun: DirectionalLight3D
+var _interaction_raycaster: InteractionRaycaster
 
 # Systems
 var _cell_manager: CellManagerScript
@@ -45,9 +48,13 @@ var _pitch: float = 0.0
 
 # UI
 var _info_label: Label
+var _prompt_label: Label
 var _loading: bool = true
 var _stencil_debug: bool = false
 var _depth_test_mode: bool = false
+var _prompt_interactable: Interactable = null
+var _prompt_distance: float = 0.0
+var _manual_status: String = ""
 
 # Frame-time tracking for hiccup verification (P0 fix test harness).
 #
@@ -70,15 +77,18 @@ var _transition_recording: bool = false
 # from — bridge path has a fade-out spike, normal path doesn't.
 var _last_transition_bridge: bool = false
 const _HICCUP_MS_THRESHOLD: float = 8.0
+const _INTERACTION_RAY_LENGTH: float = 6.0
 # Running mode doubles camera speed so we can stress the 10m preload window
 # at the faster "run" speed roaster flagged (8 m/s vs 5 m/s walk).
 var _run_mode: bool = false
 
 
 func _ready() -> void:
+	InputActionsScript.verify()
 	_setup_environment()
 	_setup_camera()
 	_setup_ui()
+	_setup_interaction()
 
 	# Load game data
 	var loading := LoadingScreenScript.new()
@@ -95,7 +105,10 @@ func _ready() -> void:
 	_cell_manager.load_creatures = false
 	_cell_manager.use_static_renderer = false
 	_cell_manager.use_multimesh_instancing = false
-	_cell_manager.set_world_source(MorrowindWorldSourceScript.new())
+	var world_source: Variant = MorrowindWorldSourceScript.new()
+	_cell_manager.set_world_source(world_source)
+	_cell_manager.set_door_activated_handler(Callable(self, "_on_door_interactable_activated"))
+	var transition_provider: RefCounted = world_source.call("get_transition_provider")
 
 	# Background processor so the P0 async pocket load path actually runs.
 	# Without this, _cell_manager.has_async_capacity() returns false and
@@ -109,7 +122,7 @@ func _ready() -> void:
 	_pocket_manager = InteriorPocketManagerScript.new()
 	_pocket_manager.name = "PocketManager"
 	add_child(_pocket_manager)
-	_pocket_manager.initialize(_cell_manager, _environment, _camera, _sun)
+	_pocket_manager.initialize(_cell_manager, _environment, _camera, _sun, transition_provider)
 	_pocket_manager.seamless_enabled = false  # Classic teleport mode — seamless is experimental
 
 	# Hook transition signals so the frame-time tracker knows when to record
@@ -120,7 +133,9 @@ func _ready() -> void:
 	# Load exterior cells and register doors
 	await get_tree().process_frame
 	_load_exterior_cells()
+	_cell_manager.reconnect_door_activated_handlers(self, Callable(self, "_on_door_interactable_activated"))
 	_scan_doors()
+	_log_exterior_door_node_summary()
 	_loading = false
 
 	# Position camera near first door
@@ -155,34 +170,56 @@ func _auto_test_run() -> void:
 	_camera.look_at(door_pos)
 	_yaw = _camera.rotation.y
 	_pitch = _camera.rotation.x
+	await get_tree().physics_frame
 	Log.info("testing", "[AUTO-TEST] Camera at 2m from door '%s' → '%s' (%d refs)" % [
 		dp.ref_id, dp.interior_name, dp.interior_ref_count])
+
+	var door = null
+	if not str(dp.get("instance_key", "")).is_empty():
+		door = _pocket_manager.get_door_info_by_instance_key(StringName(str(dp.instance_key)))
+	if door == null:
+		Log.error("testing", "[AUTO-TEST] Registered DoorInfo missing for instance key '%s'" % str(dp.get("instance_key", "")))
+		get_tree().quit(1)
+		return
+	var exterior_door_node: Node3D = _find_exterior_door_node(str(dp.instance_key))
+	if exterior_door_node == null:
+		Log.error("testing", "[AUTO-TEST] No spawned exterior door node for '%s'" % str(dp.instance_key))
+		get_tree().quit(1)
+		return
+	var aim_point: Vector3 = exterior_door_node.global_position + Vector3(0.0, 1.2, 0.0)
+	_camera.global_position = aim_point + Vector3(0.0, 0.0, 2.0)
+	_camera.look_at(aim_point)
+	_sync_camera_from_basis()
+	await get_tree().physics_frame
+	var exterior_mesh_count: int = _count_visible_meshes(exterior_door_node)
+	if exterior_mesh_count <= 0:
+		Log.error("testing", "[AUTO-TEST] Spawned exterior door '%s' has no visible meshes" % str(dp.instance_key))
+		get_tree().quit(1)
+		return
+	var targeted_door = _find_targeted_door()
+	if targeted_door == null or targeted_door.instance_key != door.instance_key:
+		Log.error("testing", "[AUTO-TEST] Interaction ray did not resolve selected door '%s'" % str(dp.instance_key))
+		get_tree().quit(1)
+		return
+	_pocket_manager._ensure_pocket_loaded(door.get_target_space_key())
 
 	# Poll pocket manager until the slot becomes occupied (success) or
 	# times out. The auto-test warm-up path uses a burst instantiation budget
 	# so cold-cache source-backed interior loads don't fail before the measured
 	# transition starts.
 	var start_ms: int = Time.get_ticks_msec()
-	var timeout_ms: int = 30000
+	var timeout_ms: int = 90000
 	var occupied_frame: int = -1
 	while Time.get_ticks_msec() - start_ms < timeout_ms:
 		await get_tree().process_frame
-		if _cell_manager.has_method("process_async_payloads"):
-			_cell_manager.call("process_async_payloads", 4000)
-		_cell_manager.process_async_instantiation(
-			25.0,
-			_camera.global_position,
-			-_camera.global_basis.z
-		)
-		# Force pocket manager update so async polling fires
-		_pocket_manager.update(_camera.global_position, get_process_delta_time())
 		var slot_any = _pocket_manager._get_slot_for_cell_any(dp.interior_name)
 		if slot_any and slot_any.is_occupied:
 			occupied_frame = Engine.get_frames_drawn()
 			break
 
 	if occupied_frame < 0:
-		Log.error("testing", "[AUTO-TEST] TIMEOUT waiting for pocket load of '%s' (30s)" % dp.interior_name)
+		var loading_stats: Dictionary = _cell_manager.get_loading_stats() if _cell_manager.has_method("get_loading_stats") else {}
+		Log.error("testing", "[AUTO-TEST] TIMEOUT waiting for pocket load of '%s' (90s), stats=%s" % [dp.interior_name, str(loading_stats)])
 		get_tree().quit(1)
 		return
 
@@ -190,26 +227,88 @@ func _auto_test_run() -> void:
 		dp.interior_name, Time.get_ticks_msec() - start_ms])
 
 	# Now activate the door to run a real transition
-	var door = _pocket_manager.get_closest_door()
 	if not door:
-		Log.error("testing", "[AUTO-TEST] No closest door within INTERACT_RADIUS after teleport — abort")
+		Log.error("testing", "[AUTO-TEST] DoorInfo unavailable after pocket load")
 		get_tree().quit(1)
 		return
 
-	Log.info("testing", "[AUTO-TEST] Calling enter_interior for '%s'" % door.target_cell_name)
-	var ok: bool = await _pocket_manager.enter_interior(door)
+	Log.info("testing", "[AUTO-TEST] Interacting with raycast target for '%s'" % door.target_cell_name)
+	_interact_with_target()
+	var enter_start_ms: int = Time.get_ticks_msec()
+	while not _pocket_manager.is_inside() and Time.get_ticks_msec() - enter_start_ms < 10000:
+		await get_tree().process_frame
+	if not _pocket_manager.is_inside():
+		Log.error("testing", "[AUTO-TEST] raycast DoorInteractable activation did not enter interior")
+		get_tree().quit(1)
+		return
+
+	# Wait 2 frames for _on_transition_completed to fire and the active pocket
+	# state to settle before asserting the return path.
+	await get_tree().process_frame
+	await get_tree().process_frame
+	if not _pocket_manager.is_inside():
+		Log.error("testing", "[AUTO-TEST] entered transition completed but manager is not inside")
+		get_tree().quit(1)
+		return
+
+	var active_slot = _pocket_manager._active_pocket
+	if active_slot == null or active_slot.doors_inside.is_empty():
+		Log.error("testing", "[AUTO-TEST] active pocket has no registered interior doors")
+		get_tree().quit(1)
+		return
+
+	var exit_door = null
+	for candidate in active_slot.doors_inside:
+		if not candidate.has_interior_target():
+			exit_door = candidate
+			break
+	if exit_door == null:
+		Log.error("testing", "[AUTO-TEST] no exterior exit door registered in '%s'" % active_slot.cell_name)
+		get_tree().quit(1)
+		return
+
+	Log.info("testing", "[AUTO-TEST] Calling exit_to_exterior through '%s'" % exit_door.instance_key)
+	var ok: bool = await _pocket_manager.exit_to_exterior(exit_door)
 	if not ok:
-		Log.error("testing", "[AUTO-TEST] enter_interior() returned false")
+		Log.error("testing", "[AUTO-TEST] exit_to_exterior() returned false")
 		get_tree().quit(1)
 		return
 
-	# Wait 2 frames for _on_transition_completed to fire
 	await get_tree().process_frame
 	await get_tree().process_frame
+	if _pocket_manager.is_inside():
+		Log.error("testing", "[AUTO-TEST] exit transition completed but manager is still inside")
+		get_tree().quit(1)
+		return
+	if not RenderLayersScript.has_exterior_world(_camera.cull_mask) or RenderLayersScript.has_interior_world(_camera.cull_mask):
+		Log.error("testing", "[AUTO-TEST] camera cull mask was not restored to exterior world layers: 0x%X" % _camera.cull_mask)
+		get_tree().quit(1)
+		return
+	if not RenderLayersScript.has_water_surface(_camera.cull_mask):
+		Log.error("testing", "[AUTO-TEST] camera cull mask lost persistent water layer: 0x%X" % _camera.cull_mask)
+		get_tree().quit(1)
+		return
 
 	var verdict: String = "PASS" if _transition_peak_ms <= _HICCUP_MS_THRESHOLD else "FAIL"
-	Log.info("testing", "[AUTO-TEST] RESULT: transition peak=%.2f ms [%s]" % [_transition_peak_ms, verdict])
-	get_tree().quit(0 if verdict == "PASS" else 2)
+	Log.info("testing", "[AUTO-TEST] RESULT: enter+exit complete, last transition peak=%.2f ms [%s]" % [_transition_peak_ms, verdict])
+	await _finish_auto_test(0 if verdict == "PASS" else 2)
+
+
+func _finish_auto_test(exit_code: int) -> void:
+	Log.info("testing", "[AUTO-TEST] cleanup begin")
+	if _pocket_manager != null and _pocket_manager.has_method("cleanup"):
+		Log.info("testing", "[AUTO-TEST] cleanup pocket manager")
+		_pocket_manager.cleanup()
+	if _cell_manager != null and _cell_manager.has_method("fast_cleanup"):
+		Log.info("testing", "[AUTO-TEST] cleanup cell manager")
+		_cell_manager.fast_cleanup()
+	for child: Node in get_children():
+		if child.name.begins_with("Cell_"):
+			child.queue_free()
+	for i in range(5):
+		await get_tree().process_frame
+	Log.info("testing", "[AUTO-TEST] cleanup quit")
+	get_tree().quit(exit_code)
 
 
 func _setup_environment() -> void:
@@ -243,9 +342,19 @@ func _setup_camera() -> void:
 	_camera.name = "FlyCamera"
 	_camera.current = true
 	_camera.far = 2000.0
+	_camera.cull_mask = RenderLayersScript.with_water_surface(_camera.cull_mask)
 	_camera.position = Vector3(0, 30, 50)
 	add_child(_camera)
 	Input.mouse_mode = Input.MOUSE_MODE_CAPTURED
+
+
+func _setup_interaction() -> void:
+	_interaction_raycaster = InteractionRaycasterScript.new()
+	_interaction_raycaster.name = "InteractionRaycaster"
+	_interaction_raycaster.camera = _camera
+	_interaction_raycaster.max_distance = _INTERACTION_RAY_LENGTH
+	_interaction_raycaster.prompt_changed.connect(_on_interact_prompt_changed)
+	_camera.add_child(_interaction_raycaster)
 
 
 func _setup_ui() -> void:
@@ -259,6 +368,23 @@ func _setup_ui() -> void:
 	_info_label.add_theme_constant_override("shadow_offset_x", 1)
 	_info_label.add_theme_constant_override("shadow_offset_y", 1)
 	canvas.add_child(_info_label)
+
+	_prompt_label = Label.new()
+	_prompt_label.name = "DoorPrompt"
+	_prompt_label.horizontal_alignment = HORIZONTAL_ALIGNMENT_CENTER
+	_prompt_label.vertical_alignment = VERTICAL_ALIGNMENT_CENTER
+	_prompt_label.add_theme_font_size_override("font_size", 20)
+	_prompt_label.add_theme_color_override("font_color", Color.WHITE)
+	_prompt_label.add_theme_color_override("font_shadow_color", Color(0, 0, 0, 0.8))
+	_prompt_label.add_theme_constant_override("shadow_offset_x", 2)
+	_prompt_label.add_theme_constant_override("shadow_offset_y", 2)
+	_prompt_label.set_anchors_preset(Control.PRESET_CENTER_BOTTOM)
+	_prompt_label.offset_top = -80
+	_prompt_label.offset_bottom = -40
+	_prompt_label.offset_left = -260
+	_prompt_label.offset_right = 260
+	_prompt_label.visible = false
+	canvas.add_child(_prompt_label)
 
 
 func _load_exterior_cells() -> void:
@@ -284,8 +410,14 @@ func _scan_doors() -> void:
 			var dest: CellRecord = ESMManager.get_cell(ref.teleport_cell)
 			if not dest or not dest.is_interior():
 				continue
+			var instance_key := ""
+			if ref.has_meta("transition_portal_key"):
+				instance_key = str(ref.get_meta("transition_portal_key"))
+			if instance_key.is_empty():
+				instance_key = str(InteriorPocketManagerScript.make_exterior_door_instance_key(grid, ref.ref_id, ref.ref_num))
 			_door_pairs.append({
 				"ref_id": str(ref.ref_id),
+				"instance_key": instance_key,
 				"exterior_grid": grid,
 				"interior_name": ref.teleport_cell,
 				"door_pos_mw": ref.position,
@@ -308,6 +440,76 @@ func _scan_doors() -> void:
 	Log.info("testing", "Found %d doors in Seyda Neen" % _door_pairs.size())
 
 
+func _log_exterior_door_node_summary() -> void:
+	var spawned_doors: int = 0
+	var spawned_with_meshes: int = 0
+	var source_type_counts: Dictionary = {}
+	for node: Node in _iter_nodes(self):
+		if not node is Node3D:
+			continue
+		if node.has_meta("source_type"):
+			var source_type := str(node.get_meta("source_type"))
+			source_type_counts[source_type] = int(source_type_counts.get(source_type, 0)) + 1
+		var key: String = _get_node_door_instance_key(node)
+		if key.is_empty():
+			continue
+		spawned_doors += 1
+		if _count_visible_meshes(node) > 0:
+			spawned_with_meshes += 1
+	Log.info("testing", "Spawned exterior door nodes: %d (%d with visible meshes)" % [
+		spawned_doors,
+		spawned_with_meshes,
+	])
+	Log.info("testing", "Spawned source_type counts: %s" % str(source_type_counts))
+
+
+func _find_exterior_door_node(instance_key: String) -> Node3D:
+	if instance_key.is_empty():
+		return null
+	for node: Node in _iter_nodes(self):
+		if not node is Node3D:
+			continue
+		if _get_node_door_instance_key(node) == instance_key:
+			return node as Node3D
+	return null
+
+
+func _get_node_door_instance_key(node: Node) -> String:
+	if node == null:
+		return ""
+	if "door_instance_key" in node:
+		return str(node.get("door_instance_key"))
+	var property_value: Variant = node.get("door_instance_key")
+	if property_value != null and not str(property_value).is_empty():
+		return str(property_value)
+	if node.has_meta("door_instance_key"):
+		return str(node.get_meta("door_instance_key"))
+	if node.has_meta("transition_portal_key"):
+		return str(node.get_meta("transition_portal_key"))
+	return ""
+
+
+func _count_visible_meshes(root: Node) -> int:
+	var count := 0
+	for node: Node in _iter_nodes(root):
+		if node is MeshInstance3D:
+			var mesh_node := node as MeshInstance3D
+			if mesh_node.visible and mesh_node.mesh != null:
+				count += 1
+	return count
+
+
+func _iter_nodes(root: Node) -> Array[Node]:
+	var out: Array[Node] = []
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		out.append(node)
+		for child: Node in node.get_children():
+			stack.append(child)
+	return out
+
+
 func _input(event: InputEvent) -> void:
 	if event is InputEventMouseMotion and _mouse_captured:
 		_yaw -= event.relative.x * 0.003
@@ -318,10 +520,12 @@ func _input(event: InputEvent) -> void:
 		_mouse_captured = not _mouse_captured
 		Input.mouse_mode = Input.MOUSE_MODE_CAPTURED if _mouse_captured else Input.MOUSE_MODE_VISIBLE
 
+	if event.is_action_pressed(&"interact"):
+		_interact_with_target()
+		return
+
 	if event is InputEventKey and event.pressed:
 		match event.keycode:
-			KEY_E:
-				_activate_door()
 			KEY_TAB:
 				_cycle_door()
 			KEY_F1:
@@ -345,15 +549,14 @@ func _process(delta: float) -> void:
 	_track_frame_time(delta)
 	_update_camera(delta)
 
-	# CRITICAL PUMP: In the main scene, NativeStreamingManager calls
-	# CellManager.process_async_instantiation() every frame. This test
-	# scene doesn't run NativeStreamingManager, so we call it here.
-	# Without this, async cell loads kick off, background parsing
-	# completes, entries get queued for main-thread instantiation, and
-	# they sit in the queue forever because nothing drains it. The
-	# pocket manager's async poll would then see is_async_complete() ==
-	# false indefinitely and the slot stays stuck in is_loading=true.
+	# CRITICAL PUMP: In the main scene, NativeStreamingManager drives both
+	# payload publication and scene-tree instantiation every frame. This
+	# verifier has no NativeStreamingManager, so it must do both itself.
+	# If payload publication is skipped, a pocket request can stay incomplete
+	# forever even while the player is standing in preload range.
 	if _cell_manager:
+		if _cell_manager.has_method("process_async_payloads"):
+			_cell_manager.call("process_async_payloads", 4000)
 		_cell_manager.process_async_instantiation(
 			4.0,
 			_camera.global_position,
@@ -362,6 +565,7 @@ func _process(delta: float) -> void:
 
 	if _pocket_manager:
 		_pocket_manager.update(_camera.global_position, delta)
+	_update_interaction_prompt()
 	_update_ui()
 
 
@@ -425,19 +629,25 @@ func _update_camera(delta: float) -> void:
 	_camera.basis = basis
 	var velocity := Vector3.ZERO
 	var speed := _camera_speed
-	if Input.is_physical_key_pressed(KEY_SHIFT):
+	if Input.is_action_pressed(&"sprint"):
 		speed *= 3.0
-	if Input.is_physical_key_pressed(KEY_W):
-		velocity -= basis.z
-	if Input.is_physical_key_pressed(KEY_S):
-		velocity += basis.z
-	if Input.is_physical_key_pressed(KEY_A):
-		velocity -= basis.x
-	if Input.is_physical_key_pressed(KEY_D):
-		velocity += basis.x
-	if Input.is_physical_key_pressed(KEY_CTRL):
+	var move_input: Vector2 = Input.get_vector(
+		&"move_left",
+		&"move_right",
+		&"move_forward",
+		&"move_backward"
+	)
+	if move_input.y < 0.0:
+		velocity -= basis.z * absf(move_input.y)
+	elif move_input.y > 0.0:
+		velocity += basis.z * move_input.y
+	if move_input.x < 0.0:
+		velocity -= basis.x * absf(move_input.x)
+	elif move_input.x > 0.0:
+		velocity += basis.x * move_input.x
+	if Input.is_action_pressed(&"crouch"):
 		velocity -= basis.y
-	if Input.is_physical_key_pressed(KEY_SPACE):
+	if Input.is_action_pressed(&"jump"):
 		velocity += basis.y
 	if velocity.length_squared() > 0:
 		_camera.position += velocity.normalized() * speed * delta
@@ -452,57 +662,81 @@ func _update_ui() -> void:
 		return
 
 	var dp: Dictionary = _door_pairs[_current_door_index]
+	var selected_key := str(dp.get("instance_key", ""))
+	var selected_door = null
+	if _pocket_manager != null and not selected_key.is_empty():
+		selected_door = _pocket_manager.get_door_info_by_instance_key(StringName(selected_key))
+	var selected_state := _get_door_transition_state(selected_door)
+	var selected_blocker := _get_door_transition_blocker(selected_door)
+
 	var text := "Interior Transition Test\n"
 	text += "Door [%d/%d]: %s -> %s (%d refs)\n" % [
-		_current_door_index + 1, _door_pairs.size(),
-		dp.ref_id, dp.interior_name, dp.interior_ref_count
+		_current_door_index + 1,
+		_door_pairs.size(),
+		dp.ref_id,
+		dp.interior_name,
+		dp.interior_ref_count,
 	]
 
-	# Proximity readout — distance to CURRENT tab-selected door, plus a
-	# prominent "PRESS E" prompt when within INTERACT_RADIUS (3m).
 	if _camera:
 		var target_pos: Vector3 = CS.vector_to_godot(dp.door_pos_mw)
 		var dist: float = _camera.global_position.distance_to(target_pos)
-		var in_range: bool = dist <= 3.0
-		if in_range:
-			text += ">>> [ E ] PRESS E TO ENTER  (%.1fm) <<<\n" % dist
-		elif dist <= 10.0:
-			text += "distance to target door: %.1fm (walk to <3m, then E)\n" % dist
+		text += "TAB target: %.1fm | preload state: %s\n" % [dist, selected_state]
+		if selected_state == "blocked":
+			text += "  blocker: %s\n" % selected_blocker
+		elif selected_state == "not loaded":
+			text += "  TAB preloads this interior; aim at the visible door for the real prompt.\n"
+		elif selected_state == "loading":
+			text += "  loading selected pocket; keep moving/aiming, then interact when READY.\n"
 		else:
-			text += "distance to target door: %.1fm (walk closer — target is %s)\n" % [dist, dp.interior_name]
+			text += "  READY: move into range, aim at the visible door, press E.\n"
+
+	if not _manual_status.is_empty():
+		text += "Status: %s\n" % _manual_status
 
 	if _pocket_manager:
 		text += _pocket_manager.get_debug_info() + "\n"
-		# Show pocket slot positions for debugging
 		@warning_ignore("untyped_declaration")
 		for slot in _pocket_manager._slots:
 			if slot.is_occupied and slot.cell_node:
-				text += "  POCKET '%s': pos=%s children=%d\n" % [
-					slot.cell_name, slot.cell_node.position, slot.cell_node.get_child_count()]
+				text += "  POCKET '%s': READY pos=%s children=%d\n" % [
+					slot.cell_name,
+					slot.cell_node.position,
+					slot.cell_node.get_child_count(),
+				]
 			elif slot.is_loading:
 				text += "  POCKET '%s': LOADING (req=%d, phase=%d)\n" % [
-					slot.cell_name, slot.async_request_id, slot.finish_up_phase]
+					slot.cell_name,
+					slot.async_request_id,
+					slot.finish_up_phase,
+				]
 
-	# Frame-time readout — this is what roaster will judge the P0 fix on.
 	text += "\n[FRAMETIME] window peak(1s)=%.2f ms  threshold=%.1f ms  run=%s\n" % [
-		_peak_window_ms, _HICCUP_MS_THRESHOLD, "ON" if _run_mode else "OFF"]
+		_peak_window_ms,
+		_HICCUP_MS_THRESHOLD,
+		"ON" if _run_mode else "OFF",
+	]
 	if _transition_recording:
 		var live_path: String = "BRIDGE" if _last_transition_bridge else "NORMAL"
-		text += "[FRAMETIME] TRANSITION RECORDING (%s) — peak so far=%.2f ms\n" % [live_path, _transition_peak_ms]
+		text += "[FRAMETIME] TRANSITION RECORDING (%s) - peak so far=%.2f ms\n" % [live_path, _transition_peak_ms]
 	elif _transition_peak_ms > 0.0:
 		var verdict: String = "PASS" if _transition_peak_ms <= _HICCUP_MS_THRESHOLD else "FAIL"
 		var path: String = "BRIDGE" if _last_transition_bridge else "NORMAL"
 		text += "[FRAMETIME] last transition peak=%.2f ms  path=%s  [%s]\n" % [
-			_transition_peak_ms, path, verdict]
+			_transition_peak_ms,
+			path,
+			verdict,
+		]
 
 	@warning_ignore("unsafe_property_access")
 	var mode_str: String = "SEAMLESS (walk-through)" if _pocket_manager.seamless_enabled else "CLASSIC (E to teleport)"
-	text += "\nMode: %s | E — activate door | TAB — Next door\n" % mode_str
-	text += "F1 — Stencil debug (%s) | F2 — Cycle layers | F3 — Wireframe | F4 — Depth test (%s) | F5 — Toggle mode | R — Run mode (%s)\n" % [
+	text += "\nMode: %s | Aim at visible door + E | TAB preloads next door\n" % mode_str
+	text += "F1 stencil (%s) | F2 layers | F3 wireframe | F4 depth (%s) | F5 mode | R run (%s)\n" % [
 		"ON" if _stencil_debug else "OFF",
 		"ON" if _depth_test_mode else "OFF",
-		"ON" if _run_mode else "OFF"]
-	text += "WASD+mouse — Move | Shift — Fast | Cam layers: 0x%X" % (_camera.cull_mask if _camera else 0)
+		"ON" if _run_mode else "OFF",
+	]
+	text += "Move: InputMap movement + mouse | Sprint: InputMap sprint | Cam layers: 0x%X" % (_camera.cull_mask if _camera else 0)
 	_info_label.text = text
 
 
@@ -518,31 +752,164 @@ func _sync_camera_from_basis() -> void:
 		rad_to_deg(_yaw), rad_to_deg(_pitch)])
 
 
-func _activate_door() -> void:
-	if not _pocket_manager:
+func _interact_with_target() -> void:
+	if _interaction_raycaster == null:
+		Log.info("interaction", "[TEST_INTERACT] no raycaster wired")
+		return
+	var target: Interactable = _interaction_raycaster.get_current_target()
+	if target == null:
+		_manual_status = "No interactable under crosshair"
+		Log.info("interaction", "[TEST_INTERACT] no target under crosshair")
+		return
+	Log.info("interaction", "[TEST_INTERACT] target=%s prompt='%s'" % [
+		target.name,
+		target.get_prompt_text(),
+	])
+	target.interact(_camera)
+
+
+func _on_door_interactable_activated(door_instance_key: String, _door_record: Variant, _player: Node3D) -> void:
+	if _pocket_manager == null:
+		return
+	if _pocket_manager.has_method("is_transitioning") and bool(_pocket_manager.call("is_transitioning")):
+		Log.debug("streaming", "[TEST_DOOR_INTERACT] ignoring '%s' while transition is active" % door_instance_key)
+		return
+	var door = _pocket_manager.get_door_info_by_instance_key(StringName(door_instance_key))
+	if door == null:
+		_manual_status = "No DoorInfo for %s" % door_instance_key
+		Log.warn("streaming", "[TEST_DOOR_INTERACT] no DoorInfo for instance key '%s'" % door_instance_key)
 		return
 
-	@warning_ignore("untyped_declaration")
+	var state := _get_door_transition_state(door)
+	if state != "ready":
+		_preload_door(door)
+		_manual_status = "Loading %s... wait for READY, then press E again" % door.get_target_space_key()
+		Log.info("streaming", "[TEST_DOOR_INTERACT] door '%s' state=%s; preload requested" % [
+			door.instance_key,
+			state,
+		])
+		return
+
+	await _activate_door(door)
+
+
+func _activate_door(door: Variant) -> void:
+	if not _pocket_manager or door == null:
+		return
+	if _pocket_manager.has_method("is_transitioning") and bool(_pocket_manager.call("is_transitioning")):
+		return
+
 	_camera_frozen = true
+	_manual_status = "Transitioning..."
 	if _pocket_manager.is_inside():
-		var closest = _pocket_manager.get_closest_door()
-		if closest:
-			var dest: CellRecord = ESMManager.get_cell(closest.target_cell_name)
-			if dest and dest.is_interior():
-				await _pocket_manager.transition_interior_to_interior(closest)
-			else:
-				await _pocket_manager.exit_to_exterior(closest)
-			_sync_camera_from_basis()
+		if door.has_method("has_interior_target") and bool(door.call("has_interior_target")):
+			await _pocket_manager.transition_interior_to_interior(door)
 		else:
-			Log.info("testing", "No door nearby (need to be within 3m)")
+			await _pocket_manager.exit_to_exterior(door)
 	else:
-		var closest = _pocket_manager.get_closest_door()
-		if closest:
-			await _pocket_manager.enter_interior(closest)
-			_sync_camera_from_basis()
-		else:
-			Log.info("testing", "No door nearby (need to be within 3m)")
+		var success: bool = await _pocket_manager.enter_interior(door)
+		if not success:
+			_manual_status = "Enter failed: %s" % door.get_target_space_key()
+			Log.error("streaming", "[TEST_DOOR_INTERACT] enter_interior failed for '%s'" % door.get_target_space_key())
+	_sync_camera_from_basis()
 	_camera_frozen = false
+	if _manual_status == "Transitioning...":
+		_manual_status = ""
+
+
+func _find_targeted_door():
+	if _interaction_raycaster == null or _pocket_manager == null:
+		return null
+	_interaction_raycaster.call("_update_target")
+	var target: Interactable = _interaction_raycaster.get_current_target()
+	if target == null:
+		return null
+	var instance_key := _get_node_door_instance_key(target)
+	if instance_key.is_empty():
+		return null
+	return _pocket_manager.get_door_info_by_instance_key(StringName(instance_key))
+
+
+func _preload_door(door: Variant) -> void:
+	if door == null or _pocket_manager == null:
+		return
+	if not door.has_method("has_interior_target") or not bool(door.call("has_interior_target")):
+		return
+	_pocket_manager._ensure_pocket_loaded(door.get_target_space_key())
+
+
+func _preload_selected_door() -> void:
+	if _current_door_index < 0 or _current_door_index >= _door_pairs.size():
+		return
+	var dp: Dictionary = _door_pairs[_current_door_index]
+	var door = _pocket_manager.get_door_info_by_instance_key(StringName(str(dp.get("instance_key", ""))))
+	if door != null:
+		_preload_door(door)
+
+
+func _get_door_transition_state(door: Variant) -> String:
+	if door == null:
+		return "blocked"
+	if _pocket_manager == null:
+		return "blocked"
+	if _pocket_manager != null and _pocket_manager.is_inside():
+		if not door.has_method("has_interior_target") or not bool(door.call("has_interior_target")):
+			return "ready"
+	if not door.has_method("has_interior_target") or not bool(door.call("has_interior_target")):
+		return "ready"
+	var slot = _pocket_manager._get_slot_for_cell_any(door.get_target_space_key())
+	if slot == null:
+		return "not loaded"
+	if slot.is_loading or slot.finish_up_phase >= 0:
+		return "loading"
+	var blocker: String = _pocket_manager._get_pocket_transition_blocker(slot)
+	return "ready" if blocker.is_empty() else "blocked"
+
+
+func _get_door_transition_blocker(door: Variant) -> String:
+	if door == null or _pocket_manager == null:
+		return "no door"
+	if not door.has_method("has_interior_target") or not bool(door.call("has_interior_target")):
+		return ""
+	var slot = _pocket_manager._get_slot_for_cell_any(door.get_target_space_key())
+	if slot == null:
+		return "not loaded"
+	if slot.is_loading or slot.finish_up_phase >= 0:
+		return "loading"
+	return _pocket_manager._get_pocket_transition_blocker(slot)
+
+
+func _on_interact_prompt_changed(interactable: Interactable, distance: float) -> void:
+	_prompt_interactable = interactable
+	_prompt_distance = distance
+	_update_interaction_prompt()
+
+
+func _update_interaction_prompt() -> void:
+	if _prompt_label == null:
+		return
+	if _prompt_interactable == null:
+		_prompt_label.visible = false
+		return
+	var text := _prompt_interactable.get_prompt_text()
+	var instance_key := _get_node_door_instance_key(_prompt_interactable)
+	if not instance_key.is_empty() and _pocket_manager != null:
+		var door = _pocket_manager.get_door_info_by_instance_key(StringName(instance_key))
+		var state := _get_door_transition_state(door)
+		match state:
+			"ready":
+				if _manual_status.begins_with("Loading "):
+					_manual_status = ""
+				_prompt_label.text = "[E] %s  (%.1fm)" % [text, _prompt_distance]
+			"not loaded":
+				_prompt_label.text = "[E] Load %s  (%.1fm)" % [text, _prompt_distance]
+			"loading":
+				_prompt_label.text = "Loading %s... wait" % door.get_target_space_key()
+			_:
+				_prompt_label.text = "Blocked: %s" % _get_door_transition_blocker(door)
+	else:
+		_prompt_label.text = "[E] %s  (%.1fm)" % [text, _prompt_distance]
+	_prompt_label.visible = true
 
 
 func _cycle_door() -> void:
@@ -561,10 +928,11 @@ func _teleport_to_door(index: int) -> void:
 		return
 	var dp: Dictionary = _door_pairs[index]
 	var door_pos: Vector3 = CS.vector_to_godot(dp.door_pos_mw)
-	_camera.position = door_pos + Vector3(0, 5, 10)
+	_camera.position = door_pos + Vector3(0, 1.6, 7.0)
 	_camera.look_at(door_pos)
 	_yaw = _camera.rotation.y
 	_pitch = _camera.rotation.x
+	_preload_selected_door()
 	Log.info("testing", "Camera at door [%d]: %s -> %s" % [index, dp.ref_id, dp.interior_name])
 
 
@@ -655,5 +1023,5 @@ func _toggle_seamless_mode() -> void:
 	if not _pocket_manager:
 		return
 	_pocket_manager.seamless_enabled = not _pocket_manager.seamless_enabled
-	var mode: String = "SEAMLESS (walk-through + portal preview)" if _pocket_manager.seamless_enabled else "CLASSIC (ENTER to teleport, fade-to-black)"
+	var mode: String = "SEAMLESS (walk-through + portal preview)" if _pocket_manager.seamless_enabled else "CLASSIC (E to teleport, fade-to-black)"
 	Log.info("testing", "Interior mode: %s" % mode)

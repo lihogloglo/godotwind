@@ -120,7 +120,7 @@ These operate alongside Godot's built-in volumetric fog.
 
 ---
 
-## 8. Impostor lighting (FAR tier 1000–5000 m)
+## 8. Impostor lighting (FAR tier 400-5000 m)
 
 - Inline shader in `native_impostor_renderer.gd::_get_octahedral_shader_code()` (~240 lines).
 - Two variants: v4 (legacy azimuthal 16-frame 4×4) and v5 (octahedral tri-sample 8×8 with yaw-rotated normals).
@@ -128,7 +128,7 @@ These operate alongside Godot's built-in volumetric fog.
 - PBR lighting applied: roughness=0.85, specular=0.3.
 - v5: Brucks tri-sample blending (barycentric weights across 3 nearest octahedral grid cells).
 - v5: normals rotated by per-instance yaw before view-space transform (fixes inverted lighting on rotated instances).
-- Shadow receive YES, shadow cast NO (avoids rectangular billboard shadows at 1000 m+).
+- Shadow receive YES, shadow cast NO (avoids rectangular billboard shadows in the FAR tier).
 - **No emissive data baked** — impostors are dark at night.
 
 ---
@@ -140,9 +140,9 @@ Tier ranges from `distance_utils.gd` (post-Phase-5, 2026-04-17):
 | Tier | Range | Dynamic Lights | Shadows |
 |---|---|---|---|
 | **NEAR** | 0–150 m | OmniLight3D (animated) or RS server-direct (static), lazy-spawn beyond 60 m | Budget-managed (max 8) |
-| **MID** | 0–300 m (HLOD on) / 0–500 m (HLOD off) | None | None |
-| **HLOD** | 300–1000 m | None | None |
-| **FAR** | 1000–5000 m | None (impostor-baked normals only) | None |
+| **MID** | 150-400 m static visual bridge | None | None |
+| **HLOD** | Optional 400-1000 m comparison tier | None | None |
+| **FAR** | 400-5000 m, capped by view distance | None (impostor-baked normals only) | None |
 
 **Key gap:** dynamic lights are completely invisible beyond 150 m. A town 300 m away is pitch black at night. This is the open item driving `docs/plans/lighting_roadmap.md` (distant light billboards / Priority 2).
 

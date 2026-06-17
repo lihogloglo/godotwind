@@ -12,8 +12,9 @@ const WaterVolumeScript := preload("res://src/core/water/water_volume.gd")
 const FastWaterVolumeShader := preload("res://tests/visual/test_water_interaction_fast_volume.gdshader")
 const DefaultWaterNormalTexture := preload("res://assets/water/water_normal.png")
 const DefaultWaterFoamTexture := preload("res://src/core/water/textures/foam_albedo.png")
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
 
-const WATER_RENDER_LAYER_MASK: int = 1 << 19
+const WATER_RENDER_LAYER_MASK: int = RenderLayersScript.WATER_SURFACE
 const SMOKE_GPU_MS_LIMIT := 2.0
 const GRAB_RANGE_M := 40.0
 const GRAB_DISTANCE_M := 5.0

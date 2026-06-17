@@ -15,7 +15,7 @@ extends Node
 
 const ModelPrebakerScript := preload("res://src/tools/prebaking/model_prebaker.gd")
 const ImpostorBakerV3Script := preload("res://src/tools/prebaking/impostor_baker_v3.gd")
-const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
+const MorrowindImpostorCandidatesScript := preload("res://src/core/world/morrowind/morrowind_impostor_candidates.gd")
 
 
 func _ready() -> void:
@@ -79,7 +79,7 @@ func _bake_models_headless() -> Dictionary:
 
 
 func _bake_impostors_headless(max_count: int = -1, explicit_models: Array[String] = []) -> Dictionary:
-	var candidates = ImpostorCandidatesScript.new()
+	var candidates = MorrowindImpostorCandidatesScript.new()
 	var model_paths: Array[String] = explicit_models.duplicate()
 	if model_paths.is_empty():
 		model_paths = candidates.get_all_impostor_models()

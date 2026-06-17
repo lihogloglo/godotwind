@@ -270,10 +270,6 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 		sample["distant_light_page_count"] = stats.get("distant_light_page_count", 0)
 		sample["distant_light_scan_us"] = stats.get("distant_light_scan_us", 0)
 		sample["distant_light_rebuild_us"] = stats.get("distant_light_rebuild_us", 0)
-		if _streaming_manager.has_method("get_static_renderer_stats"):
-			var srs := _streaming_manager.get_static_renderer_stats()
-			sample["registry_batches"] = srs.get("registry_batches", 0)
-			sample["registry_slots"] = srs.get("registry_slots", 0)
 		if _streaming_manager.has_method("get_hlod_stats"):
 			var hls: Dictionary = _streaming_manager.get_hlod_stats()
 			sample["chunks_tier_0"] = hls.get("chunks_tier_0", 0)
@@ -298,8 +294,6 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	var prims_sum := 0.0
 	var vram_max := 0.0
 	var mid_vis_max := 0
-	var reg_slots_max := 0
-	var reg_batches_max := 0
 	var hlod_cells_max := 0
 	var hlod_surfaces_max := 0
 	var hlod_materials_max := 0
@@ -328,8 +322,6 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		prims_sum += float(s.get("prims", 0))
 		vram_max = maxf(vram_max, float(s.get("vram_mb", 0.0)))
 		mid_vis_max = maxi(mid_vis_max, int(s.get("mid_visible", 0)))
-		reg_slots_max = maxi(reg_slots_max, int(s.get("registry_slots", 0)))
-		reg_batches_max = maxi(reg_batches_max, int(s.get("registry_batches", 0)))
 		hlod_cells_max = maxi(hlod_cells_max, int(s.get("hlod_cells", 0)))
 		hlod_surfaces_max = maxi(hlod_surfaces_max, int(s.get("hlod_chunk_surfaces", 0)))
 		hlod_materials_max = maxi(hlod_materials_max, int(s.get("hlod_chunk_materials", 0)))
@@ -359,8 +351,6 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"prims_avg": prims_sum / n,
 		"vram_mb_max": vram_max,
 		"mid_visible_max": mid_vis_max,
-		"registry_slots_max": reg_slots_max,
-		"registry_batches_max": reg_batches_max,
 		"hlod_cells_max": hlod_cells_max,
 		"hlod_chunk_surfaces_max": hlod_surfaces_max,
 		"hlod_chunk_materials_max": hlod_materials_max,
@@ -421,6 +411,7 @@ func _finish() -> void:
 
 func _write_ladder_json() -> void:
 	var path := "%s/bench_ladder.json" % _output_dir
+	var mode_meta := _get_benchmark_mode_metadata_snapshot()
 	var payload := {
 		"meta": {
 			"scenario": "bench_ladder",
@@ -430,8 +421,10 @@ func _write_ladder_json() -> void:
 			"toggle_apply_delay_s": TOGGLE_APPLY_DELAY_S,
 			"sample_duration_s": SAMPLE_DURATION_S,
 			"ladder_add_order": LADDER_ADD_ORDER,
+			"benchmark_mode_metadata": mode_meta,
 		},
 		"stamp": _stamp,
+		"benchmark_mode_metadata": mode_meta,
 		"rungs": _rungs,
 	}
 	var file := FileAccess.open(path, FileAccess.WRITE)
@@ -441,6 +434,15 @@ func _write_ladder_json() -> void:
 	file.store_string(JSON.stringify(payload, "\t"))
 	file.close()
 	Log.info("tools", "[LADDER] wrote %s (rungs=%d)" % [path, _rungs.size()])
+
+
+func _get_benchmark_mode_metadata_snapshot() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_benchmark_mode_metadata"):
+		return _streaming_manager.call("get_benchmark_mode_metadata")
+	if _streaming_manager:
+		var stats: Dictionary = _streaming_manager.get_stats()
+		return stats.get("benchmark_mode_metadata", {})
+	return {}
 
 
 func _build_final_summary() -> Dictionary:
@@ -454,12 +456,12 @@ func _build_final_summary() -> Dictionary:
 			"fps_min": s.get("fps_min", 0.0),
 			"draws_avg": s.get("draws_avg", 0.0),
 			"objs_avg": s.get("objs_avg", 0.0),
-			"registry_slots_max": s.get("registry_slots_max", 0),
 			"hlod_cells_max": s.get("hlod_cells_max", 0),
 			"impostors_max": s.get("impostors_max", 0),
 		})
 	return {
 		"output_dir": _output_dir,
 		"rung_count": _rungs.size(),
+		"benchmark_mode_metadata": _get_benchmark_mode_metadata_snapshot(),
 		"rows": rows,
 	}

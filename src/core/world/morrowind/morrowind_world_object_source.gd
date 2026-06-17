@@ -17,6 +17,7 @@ const MW_LIGHT_FLAG_PULSE: int = 0x0080
 const MW_LIGHT_FLAG_PULSE_SLOW: int = 0x0100
 
 var _manifest_cache: Dictionary[Vector2i, RefCounted] = {}
+var _interior_manifest_cache: Dictionary[String, RefCounted] = {}
 var _object_cache: Dictionary[StringName, RefCounted] = {}
 var _spawn_payload_cache: Dictionary[StringName, Dictionary] = {}
 var _source_cell_cache: Dictionary[Vector2i, Variant] = {}
@@ -25,6 +26,7 @@ var _esm_manager: Variant = null
 
 func clear_cache() -> void:
 	_manifest_cache.clear()
+	_interior_manifest_cache.clear()
 	_object_cache.clear()
 	_spawn_payload_cache.clear()
 	_source_cell_cache.clear()
@@ -41,21 +43,26 @@ func get_cell_manifest(cell_grid: Vector2i) -> Variant:
 	if cell_record == null:
 		return null
 
-	var manifest: RefCounted = ManifestScript.new(cell_grid)
 	_source_cell_cache[cell_grid] = cell_record
-	for ref in cell_record.references:
-		if ref.is_deleted:
-			continue
-		var record_type: Array = [""]
-		var base_record: Variant = esm.get_any_record(str(ref.ref_id), record_type)
-		if base_record == null:
-			continue
-		var record: Variant = _make_record(cell_grid, ref, base_record, str(record_type[0]))
-		if record != null:
-			manifest.add_object(record)
-			_object_cache[record.object_id] = record
+	var manifest: RefCounted = _make_manifest_from_cell(cell_record, cell_grid)
 
 	_manifest_cache[cell_grid] = manifest
+	return manifest
+
+
+func get_interior_cell_manifest(cell_name: String) -> Variant:
+	if _interior_manifest_cache.has(cell_name):
+		return _interior_manifest_cache[cell_name]
+
+	var esm: Variant = _get_esm_manager()
+	if esm == null:
+		return null
+	var cell_record: Variant = esm.get_cell(cell_name)
+	if cell_record == null:
+		return null
+
+	var manifest: RefCounted = _make_manifest_from_cell(cell_record, Vector2i.ZERO, cell_name)
+	_interior_manifest_cache[cell_name] = manifest
 	return manifest
 
 
@@ -125,12 +132,32 @@ func _get_record_by_id(object_id: StringName) -> Variant:
 	return null
 
 
-func _make_record(cell_grid: Vector2i, ref: Variant, base_record: Variant, type_name: String) -> Variant:
+func _make_manifest_from_cell(cell_record: Variant, cell_grid: Vector2i, cell_name: String = "") -> RefCounted:
+	var esm: Variant = _get_esm_manager()
+	if esm == null:
+		return null
+	var manifest: RefCounted = ManifestScript.new(cell_grid)
+	manifest.cell_name = cell_name
+	for ref in cell_record.references:
+		if ref.is_deleted:
+			continue
+		var record_type: Array = [""]
+		var base_record: Variant = esm.get_any_record(str(ref.ref_id), record_type)
+		if base_record == null:
+			continue
+		var record: Variant = _make_record(cell_grid, ref, base_record, str(record_type[0]), cell_name)
+		if record != null:
+			manifest.add_object(record)
+			_object_cache[record.object_id] = record
+	return manifest
+
+
+func _make_record(cell_grid: Vector2i, ref: Variant, base_record: Variant, type_name: String, cell_name: String = "") -> Variant:
 	var model_path := _get_model_path(base_record)
 	var category := _category_for_type(type_name)
 	var flags := _capabilities_for(type_name, base_record, model_path)
 	var record: RefCounted = RecordScript.new()
-	record.object_id = RecordScript.make_object_id(cell_grid, str(ref.ref_id), int(ref.ref_num))
+	record.object_id = _make_object_id(cell_grid, str(ref.ref_id), int(ref.ref_num), cell_name)
 	record.record_id = StringName(_record_id_for(base_record, str(ref.ref_id)))
 	record.source_ref_id = StringName(str(ref.ref_id))
 	record.source_key = "%s:%s" % [type_name, str(record.object_id)]
@@ -162,6 +189,16 @@ func _make_record(cell_grid: Vector2i, ref: Variant, base_record: Variant, type_
 		record.light_is_fire = (light_flags & MW_LIGHT_FLAG_FIRE) != 0
 
 	return record
+
+
+func _make_object_id(cell_grid: Vector2i, source_ref_id: String, source_ref_num: int, cell_name: String = "") -> StringName:
+	if cell_name.is_empty():
+		return RecordScript.make_object_id(cell_grid, source_ref_id, source_ref_num)
+	return StringName("interior:%s:%s:%d" % [
+		cell_name.to_lower().replace(" ", "_").replace(",", ""),
+		source_ref_id.to_lower(),
+		source_ref_num,
+	])
 
 
 func _light_animation_for_flags(flags: int) -> int:
@@ -234,6 +271,11 @@ func _proximity_radius_for(type_name: String, base_record: Variant) -> float:
 
 func _capabilities_for(type_name: String, base_record: Variant, model_path: String) -> int:
 	var flags := 0
+	if CarryableRegistryScript.is_carryable(type_name, base_record):
+		flags |= RecordScript.CAP_GAMEPLAY | RecordScript.CAP_STATIC_VISUAL | RecordScript.CAP_COLLISION
+		if not model_path.is_empty():
+			flags |= RecordScript.CAP_IMPOSTOR
+		return flags
 	match type_name:
 		"static":
 			if not model_path.is_empty():

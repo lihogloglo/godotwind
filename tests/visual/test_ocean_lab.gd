@@ -22,9 +22,10 @@ const HorizonMapManagerScript := preload("res://src/core/world/horizon_map_manag
 const WettableObjectScript := preload("res://src/core/water/wettable_object.gd")
 const OBJECT_WET_SHADER := preload("res://src/core/shaders/object_wet.gdshader")
 const CS := preload("res://src/core/coordinate_system.gd")
+const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
 
 const SEA_LEVEL_DEFAULT: float = 0.0
-const WATER_RENDER_LAYER_MASK: int = 1 << 19
+const WATER_RENDER_LAYER_MASK: int = RenderLayersScript.WATER_SURFACE
 const WATERLINE_RECEIVER_LAYER_MASK: int = 1 << 18
 const CONTROLLED_REFRACTION_RECEIVER_LAYER_MASK: int = 1 << 17
 const BUOY_DEBUG_GRID: int = 40

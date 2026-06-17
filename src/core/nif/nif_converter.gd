@@ -3,7 +3,7 @@
 ## Supports skinned meshes with Skeleton3D, animations, and collision shapes
 ##
 ## Performance: When C# native code is available (NIFReader, NIFConverter),
-## mesh building is 2-5x faster. Use NativeBridge.has_native_nif() to check.
+## mesh building is 2-5x faster. Use NativeNIFBridge.has_native_nif() to check.
 class_name NIFConverter
 extends RefCounted
 
@@ -17,13 +17,13 @@ const AnimationConverter := preload("res://src/core/nif/nif_animation_converter.
 const CollisionBuilder := preload("res://src/core/nif/nif_collision_builder.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const MeshOptimizer := preload("res://addons/meshoptimizer/mesh_optimizer.gd")
-const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
+const NativeNIFBridgeScript := preload("res://src/core/nif/native_nif_bridge.gd")
 const StreamingPolicyScript := preload("res://src/core/world/streaming_policy.gd")
 
 ## Static flag to track if native C# is available (checked once at startup)
 static var _native_available: bool = false
 static var _native_checked: bool = false
-static var _native_bridge: NativeBridge = null
+static var _native_bridge: RefCounted = null
 
 ## Whether to use native C# for parsing (disabled by default until full integration)
 ## Native parsing is 20-50x faster but requires compatible conversion code.
@@ -34,11 +34,11 @@ static var use_native_parsing: bool = true
 static func is_native_available() -> bool:
 	if not _native_checked:
 		_native_checked = true
-		# Use NativeBridge to check for C# availability
-		_native_bridge = NativeBridgeScript.new()
+		# Use the importer-owned bridge to check for C# availability
+		_native_bridge = NativeNIFBridgeScript.new()
 		_native_available = _native_bridge.has_native_nif()
 		if _native_available:
-			Log.info("nif", "NIFConverter: C# native classes available via NativeBridge")
+			Log.info("nif", "NIFConverter: C# native classes available via NativeNIFBridge")
 		else:
 			Log.info("nif", "NIFConverter: C# native code not available (rebuild C# project to enable)")
 	return _native_available

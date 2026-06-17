@@ -141,9 +141,9 @@ func get_shapes_for_worker(model_path: String) -> Array:
 	return existing_shapes
 
 
-## Worker-safe warm of a prototype's shape pack. Called from Phase F's
-## `_worker_preregister_prototype` after the caller resolved `pack_path` on
-## the main thread via `ModelLoader.resolve_shape_pack_path`.
+## Worker-safe warm of a prototype's shape pack. Called by static-collision
+## worker paths after the caller resolved `pack_path` on the main thread via
+## `ModelLoader.resolve_shape_pack_path`.
 ##
 ## No-ops if the key is already cached or the pack fails to load (main-thread
 ## `get_shapes` will fall back to the walker for the affected prototype).

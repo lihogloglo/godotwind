@@ -18,6 +18,8 @@ var character_source: RefCounted = null
 var weather_provider: RefCounted = null
 var dialogue_provider: RefCounted = null
 var water_provider: RefCounted = null
+var transition_provider: RefCounted = null
+var impostor_candidates: RefCounted = null
 
 
 func initialize() -> Error:
@@ -30,7 +32,9 @@ func is_configured() -> bool:
 		or character_source != null \
 		or weather_provider != null \
 		or dialogue_provider != null \
-		or water_provider != null
+		or water_provider != null \
+		or transition_provider != null \
+		or impostor_candidates != null
 
 
 func is_object_streaming_configured() -> bool:
@@ -78,3 +82,11 @@ func get_dialogue_provider() -> RefCounted:
 
 func get_water_provider() -> RefCounted:
 	return water_provider
+
+
+func get_transition_provider() -> RefCounted:
+	return transition_provider
+
+
+func get_impostor_candidates() -> RefCounted:
+	return impostor_candidates

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Performance Observatory"
+  short_description: "Build benchmark and diagnostic foundations"
+  default_prompt: "Use $performance-observatory to continue Godotwind Pillar 3.0 benchmark and diagnostic work."

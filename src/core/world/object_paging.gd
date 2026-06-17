@@ -127,7 +127,6 @@ class PagingChunkData:
 	var index_count: int = 0
 	var estimated_bytes: int = 0
 	var covered_cells: Array[Vector2i] = []
-	var source_ref_nums: Dictionary = {}
 	var source_object_ids: Dictionary = {}
 	var source_bucket_counts: Dictionary = {}
 	var coverage_complete: bool = false
@@ -146,7 +145,6 @@ class MergePrepState:
 	var camera_world_pos: Vector3
 	var inputs: Array = []
 	var covered_cells: Array[Vector2i] = []
-	var source_ref_nums: Dictionary = {}
 	var source_object_ids: Dictionary = {}
 	var source_bucket_counts: Dictionary = {}
 	var bucket_total_counts: Dictionary = {}
@@ -769,7 +767,6 @@ func get_active_coverage_manifest() -> Dictionary:
 		"complete_bucket_counts": source_bucket_counts.duplicate(),
 		"covered_cells": covered_cells,
 		"source_object_ids": source_object_ids,
-		"source_ref_nums": source_object_ids,
 		"active_covered_refs": source_object_ids.size(),
 		"active_covered_cells": covered_cells.size(),
 		"active_complete_coverage_chunks": complete_chunks,
@@ -1531,7 +1528,6 @@ func _build_manifest_for_state(state: MergePrepState) -> Dictionary:
 		"size_level": state.size_level,
 		"covered_cells": state.covered_cells.duplicate(),
 		"source_object_ids": state.source_object_ids.duplicate(),
-		"source_ref_nums": state.source_object_ids.duplicate(),
 		"source_bucket_counts": state.source_bucket_counts.duplicate(),
 		"complete_bucket_counts": state.source_bucket_counts.duplicate(),
 		"coverage_complete": (
@@ -1605,7 +1601,7 @@ func _finish_merge_prepare(state: MergePrepState) -> void:
 			Log.debug("streaming", "HLOD chunk %s: %d inputs (below MIN %d). skipped=%d type_rej=%d size_rej=%d surface_rej=%d partial_bucket_rej=%d" % [
 				key, state.inputs.size(), MIN_REFS_TO_MERGE, state.refs_skipped, state.refs_type_rejected, state.refs_size_rejected, state.refs_surface_rejected, state.refs_partial_bucket_rejected])
 		elif state.inputs.size() == 0:
-			Log.debug("streaming", "HLOD chunk %s: no ESM refs (all cells empty or missing)" % key)
+			Log.debug("streaming", "HLOD chunk %s: no source refs (all cells empty or missing)" % key)
 		return
 
 	# Priority = chunk-center distance² (closer first)
@@ -1715,8 +1711,7 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int, m
 	var manifest: Dictionary = _mesh_manifests.get(key, {})
 	if not manifest.is_empty():
 		data.covered_cells = (manifest.get("covered_cells", []) as Array).duplicate()
-		data.source_object_ids = (manifest.get("source_object_ids", manifest.get("source_ref_nums", {})) as Dictionary).duplicate()
-		data.source_ref_nums = data.source_object_ids.duplicate()
+		data.source_object_ids = (manifest.get("source_object_ids", {}) as Dictionary).duplicate()
 		data.source_bucket_counts = (manifest.get("source_bucket_counts", {}) as Dictionary).duplicate()
 		data.coverage_complete = bool(manifest.get("coverage_complete", false))
 		data.refs_accepted = int(manifest.get("refs_accepted", 0))

@@ -5,9 +5,9 @@ const WaterBodyDescriptorScript := preload("res://src/core/water/water_body_desc
 const GpuHydrologyBakerScript := preload("res://src/core/world/morrowind/morrowind_gpu_hydrology_baker.gd")
 
 const REGION_PRIORITY := 160
-const CACHE_VERSION := "river_flow_gpu_v4"
-const GPU_CACHE_VERSION := "river_flow_gpu_v4"
-const PREBAKED_CACHE_VERSION := "morrowind_gpu_hydrology_region_v1"
+const CACHE_VERSION := "river_flow_gpu_legacy_v5"
+const GPU_CACHE_VERSION := "river_flow_gpu_legacy_v5"
+const PREBAKED_CACHE_VERSION := "morrowind_hydrology_atlas_v2"
 const DEFAULT_FLOW_SPEED_MPS := 1.4
 const MAX_ENCODED_SPEED_MPS := 6.0
 const DEFAULT_MAX_CACHED_REGIONS := 96
@@ -57,13 +57,13 @@ func configure(p_terrain_provider: RefCounted, p_coordinate_mapper: RefCounted) 
 func initialize() -> Error:
 	if terrain_provider == null:
 		return ERR_UNCONFIGURED
-	if use_gpu_hydrology:
+	if use_gpu_hydrology and allow_runtime_hydrology_bake:
 		_gpu_baker = GpuHydrologyBakerScript.new()
 		_configure_gpu_baker(_gpu_baker)
 		var gpu_err := _gpu_baker.initialize()
 		if gpu_err != OK:
 			Log.warn("water", "MorrowindHydrologyProvider: GPU hydrology unavailable (%d)" % gpu_err)
-	if _gpu_baker == null or not _gpu_baker.is_available():
+	if allow_runtime_hydrology_bake and not use_prebaked_hydrology and (_gpu_baker == null or not _gpu_baker.is_available()):
 		return ERR_UNAVAILABLE
 	return OK
 
@@ -693,7 +693,7 @@ func _components_from_bake_result(result: Dictionary) -> Array[Dictionary]:
 			"aspect": float(component.get("aspect", 0.0)),
 			"mean_width_meters": float(component.get("mean_width_meters", 0.0)),
 			"is_river": bool(component.get("is_river", false)),
-			"body_type": component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"),
+			"body_type": StringName(str(component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"))),
 			"ocean_contact": bool(component.get("ocean_contact", false)),
 			"flow_direction": _variant_to_vector2(component.get("flow_direction", Vector2.ZERO)),
 			"flow_speed_meters_per_second": float(component.get("flow_speed_meters_per_second", 0.0)),
@@ -726,7 +726,7 @@ func _serialize_components(components_v: Variant) -> Array[Dictionary]:
 			"aspect": float(component.get("aspect", 0.0)),
 			"mean_width_meters": float(component.get("mean_width_meters", 0.0)),
 			"is_river": bool(component.get("is_river", false)),
-			"body_type": StringName(component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake")),
+			"body_type": StringName(str(component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"))),
 			"ocean_contact": bool(component.get("ocean_contact", false)),
 			"flow_direction": [flow_direction.x, flow_direction.y],
 			"flow_speed_meters_per_second": float(component.get("flow_speed_meters_per_second", 0.0)),
@@ -751,7 +751,7 @@ func _deserialize_components(components_v: Variant) -> Array[Dictionary]:
 			"aspect": float(component.get("aspect", 0.0)),
 			"mean_width_meters": float(component.get("mean_width_meters", 0.0)),
 			"is_river": bool(component.get("is_river", false)),
-			"body_type": component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"),
+			"body_type": StringName(str(component.get("body_type", &"river" if bool(component.get("is_river", false)) else &"lake"))),
 			"ocean_contact": bool(component.get("ocean_contact", false)),
 			"flow_direction": _variant_to_vector2(component.get("flow_direction", Vector2.ZERO)),
 			"flow_speed_meters_per_second": float(component.get("flow_speed_meters_per_second", 0.0)),

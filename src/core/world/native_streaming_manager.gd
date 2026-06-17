@@ -158,6 +158,10 @@ var _impostor_candidates: RefCounted = null
 
 var _distant_render_end_m: float = float(SC.DEFAULT_VIEW_DISTANCE_METERS)
 var _impostors_requested_visible: bool = true
+var _distant_lights_requested_visible: bool = true
+var _sync_fallback_frames: int = 0
+var _sync_fallback_cells_loaded: int = 0
+var _sync_fallback_last_frame: int = -1
 var _mid_tier_visible: bool = true
 var _world_source: RefCounted = null
 var _world_object_source: RefCounted = null
@@ -520,8 +524,9 @@ func _ready() -> void:
 	add_child(_impostor_renderer)
 	_impostor_renderer.set_process(false)
 
-	# Create impostor candidates helper
-	_impostor_candidates = ImpostorCandidatesScript.new()
+	# Create fallback impostor candidates helper
+	if _impostor_candidates == null:
+		_impostor_candidates = ImpostorCandidatesScript.new()
 	_impostor_renderer.set_impostor_candidates(_impostor_candidates)
 
 	# Create background processor for async loading
@@ -574,16 +579,14 @@ func initialize(cell_manager: CellManagerScript, camera: Camera3D = null) -> Err
 			_cell_manager.call("set_world_object_spawn_adapter", _world_object_spawn_adapter)
 		if _cell_manager.has_method("set_asset_provider"):
 			_cell_manager.call("set_asset_provider", _asset_provider)
-	_cell_manager._static_renderer = _static_renderer
-	_cell_manager._sync_instantiator_config()
+	_cell_manager.set_static_renderer(_static_renderer)
 	_camera = camera
 	_tracking_enabled = _camera != null
 
-	# Phase 3 (2026-04-22) — CellPreloader. Depends on the instantiator (for
-	# preregister_cell_statics) + model_loader (for resolve_disk_path). Both
-	# are owned by cell_manager.
+	# Phase 3 (2026-04-22) — CellPreloader. Warms predicted-cell model paths
+	# through the model loader's bounded async lane.
 	_cell_preloader = CellPreloaderScript.new()
-	_cell_preloader.configure(_cell_manager._instantiator, _cell_manager._model_loader)
+	_cell_preloader.configure(_cell_manager.get_model_loader())
 	if _cell_preloader.has_method("set_world_object_source"):
 		_cell_preloader.call("set_world_object_source", _world_object_source)
 	_cell_preloader.set_debug(debug_enabled)
@@ -715,6 +718,9 @@ func set_world_source(source: RefCounted) -> void:
 		_asset_provider = null
 		_world_object_spawn_adapter = null
 		set_world_object_source(null)
+		set_impostor_candidates(null)
+		if _cell_manager and _cell_manager.has_method("set_world_source"):
+			_cell_manager.call("set_world_source", null)
 		return
 	if source.has_method("get_coordinate_mapper"):
 		set_coordinate_mapper(source.call("get_coordinate_mapper") as RefCounted)
@@ -724,6 +730,10 @@ func set_world_source(source: RefCounted) -> void:
 		set_world_object_source(source.call("get_object_source") as RefCounted)
 	if source.has_method("get_object_spawn_adapter"):
 		set_world_object_spawn_adapter(source.call("get_object_spawn_adapter") as RefCounted)
+	if source.has_method("get_impostor_candidates"):
+		set_impostor_candidates(source.call("get_impostor_candidates") as RefCounted)
+	if _cell_manager and _cell_manager.has_method("set_world_source"):
+		_cell_manager.call("set_world_source", source)
 
 
 func set_world_object_source(source: RefCounted) -> void:
@@ -744,6 +754,14 @@ func set_world_object_spawn_adapter(adapter: RefCounted) -> void:
 	_world_object_spawn_adapter = adapter
 	if _cell_manager and _cell_manager.has_method("set_world_object_spawn_adapter"):
 		_cell_manager.call("set_world_object_spawn_adapter", adapter)
+
+
+func set_impostor_candidates(candidates: RefCounted) -> void:
+	_impostor_candidates = candidates
+	if _impostor_renderer and _impostor_renderer.has_method("set_impostor_candidates"):
+		_impostor_renderer.call("set_impostor_candidates", candidates)
+	if _cell_manager and _cell_manager.has_method("set_impostor_candidates"):
+		_cell_manager.call("set_impostor_candidates", candidates)
 
 
 func set_coordinate_mapper(mapper: RefCounted) -> void:
@@ -986,14 +1004,6 @@ func _process(delta: float) -> void:
 				Viewport.RENDER_INFO_TYPE_SHADOW,
 				Viewport.RENDER_INFO_OBJECTS_IN_FRAME,
 			))
-		# MID bucket stats from StaticObjectRenderer. Legacy mm_batches/mm_slots
-		# fields remain 0 after the old MidTierBatchPool removal.
-		var reg_batches := 0
-		var reg_slots := 0
-		if _static_renderer and _static_renderer.has_method("get_stats"):
-			var srs: Dictionary = _static_renderer.get_stats()
-			reg_batches = int(srs.get("registry_batches", 0))
-			reg_slots = int(srs.get("registry_slots", 0))
 		# T.0 baseline instrumentation — Jolt broadphase workload proxies.
 		# `active` = dynamic RigidBody3Ds being simulated (carryables, NPCs).
 		# `pairs` = collision pairs broadphase is tracking — this is the
@@ -1009,7 +1019,7 @@ func _process(delta: float) -> void:
 		if _pipeline_compile_monitor != null:
 			var pcd: PackedInt64Array = _pipeline_compile_monitor.delta_and_update()
 			pcd_str = " pipe=" + PipelineCompileMonitorScript.format_delta(pcd)
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d reg_batches=%d reg_slots=%d phys_active=%d phys_pairs=%d%s" % [
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d phys_active=%d phys_pairs=%d%s" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
@@ -1024,8 +1034,6 @@ func _process(delta: float) -> void:
 			prims / 1000,
 			_loaded_cells.size(),
 			_loading_cells.size(),
-			reg_batches,
-			reg_slots,
 			phys_active,
 			phys_pairs,
 			pcd_str,
@@ -1373,21 +1381,6 @@ func _process(delta: float) -> void:
 			_process_pending_loads_sync(delta)
 			if prof: prof.end_section("pending_loads_sync")
 
-	# Phase 3 world-scoped MultiMesh cull tick. tick_prototype_cull no-ops
-	# internally when the registry hasn't been instantiated yet (cold
-	# boot, empty world). Runs after all add/remove/transform work this
-	# frame so the packed buffer reflects the latest state.
-	if _static_renderer and not tracking_frozen:
-		phase_start = Time.get_ticks_usec()
-		if prof: prof.begin_section("static_renderer_cull")
-		var vr_end: float = _static_renderer.visibility_range_end
-		_static_renderer.tick_prototype_cull(
-			_camera_position,
-			vr_end * vr_end,
-			SC.STATIC_CULL_BATCH_BUDGET_PER_FRAME
-		)
-		if prof: prof.end_section("static_renderer_cull")
-		phase_times[8] = float(Time.get_ticks_usec() - phase_start)
 
 	# Store per-phase timing for external consumers (benchmark, profiler)
 	phase_times[7] = cell_update_usec
@@ -1852,8 +1845,6 @@ func _unload_cell(grid: Vector2i) -> void:
 		_pending_rs_hide_set[grid] = true
 		_pending_rs_cleanup_cells.append(grid)
 		_pending_rs_cleanup_set[grid] = true
-		if _static_renderer.has_method("defer_prototype_uploads"):
-			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 
 	# I.6 — evacuate any persistent nodes (held items, etc.) from this
 	# cell BEFORE putting it in the unloading set. Otherwise the
@@ -2038,8 +2029,6 @@ func _process_budgeted_unloading(deadline_usec: int = 0) -> void:
 	# Phase A: Budgeted RS instance HIDING — hide ~200 instances per frame
 	# Replaces the old synchronous hide_cell_instances() that caused 10-32ms spikes
 	if _static_renderer and not _pending_rs_hide_cells.is_empty():
-		if _static_renderer.has_method("defer_prototype_uploads"):
-			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 		var hide_budget := 200  # Max RS calls per frame for hiding
 		var total_hidden := 0
 		var completed_hide: Array[int] = []  # indices to remove (collected, then batch-removed)
@@ -2076,8 +2065,6 @@ func _process_budgeted_unloading(deadline_usec: int = 0) -> void:
 	# Phase B: Deferred RS instance cleanup (free_rid) within remaining budget
 	# Only process cells that have been fully hidden
 	if _static_renderer and not _pending_rs_cleanup_cells.is_empty():
-		if _static_renderer.has_method("defer_prototype_uploads"):
-			_static_renderer.call("defer_prototype_uploads", SC.STATIC_CULL_UPLOAD_DEFER_FRAMES_AFTER_UNLOAD)
 		var rs_freed := 0
 		var cleanup_cells := 0
 		while not _pending_rs_cleanup_cells.is_empty():
@@ -2308,6 +2295,8 @@ func _process_pending_loads_sync(_delta: float) -> void:
 	if _pending_load_queue.is_empty():
 		return
 
+	_sync_fallback_frames += 1
+	_sync_fallback_last_frame = Engine.get_frames_drawn()
 	var start_time := Time.get_ticks_msec()
 	var cells_loaded_this_frame := 0
 
@@ -2331,6 +2320,7 @@ func _process_pending_loads_sync(_delta: float) -> void:
 
 		_load_cell_sync(grid)
 		cells_loaded_this_frame += 1
+		_sync_fallback_cells_loaded += 1
 		_stats["load_time_ms"] = Time.get_ticks_msec() - start_time
 
 	if debug_enabled and cells_loaded_this_frame > 0 and _pending_load_queue.is_empty():
@@ -2371,6 +2361,10 @@ func get_stats() -> Dictionary:
 	s["async_requests"] = _async_requests.size()
 	s["loading_cells"] = _loading_cells.size()
 	s["async_loading_enabled"] = async_loading_enabled
+	s["sync_fallback_frames"] = _sync_fallback_frames
+	s["sync_fallback_cells_loaded"] = _sync_fallback_cells_loaded
+	s["sync_fallback_last_frame"] = _sync_fallback_last_frame
+	s["benchmark_mode_metadata"] = get_benchmark_mode_metadata()
 	s["camera_cell"] = _camera_cell
 	s["camera_position"] = _camera_position
 	s["world_tracking_frozen"] = _world_tracking_frozen
@@ -2484,6 +2478,98 @@ func get_stats() -> Dictionary:
 	s["hlod_runtime_force_merge_eligible_refs"] = hlod_stats.get("runtime_force_merge_eligible_refs", false)
 
 	return s
+
+
+func get_benchmark_mode_metadata() -> Dictionary:
+	var invalid_reasons: Array[String] = []
+	var parked_modes: Array[String] = []
+	if not async_loading_enabled:
+		invalid_reasons.append("sync_loading_mode")
+	if _sync_fallback_frames > 0:
+		invalid_reasons.append("sync_fallback_executed")
+	var far_active := false
+	if _impostor_renderer and _impostor_renderer.has_method("is_enabled"):
+		far_active = bool(_impostor_renderer.call("is_enabled"))
+	var distant_lights_active := _distant_lights_requested_visible and _distant_light_manager != null
+	if _distant_light_manager and _distant_light_manager.has_method("get_stats"):
+		var light_stats: Dictionary = _distant_light_manager.call("get_stats")
+		distant_lights_active = bool(light_stats.get("enabled", distant_lights_active))
+
+	var hlod_requested := _hlod_requested_visible
+	var hlod_active := is_hlod_active()
+	if hlod_requested:
+		parked_modes.append("runtime_hlod")
+
+	var near_only := (
+		_near_tier_visible
+		and not _mid_tier_visible
+		and not _impostors_requested_visible
+		and not hlod_requested
+		and not _distant_lights_requested_visible
+	)
+	var near_mid_only := (
+		_near_tier_visible
+		and _mid_tier_visible
+		and not _impostors_requested_visible
+		and not hlod_requested
+		and not _distant_lights_requested_visible
+	)
+	var far_only := (
+		not _near_tier_visible
+		and not _mid_tier_visible
+		and _impostors_requested_visible
+		and not hlod_requested
+		and not _distant_lights_requested_visible
+	)
+	var hlod_only := (
+		not _near_tier_visible
+		and not _mid_tier_visible
+		and not _impostors_requested_visible
+		and hlod_requested
+		and not _distant_lights_requested_visible
+	)
+
+	var mode_name := "custom"
+	if near_only:
+		mode_name = "near_only"
+	elif near_mid_only:
+		mode_name = "near_mid_only"
+	elif far_only:
+		mode_name = "far_only"
+	elif hlod_only:
+		mode_name = "hlod_only"
+	elif _near_tier_visible and _mid_tier_visible and _impostors_requested_visible and not hlod_requested and _distant_lights_requested_visible:
+		mode_name = "default_distant_no_hlod"
+	elif _near_tier_visible and _mid_tier_visible and _impostors_requested_visible and hlod_requested and _distant_lights_requested_visible:
+		mode_name = "full_distant_with_hlod"
+
+	var flags := {
+		"async_loading_enabled": async_loading_enabled,
+		"sync_loading_mode": not async_loading_enabled,
+		"sync_fallback_frames": _sync_fallback_frames,
+		"sync_fallback_cells_loaded": _sync_fallback_cells_loaded,
+		"sync_fallback_last_frame": _sync_fallback_last_frame,
+		"near_gameplay": _near_tier_visible,
+		"static_visuals": _mid_tier_visible,
+		"hlod_requested": hlod_requested,
+		"hlod_active": hlod_active,
+		"far_impostors_requested": _impostors_requested_visible,
+		"far_impostors_active": far_active,
+		"distant_lights_requested": _distant_lights_requested_visible,
+		"distant_lights_active": distant_lights_active,
+		"near_only": near_only,
+		"near_mid_only": near_mid_only,
+		"far_only": far_only,
+		"hlod_only": hlod_only,
+	}
+	return {
+		"schema": "godotwind_benchmark_mode_v1",
+		"mode_name": mode_name,
+		"valid_for_performance_baseline": invalid_reasons.is_empty(),
+		"invalid_reasons": invalid_reasons,
+		"parked_modes": parked_modes,
+		"flags": flags,
+	}
 
 
 ## Get last frame's per-phase timing breakdown (usec).
@@ -2842,8 +2928,10 @@ func _set_near_gameplay_active(root: Node, active: bool) -> void:
 	if root is CollisionShape3D or root is CollisionPolygon3D:
 		root.set_deferred("disabled", not active)
 	if root is Area3D:
-		(root as Area3D).set_deferred("monitoring", active)
-		(root as Area3D).set_deferred("monitorable", active)
+		var area := root as Area3D
+		if area.name != "InteractionArea":
+			area.set_deferred("monitoring", active)
+			area.set_deferred("monitorable", active)
 	for child: Node in root.get_children():
 		_set_near_gameplay_active(child, active)
 
@@ -2982,7 +3070,6 @@ func get_hlod_chunk_debug_data() -> Array[Dictionary]:
 func _sync_hlod_far_coverage(force: bool = false) -> void:
 	var can_sync_far := _impostors_requested_visible and _impostor_renderer != null and (
 		_impostor_renderer.has_method("set_hlod_covered_object_ids")
-		or _impostor_renderer.has_method("set_hlod_covered_ref_nums")
 	)
 	var can_sync_mid := _mid_tier_visible and _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
 	if not can_sync_far and not can_sync_mid:
@@ -2991,10 +3078,7 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
 		if force or _hlod_far_coverage_revision != -1:
 			if can_sync_far:
-				if _impostor_renderer.has_method("set_hlod_covered_object_ids"):
-					_impostor_renderer.call("set_hlod_covered_object_ids", {})
-				else:
-					_impostor_renderer.call("set_hlod_covered_ref_nums", {})
+				_impostor_renderer.call("set_hlod_covered_object_ids", {})
 			if can_sync_mid:
 				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
 			_hlod_far_coverage_revision = -1
@@ -3011,11 +3095,8 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 		return
 	_hlod_far_coverage_revision = revision
 	if can_sync_far:
-		var covered_objects: Dictionary = manifest.get("source_object_ids", manifest.get("source_ref_nums", {}))
-		if _impostor_renderer.has_method("set_hlod_covered_object_ids"):
-			_impostor_renderer.call("set_hlod_covered_object_ids", covered_objects)
-		else:
-			_impostor_renderer.call("set_hlod_covered_ref_nums", covered_objects)
+		var covered_objects: Dictionary = manifest.get("source_object_ids", {})
+		_impostor_renderer.call("set_hlod_covered_object_ids", covered_objects)
 	if can_sync_mid:
 		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("complete_bucket_counts", manifest.get("source_bucket_counts", {})), DU.HLOD_START)
 
@@ -3047,7 +3128,7 @@ func _ensure_hlod_merger() -> bool:
 		return false
 	_hlod_merger = merger
 	var scenario := get_viewport().get_world_3d().scenario
-	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor, _cell_manager._model_loader)
+	_hlod_merger.call("initialize", scenario, _static_renderer, _background_processor, _cell_manager.get_model_loader())
 	if _hlod_merger.has_method("set_world_object_source"):
 		_hlod_merger.call("set_world_object_source", _world_object_source)
 	if _hlod_merger.has_method("set_visual_begin_floor"):
@@ -3069,6 +3150,7 @@ func _teardown_hlod_merger() -> void:
 
 ## Toggle distant-light billboard MultiMesh (DistantLightManager) — hides + stops streaming.
 func set_distant_lights_visible(visible: bool) -> void:
+	_distant_lights_requested_visible = visible
 	if _distant_light_manager:
 		_distant_light_manager.set_enabled(visible)
 		if visible:
@@ -3329,6 +3411,15 @@ func _prune_expired_orphans() -> void:
 ## Get the impostor renderer (for console commands and diagnostics)
 func get_impostor_manager() -> Node3D:
 	return _impostor_renderer
+
+
+func set_impostor_debug_enabled(enabled: bool) -> void:
+	if _impostor_renderer:
+		_impostor_renderer.debug_enabled = enabled
+
+
+func get_static_renderer_debug_target() -> Node:
+	return _static_renderer
 
 
 ## Teleport to a new location (forces immediate cell reload)

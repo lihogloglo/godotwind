@@ -441,7 +441,7 @@ func test_partial_bucket_inputs_still_render_but_do_not_suppress_mid() -> void:
 	complete.source_ref_num = 20
 	complete.bucket_key = "0,0:complete"
 	state.inputs = [partial, complete]
-	state.source_ref_nums = {10: true, 20: true}
+	state.source_object_ids = {"obj_10": true, "obj_20": true}
 	state.source_bucket_counts = {
 		"0,0:partial": 1,
 		"0,0:complete": 1,
@@ -454,11 +454,27 @@ func test_partial_bucket_inputs_still_render_but_do_not_suppress_mid() -> void:
 	merger._update_complete_bucket_counts(state)
 
 	assert_int(state.inputs.size()).is_equal(2)
-	assert_bool(state.source_ref_nums.has(10)).is_true()
-	assert_bool(state.source_ref_nums.has(20)).is_true()
+	assert_bool(state.source_object_ids.has("obj_10")).is_true()
+	assert_bool(state.source_object_ids.has("obj_20")).is_true()
 	assert_bool(state.source_bucket_counts.has("0,0:partial")).is_false()
 	assert_int(int(state.source_bucket_counts.get("0,0:complete", 0))).is_equal(1)
 	assert_int(state.refs_partial_bucket_rejected).is_equal(1)
+
+
+func test_hlod_manifest_uses_source_object_ids_not_source_ref_nums() -> void:
+	var merger := Merger.new()
+	var state := Merger.MergePrepState.new()
+	state.key = Vector3i(0, 0, 1)
+	state.size_level = 1
+	state.covered_cells = [Vector2i(0, 0)]
+	state.source_object_ids = {"0,0:1234": true}
+	state.source_bucket_counts = {"0,0:meshes\\crate.nif": 1}
+
+	var manifest: Dictionary = merger._build_manifest_for_state(state)
+
+	assert_bool(manifest.has("source_object_ids")).is_true()
+	assert_bool(manifest.has("source_ref_nums")).is_false()
+	assert_bool((manifest["source_object_ids"] as Dictionary).has("0,0:1234")).is_true()
 
 
 func test_active_hlod_chunks_are_pinned_during_cache_eviction() -> void:

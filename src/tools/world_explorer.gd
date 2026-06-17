@@ -405,12 +405,6 @@ func _ready() -> void:
 		elif arg == "--disable-fade-pool":
 			StreamingConfig.DEBUG_DISABLE_FADE_POOL = true
 			Log.info("streaming", "[--disable-fade-pool] bespoke fade-material pool disabled — Phase 0 ablation (engine FADE_SELF still active)")
-		elif arg == "--disable-phase-f-prereg":
-			StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG = true
-			Log.info("streaming", "[--disable-phase-f-prereg] Phase F prototype pre-reg disabled - active-loader prereg bypass")
-		elif arg == "--enable-phase-f-prereg":
-			StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG = false
-			Log.info("streaming", "[--enable-phase-f-prereg] Phase F prototype pre-reg enabled - crash-risk research path")
 		elif arg == "--disable-cell-static-collision":
 			StreamingConfig.DEBUG_DISABLE_CELL_STATIC_COLLISION = true
 			Log.info("streaming", "[--disable-cell-static-collision] per-cell static collision BVH publish disabled - NEAR streaming ablation")
@@ -530,7 +524,7 @@ func _init_async() -> void:
 	_log("Background processor initialized for async cell loading")
 
 	# Pre-warm BSA cache only when NOT in runtime mode (prebaking needs it, runtime loads from .res)
-	if not cell_manager._model_loader.runtime_mode:
+	if not cell_manager.is_model_loader_runtime_mode():
 		await _update_loading(10, "Pre-warming file cache...")
 		_prewarm_bsa_cache()
 		_ta = _log_timing(_ta, "BSA prewarm")
@@ -585,7 +579,7 @@ func _init_async() -> void:
 
 	# Pre-warm model cache with common models (improves first-cell loading)
 	await _update_loading(80, "Pre-loading common models...")
-	var indexed_models: int = cell_manager._model_loader.prewarm_disk_cache_index()
+	var indexed_models: int = cell_manager.prewarm_model_cache_index()
 	_log("Indexed %d prebaked model cache files" % indexed_models)
 	var preload_count := cell_manager.preload_common_models()
 	_log("Pre-loaded %d common models into cache" % preload_count)
@@ -1576,6 +1570,7 @@ func _switch_to_player_controller() -> void:
 	if not player_controller or not fly_camera:
 		return
 
+	_release_carry_controller_if_holding(_fly_carry_controller)
 	_camera_mode = CameraMode.PLAYER_CONTROLLER
 
 	# Get current fly camera position for teleport
@@ -1645,6 +1640,7 @@ func _switch_to_fly_camera() -> void:
 	if not player_controller or not fly_camera:
 		return
 
+	_release_carry_controller_if_holding(_carry_controller)
 	_camera_mode = CameraMode.FLY_CAMERA
 
 	# Get player position
@@ -1690,6 +1686,15 @@ func _switch_to_fly_camera() -> void:
 
 	_log("[color=cyan]Switched to FLY CAMERA mode[/color]")
 	_log("Hold Right-click to look, WASD to move")
+
+
+func _release_carry_controller_if_holding(controller: Node) -> void:
+	if controller == null:
+		return
+	if not controller.has_method("is_carrying") or not controller.has_method("release"):
+		return
+	if controller.is_carrying():
+		controller.release()
 
 
 ## Attach a Morrowind NPC body to the player controller
@@ -2724,18 +2729,6 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"streaming"
 		)
 
-		var proto_registry_params: Array[CommandRegistry.ParameterInfo] = [
-			CommandRegistry.ParameterInfo.new("action", TYPE_STRING, "''|dist", false, ""),
-		]
-		console.register_command(
-			"proto_registry",
-			_cmd_proto_registry,
-			"Show Phase 3 world-scoped MID MultiMesh registry stats. 'dist' subcmd prints batch-size distribution + mesh sharing stats.",
-			"streaming",
-			PackedStringArray([]),
-			proto_registry_params,
-			PackedStringArray(["proto_registry", "proto_registry dist"]),
-		)
 
 		# Register streaming benchmark commands
 		if not _StreamingBenchmarkScript:
@@ -2783,8 +2776,7 @@ func _cmd_static_trace_selected(args: Dictionary) -> String:
 func _cmd_toggle_debug(_args: Dictionary) -> String:
 	if native_streaming_manager:
 		native_streaming_manager.debug_enabled = not native_streaming_manager.debug_enabled
-		if native_streaming_manager._impostor_renderer:
-			native_streaming_manager._impostor_renderer.debug_enabled = native_streaming_manager.debug_enabled
+		native_streaming_manager.set_impostor_debug_enabled(native_streaming_manager.debug_enabled)
 		return "Debug mode: %s" % ("ON" if native_streaming_manager.debug_enabled else "OFF")
 	return "Native streaming manager not available"
 
@@ -3041,63 +3033,6 @@ func _cmd_hlod_disable(_args: Dictionary) -> String:
 	return "HLOD DISABLED - MID bridge 150-%dm, HLOD parked" % int(StreamingConfig.DU.MID_END)
 
 
-func _cmd_proto_registry(args: Dictionary) -> String:
-	if not native_streaming_manager or not native_streaming_manager._static_renderer:
-		return "Static renderer not initialized"
-	var renderer: Node = native_streaming_manager._static_renderer
-	var action: String = str(args.get("action", "")).strip_edges().to_lower()
-	if action == "dist":
-		return _format_proto_registry_distribution(renderer)
-	var stats: Dictionary = renderer.get_stats()
-	return "proto_registry: batches=%d, slots=%d, total_instances=%d  (sub-cmds: 'dist' for batch size distribution)" % [
-		stats.get("registry_batches", 0),
-		stats.get("registry_slots", 0),
-		stats.get("total_instances", 0),
-	]
-
-
-## Format Phase 3 registry batch size distribution for the console.
-## Measurement-only — calls PrototypeRegistry.get_batch_distribution() which is
-## O(batches) walk, no RS calls.
-func _format_proto_registry_distribution(renderer: Node) -> String:
-	if not renderer or not "_prototype_registry" in renderer or renderer._prototype_registry == null:
-		return "proto_registry dist: registry not available"
-	var dist: Dictionary = renderer._prototype_registry.get_batch_distribution()
-	var hist: Dictionary = dist.get("histogram", {})
-	var top_lines: PackedStringArray = PackedStringArray()
-	for entry: Dictionary in dist.get("top_meshes_by_slots", []):
-		top_lines.append("    mesh=%d slots=%d batches=%d" % [
-			entry.get("mesh_id", 0),
-			entry.get("total_slots", 0),
-			entry.get("batches", 0),
-		])
-	return (
-		"proto_registry dist:\n" +
-		"  batches=%d (empty=%d)  total_live_slots=%d\n" % [
-			dist.get("batches", 0),
-			dist.get("empty_batches", 0),
-			dist.get("total_live_slots", 0),
-		] +
-		"  slots/batch min=%d p50=%d mean=%.1f p90=%d p95=%d max=%d\n" % [
-			dist.get("slots_min", 0),
-			dist.get("slots_median", 0),
-			dist.get("slots_mean", 0.0),
-			dist.get("slots_p90", 0),
-			dist.get("slots_p95", 0),
-			dist.get("slots_max", 0),
-		] +
-		"  histogram  1:%d  2-5:%d  6-20:%d  21-100:%d  100+:%d\n" % [
-			hist.get("1", 0), hist.get("2-5", 0), hist.get("6-20", 0),
-			hist.get("21-100", 0), hist.get("100+", 0),
-		] +
-		"  mesh_shared_count=%d  mesh_shared_fanout_max=%d (dedup candidates)\n" % [
-			dist.get("mesh_shared_count", 0),
-			dist.get("mesh_shared_fanout_max", 0),
-		] +
-		"  top meshes by slot count:\n" + "\n".join(top_lines)
-	)
-
-
 func _cmd_hlod_stats(_args: Dictionary) -> String:
 	if not native_streaming_manager:
 		return "Native streaming manager not initialized"
@@ -3178,7 +3113,9 @@ func _cmd_hlod_stats(_args: Dictionary) -> String:
 func _register_exterior_doors_for_grid(grid: Vector2i) -> void:
 	if not _pocket_manager:
 		return
-	var cell: CellRecord = ESMManager.get_exterior_cell(grid.x, grid.y)
+	var cell: Variant = null
+	if world_object_source != null and world_object_source.has_method("get_source_exterior_cell"):
+		cell = world_object_source.call("get_source_exterior_cell", grid)
 	if cell:
 		_pocket_manager.register_exterior_cell_doors(cell, grid)
 
@@ -3202,7 +3139,7 @@ func _on_native_cell_loaded(grid: Vector2i, object_count: int) -> void:
 	# Autoregister collision visualizers on the new cell when the toggle is ON.
 	# No-op when toggle is off. Cell node lookup defers to NativeStreamingManager.
 	if _debug_view_commands and native_streaming_manager:
-		var cell_node: Node = native_streaming_manager._loaded_cells.get(grid) if "_loaded_cells" in native_streaming_manager else null
+		var cell_node: Node = native_streaming_manager.get_loaded_cell(grid)
 		if cell_node:
 			_debug_view_commands.on_cell_loaded(cell_node)
 
@@ -3292,8 +3229,8 @@ func _process_river_render_publish_queue(water_provider: RefCounted) -> void:
 func _is_cell_loaded_or_tracked_for_river_render(grid: Vector2i) -> bool:
 	if _cell_river_body_ids.has(grid):
 		return true
-	if native_streaming_manager != null and "_loaded_cells" in native_streaming_manager:
-		return native_streaming_manager._loaded_cells.has(grid)
+	if native_streaming_manager != null:
+		return native_streaming_manager.is_cell_loaded(grid)
 	return false
 
 
@@ -3654,17 +3591,6 @@ func _create_escape_menu() -> void:
 	var spacer := Control.new()
 	spacer.custom_minimum_size.y = 8
 	vbox.add_child(spacer)
-
-	# Seamless transitions toggle
-	var seamless_check := CheckBox.new()
-	seamless_check.text = "Seamless interior transitions"
-	seamless_check.button_pressed = false
-	seamless_check.toggled.connect(func(enabled: bool) -> void:
-		if _pocket_manager:
-			_pocket_manager.seamless_enabled = enabled
-			Log.info("streaming", "Interior mode: %s" % ("seamless" if enabled else "classic"))
-	)
-	vbox.add_child(seamless_check)
 
 	# Resume button
 	var resume_btn := Button.new()
@@ -4056,7 +3982,10 @@ func _setup_pocket_manager() -> void:
 	# Find the sun (DirectionalLight3D) for interior cull mask management
 	var sun: DirectionalLight3D = _find_sun_light()
 
-	_pocket_manager.initialize(cell_manager, world_env, camera, sun)
+	var transition_provider: RefCounted = null
+	if world_source != null and world_source.has_method("get_transition_provider"):
+		transition_provider = world_source.call("get_transition_provider") as RefCounted
+	_pocket_manager.initialize(cell_manager, world_env, camera, sun, transition_provider)
 
 	# Hide Terrain3D during interior transitions — camera at Y=-500 causes
 	# Terrain3D GDExtension to crash (clipmap generation at underground position)
@@ -4300,8 +4229,7 @@ func _activate_door(door: Variant) -> void:
 		door.instance_key, door.target_cell_name, _pocket_manager.is_inside()])
 
 	if _pocket_manager.is_inside():
-		var dest: CellRecord = ESMManager.get_cell(door.target_cell_name)
-		if dest and dest.is_interior():
+		if door.has_method("has_interior_target") and bool(door.call("has_interior_target")):
 			await _pocket_manager.transition_interior_to_interior(door)
 		else:
 			# Exit: teleport back to surface, then unfreeze exterior tracking.
@@ -4366,6 +4294,8 @@ func _on_interior_transition_started(_cell_name: String) -> void:
 	# Only the classic fade-to-black path wants the sky hard-disabled.
 	if _pocket_manager and _pocket_manager.seamless_enabled:
 		return
+	if _ocean_controls:
+		_ocean_controls.set_world_space_ocean_visible(false)
 	if _env_controls and _env_controls.show_sky:
 		_sky_was_on_pre_interior = true
 		_env_controls.on_show_sky_toggled(false)
@@ -4389,6 +4319,8 @@ func _on_interior_transition_completed(cell_name: String) -> void:
 		if terrain_3d:
 			terrain_3d.visible = true
 			Log.info("streaming", "[TRANSITION] Terrain3D restored (exited to exterior)")
+		if _ocean_controls:
+			_ocean_controls.set_world_space_ocean_visible(true)
 		if _sky_was_on_pre_interior:
 			# `on_show_sky_toggled(true)` handles fallback_light visibility
 			# (sets it false when sky comes back on) — don't double-manage it.
@@ -4437,7 +4369,7 @@ func _on_browser_switch_to_interior() -> void:
 	if terrain_3d:
 		terrain_3d.visible = false
 	if _ocean_controls:
-		_ocean_controls.set_enabled(false)
+		_ocean_controls.set_world_space_ocean_visible(false)
 	if world_streaming_manager:
 		world_streaming_manager.set_process(false)
 
@@ -4446,8 +4378,8 @@ func _on_browser_switch_to_interior() -> void:
 func _on_browser_switch_to_world() -> void:
 	if terrain_3d:
 		terrain_3d.visible = true
-	if _ocean_controls and _ocean_controls.show_ocean:
-		_ocean_controls.set_enabled(true)
+	if _ocean_controls:
+		_ocean_controls.set_world_space_ocean_visible(true)
 	if world_streaming_manager:
 		world_streaming_manager.set_process(true)
 

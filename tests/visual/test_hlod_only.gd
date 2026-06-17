@@ -174,7 +174,7 @@ func _setup_hlod_runtime() -> void:
 	add_child(_background_processor)
 
 	_static_renderer = StaticObjectRendererScript.new()
-	_static_renderer.name = "StaticObjectRendererPrototypeRegistry"
+	_static_renderer.name = "StaticObjectRenderer"
 	add_child(_static_renderer)
 
 	_model_loader = ModelLoaderScript.new()

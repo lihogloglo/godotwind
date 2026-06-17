@@ -2,6 +2,7 @@ class_name WorldCellManifest
 extends RefCounted
 
 var cell_grid: Vector2i = Vector2i.ZERO
+var cell_name: String = ""
 var objects: Array = []
 
 

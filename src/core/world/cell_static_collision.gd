@@ -135,7 +135,7 @@ class FinalizedBody:
 	var cell_grid: Vector2i = Vector2i.ZERO  # diagnostic only
 
 
-func configure(shape_cache: RefCounted, _instantiator: RefCounted = null) -> void:
+func configure(shape_cache: RefCounted) -> void:
 	_shape_cache = shape_cache
 
 

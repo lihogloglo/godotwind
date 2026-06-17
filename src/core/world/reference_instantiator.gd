@@ -32,14 +32,6 @@ var model_loader: RefCounted = null  # ModelLoader
 var object_pool: RefCounted = null  # ObjectPool (optional)
 var static_renderer: Node = null  # StaticObjectRenderer (optional)
 var character_factory: CharacterFactoryV2 = null  # CharacterFactoryV2 for NPCs/creatures with new animation system
-# T.6 — StaticShapeCache used by Phase F worker to warm collision shape
-# packs off-thread from the `.shapes.res` sidecar, avoiding the 20-50ms
-# PackedScene.instantiate + tree-walk that cell-activation otherwise pays
-# through `cell_static_collision.build_for_cell` → `StaticShapeCache.get_shapes`.
-# Optional — if unset (or sidecar missing), cell_static_collision falls back
-# to the legacy walker without error. See docs/plans/distant_rendering_2026_04/
-# statics_no_node3d.md §7.
-var shape_cache: RefCounted = null  # StaticShapeCache
 var _world_object_source: RefCounted = null
 var _world_object_spawn_adapter: RefCounted = null
 
@@ -49,16 +41,6 @@ var _impostor_candidates: RefCounted = null
 # Output data for non-Node3D instances (Phase 2)
 var last_static_data: Dictionary = {}
 
-# Phase F — prototype pre-registration task tracking. Stores WorkerThreadPool
-# task_ids dispatched by `preregister_cell_statics` so `drain_prereg_tasks()`
-# can block on them at shutdown. Without this, `native_streaming_manager.
-# fast_cleanup` would call `_static_renderer.clear()` while workers still
-# hold pointers into `_mesh_types`, producing the shutdown sig 11 cluster.
-# Also prevents CLAUDE.md anti-pattern "DON'T skip wait_for_task_completion()
-# on WorkerThreadPool". Plan: phase_f_prototype_prereg.md §5.
-var _prereg_task_ids: Array[int] = []
-
-
 func set_world_object_source(source: RefCounted) -> void:
 	_world_object_source = source
 
@@ -67,26 +49,31 @@ func set_world_object_spawn_adapter(adapter: RefCounted) -> void:
 	_world_object_spawn_adapter = adapter
 
 
+func set_impostor_candidates(candidates: RefCounted) -> void:
+	_impostor_candidates = candidates
+
+
 func _source_is_carryable(type_name: String, base_record: Variant) -> bool:
-	if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("_source_is_carryable"):
-		return bool(_world_object_spawn_adapter.call("_source_is_carryable", type_name, base_record))
+	if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("is_source_record_carryable"):
+		return bool(_world_object_spawn_adapter.call("is_source_record_carryable", type_name, base_record))
 	return false
 
 
 func _postprocess_source_model_object(
 	instance: Node3D,
-	ref: CellReference,
+	ref: Variant,
 	base_record: Variant,
 	type_name: String,
 	cell_grid: Vector2i,
 	record_id: String,
+	source_key: String = "",
 ) -> void:
 	if _world_object_spawn_adapter == null:
 		return
-	if not _world_object_spawn_adapter.has_method("_source_postprocess_model_object"):
+	if not _world_object_spawn_adapter.has_method("postprocess_source_model_object"):
 		return
 	_world_object_spawn_adapter.call(
-		"_source_postprocess_model_object",
+		"postprocess_source_model_object",
 		instance,
 		ref,
 		base_record,
@@ -94,21 +81,22 @@ func _postprocess_source_model_object(
 		cell_grid,
 		record_id,
 		self,
+		source_key,
 	)
 
 
 func _postprocess_source_actor(
 	character: Node3D,
-	ref: CellReference,
+	ref: Variant,
 	actor_record: Variant,
 	actor_type: String,
 ) -> Node3D:
 	if _world_object_spawn_adapter == null:
 		return character
-	if not _world_object_spawn_adapter.has_method("_source_postprocess_actor"):
+	if not _world_object_spawn_adapter.has_method("postprocess_source_actor"):
 		return character
 	var processed: Node3D = _world_object_spawn_adapter.call(
-		"_source_postprocess_actor",
+		"postprocess_source_actor",
 		character,
 		ref,
 		actor_record,
@@ -129,21 +117,10 @@ func _resolve_source_reference_base_record(source_ref: Variant, record_type_out:
 
 
 func _source_light_animation_for_record(light_record: Variant) -> int:
-	if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("_source_light_animation_for_record"):
-		return int(_world_object_spawn_adapter.call("_source_light_animation_for_record", light_record))
+	if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("source_light_animation_for_record"):
+		return int(_world_object_spawn_adapter.call("source_light_animation_for_record", light_record))
 	return WorldObjectRecordScript.LightAnimation.NONE
 
-
-## Fix D (streaming_stutter_2026_04_25 plan) — task IDs of the off-thread
-## *dispatcher* tasks (the worker variant of `preregister_cell_statics`).
-## Distinct from `_prereg_task_ids` which holds the per-prototype workers
-## the dispatcher itself spawns. `drain_prereg_tasks()` waits on both.
-var _prereg_dispatcher_task_ids: Array[int] = []
-
-## Fix D — guards `_prereg_task_ids` against concurrent worker append
-## (dispatcher worker on its own thread) and main-thread drain. Held only
-## around the array operations, never around worker-bound work.
-var _prereg_task_ids_mutex: Mutex = Mutex.new()
 
 ## Plan 2026-04-28 step 2 — shared interaction-area geometry cache (one
 ## entry per door / activator prototype). Lazily allocated on first
@@ -151,9 +128,7 @@ var _prereg_task_ids_mutex: Mutex = Mutex.new()
 ## pay nothing.
 ##
 ## Typed as RefCounted because `InteractionShapeCacheScript` is preloaded
-## without a class_name (mirrors prototype_batch / prototype_registry pattern;
-## avoids load-order resolution failures). Underlying type is
-## `InteractionShapeCacheScript`.
+## without a class_name. Underlying type is `InteractionShapeCacheScript`.
 var _interaction_shape_cache: RefCounted = null
 
 # Configuration
@@ -249,8 +224,14 @@ var stats: Dictionary = {
 	"significant_objects_registered": 0,  # Objects registered with per-object LOD
 }
 
-# Morrowind light radius to Godot light range conversion factor
-const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR  # 1/70 — converts MW radius to meters
+var _route_usage_stats: Dictionary = {
+	"world_object_id_calls": 0,
+	"world_object_record_calls": 0,
+	"world_object_static_record_calls": 0,
+	"world_object_node_record_calls": 0,
+}
+
+const SOURCE_LIGHT_RADIUS_SCALE: float = CS.SCALE_FACTOR
 
 ## Lazy-spawn distance for interactive refs (containers, doors, activators,
 ## carryables). Refs beyond this distance are deferred and re-queued on camera
@@ -292,7 +273,7 @@ const LIGHT_ALWAYS_SPAWN_RADIUS_MW: float = 700.0
 ## Win 4b — MW light flag mask for animated lights (flicker / pulse). Lights
 ## with any of these flags need per-frame energy writes through the existing
 ## OmniLight3D Node3D path because LightAnimator (light_animator.gd) walks
-## the scene tree for `OmniLight3D` instances with `mw_flags` metadata. RS
+## the scene tree for `OmniLight3D` instances with `light_animation` metadata. RS
 ## RIDs aren't visible to that walker, so server-direct + animation needs a
 ## separate per-RID animator (out of scope this pass — flag-gate to keep
 ## existing flicker working).
@@ -332,18 +313,40 @@ class LightRids:
 			RenderingServer.free_rid(light_rid)
 			light_rid = RID()
 
-## Set true by `_instantiate_model_object` when a ref is skipped due to the
-## lazy-spawn distance gate. Read by `cell_manager.process_async_instantiation`
-## to route the ref into `_proximity_deferred` instead of treating as failed.
+
+class InstantiationResult:
+	extends RefCounted
+	var node: Node3D = null
+	var type_name: String = ""
+	var route: String = ""
+	var model_load_us: int = 0
+	var static_register_us: int = 0
+	var static_add_us: int = 0
+	var proximity_deferred: bool = false
+	var static_data: Dictionary = {}
+
+	func capture_from(instantiator: Variant, result_node: Node3D) -> void:
+		node = result_node
+		type_name = str(instantiator.last_type_name)
+		route = str(instantiator.last_inst_route)
+		model_load_us = int(instantiator.last_model_load_us)
+		static_register_us = int(instantiator.last_static_register_us)
+		static_add_us = int(instantiator.last_static_add_us)
+		proximity_deferred = bool(instantiator.last_proximity_deferred)
+		static_data = instantiator.last_static_data.duplicate()
+
+## Set true when a source adapter spawn route skips a ref due to the lazy-spawn
+## distance gate. Read by `cell_manager.process_async_instantiation` to route
+## the ref into `_proximity_deferred` instead of treating it as failed.
 var last_proximity_deferred: bool = false
 
 
 ## Instantiate a cell reference into a Node3D
 ## Returns null if the reference cannot be instantiated or uses StaticObjectRenderer
 var _inst_call_count: int = 0
-## Diagnostic — set to the type_name of the most recent instantiate_reference
-## call. Read by `cell_manager.process_async_instantiation` for per-type
-## timing breakdown. Scientific-approach instrumentation, not hypothesis.
+## Diagnostic — set to the type_name of the most recent spawn call. Read by
+## `cell_manager.process_async_instantiation` for per-type timing breakdown.
+## Scientific-approach instrumentation, not hypothesis.
 var last_type_name: String = ""
 ## Route-level diagnostic for the most recent instantiate/publish call.
 ## Read by CellManager to split the broad `inst` phase into actionable buckets.
@@ -359,38 +362,11 @@ func _reset_last_inst_diagnostics(route: String = "") -> void:
 	last_model_load_us = 0
 	last_static_register_us = 0
 	last_static_add_us = 0
-
-
-# PHASE_A:MAIN_ONLY - orchestrator. Source-specific record lookup is delegated
-# to the injected spawn adapter; the main-thread type dispatch stays here until
-# the remaining legacy CellReference path is fully normalized.
-func instantiate_reference(ref: CellReference, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
-	_inst_call_count += 1
-	# Reset per-call state — caller (cell_manager) reads these after return.
-	last_proximity_deferred = false
-	_reset_last_inst_diagnostics("sync")
-
-	# Use generic lookup to find the base record and its type
-	var record_type: Array = [""]
-	var base_record: Variant = _resolve_source_reference_base_record(ref, record_type)
-
-	if debug_lod and _inst_call_count <= 20:
-		Log.debug("streaming", "[LOD-INST] #%d ref=%s, type=%s, found=%s, cell=%s" % [
-			_inst_call_count, ref.ref_id, record_type[0] if record_type.size() > 0 else "?",
-			base_record != null, cell_grid
-		])
-
-	if not base_record:
-		# Not an error - some refs are for types we don't handle yet
-		last_type_name = "unknown"
-		last_inst_route = "skip"
-		return null
-
-	var type_name: String = record_type[0] if record_type.size() > 0 else ""
-	return _instantiate_resolved_reference(ref, base_record, type_name, cell_grid, cache_item_id)
+	last_static_data = {}
 
 
 func instantiate_world_object(object_id: StringName, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
+	_increment_route_usage_stat("world_object_id_calls")
 	if _world_object_source == null or not _world_object_source.has_method("get_object_record"):
 		_inst_call_count += 1
 		last_proximity_deferred = false
@@ -404,6 +380,7 @@ func instantiate_world_object(object_id: StringName, cell_grid: Vector2i = Vecto
 
 func instantiate_world_object_record(record: RefCounted, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> Node3D:
 	_inst_call_count += 1
+	_increment_route_usage_stat("world_object_record_calls")
 	last_proximity_deferred = false
 	_reset_last_inst_diagnostics("world_object")
 	if record == null:
@@ -423,7 +400,15 @@ func instantiate_world_object_record(record: RefCounted, cell_grid: Vector2i = V
 	) as Node3D
 
 
+func instantiate_world_object_record_result(record: RefCounted, cell_grid: Vector2i = Vector2i.ZERO, cache_item_id: String = "") -> InstantiationResult:
+	var node := instantiate_world_object_record(record, cell_grid, cache_item_id)
+	var result := InstantiationResult.new()
+	result.capture_from(self, node)
+	return result
+
+
 func instantiate_static_world_object_record(record: RefCounted, cell_grid: Vector2i = Vector2i.ZERO) -> Node3D:
+	_increment_route_usage_stat("world_object_static_record_calls")
 	if record == null:
 		last_type_name = "unknown"
 		last_inst_route = "skip"
@@ -474,6 +459,7 @@ func instantiate_node_world_object_record(
 	_cell_grid: Vector2i = Vector2i.ZERO,
 	cache_item_id: String = "",
 ) -> Node3D:
+	_increment_route_usage_stat("world_object_node_record_calls")
 	if record == null:
 		last_type_name = "unknown"
 		last_inst_route = "skip"
@@ -543,16 +529,19 @@ func should_source_load_creatures() -> bool:
 	return load_creatures
 
 
-func instantiate_source_light(ref: Variant, light_record: Variant) -> Node3D:
-	if ref == null or light_record == null:
+func instantiate_source_light_record(record: RefCounted, light_record: Variant) -> Node3D:
+	if record == null or light_record == null:
 		return null
-	return _instantiate_light(ref, light_record)
+	var typed_light := light_record as LightRecord
+	if typed_light == null:
+		return null
+	return _instantiate_light(record, typed_light)
 
 
-func instantiate_source_actor(ref: Variant, actor_record: Variant, actor_type: String) -> Node3D:
-	if ref == null or actor_record == null:
+func instantiate_source_actor_record(record: RefCounted, actor_record: Variant, actor_type: String) -> Node3D:
+	if record == null or actor_record == null:
 		return null
-	return _instantiate_actor(ref, actor_record, actor_type)
+	return _instantiate_actor(record, actor_record, actor_type)
 
 
 func apply_source_metadata(
@@ -567,37 +556,42 @@ func apply_source_metadata(
 	_apply_metadata(node, ref, base_record, model_path, type_name)
 
 
-func ensure_source_visual_proxy_for_ref(
-	ref: Variant,
-	model_path: String,
-	cell_grid: Vector2i,
+func ensure_source_visual_proxy_for_record(
+	record: RefCounted,
 	type_name: String,
 	cache_item_id: String = ""
 ) -> bool:
-	if ref == null:
+	if record == null:
 		return false
-	return _ensure_visual_proxy_for_ref(ref, model_path, cell_grid, type_name, cache_item_id)
+	var source_key := _record_source_key(record, type_name)
+	if source_key.is_empty():
+		return false
+	return _ensure_visual_proxy(
+		source_key,
+		_record_transform(record),
+		str(record.get("model_path")),
+		_record_cell_grid(record),
+		type_name,
+		cache_item_id,
+		StringName(str(record.get("source_ref_id"))),
+		_record_ref_num(record)
+	)
 
 
-func apply_source_visual_proxy_runtime(
+func apply_source_visual_proxy_runtime_for_record(
 	instance: Node3D,
-	ref: Variant,
-	cell_grid: Vector2i,
+	record: RefCounted,
 	type_name: String
 ) -> void:
-	if instance == null or ref == null or not _uses_visual_proxy(type_name):
+	if instance == null or record == null or not _uses_visual_proxy(type_name):
 		return
-	var source_key := make_source_key(type_name, ref, cell_grid)
+	var source_key := _record_source_key(record, type_name)
+	if source_key.is_empty():
+		return
 	instance.set_meta("source_key", source_key)
-	instance.set_meta("cell_grid", cell_grid)
-	_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
+	instance.set_meta("cell_grid", _record_cell_grid(record))
+	_suppress_visual_proxy(source_key, type_name)
 	_wire_visual_proxy_restore_on_exit(instance, source_key)
-
-
-func make_source_visual_proxy_key(type_name: String, ref: Variant, cell_grid: Vector2i) -> String:
-	if ref == null:
-		return ""
-	return make_source_key(type_name, ref, cell_grid)
 
 
 func uses_source_visual_proxy(type_name: String) -> bool:
@@ -635,60 +629,6 @@ func mark_source_visual_proxy_dirty(source_key: String, reason: String) -> void:
 	static_renderer.call("mark_proxy_dirty", source_key, reason)
 
 
-func _instantiate_resolved_reference(
-	ref: CellReference,
-	base_record: Variant,
-	type_name: String,
-	cell_grid: Vector2i = Vector2i.ZERO,
-	cache_item_id: String = "",
-) -> Node3D:
-	last_type_name = type_name
-	if type_name == "light" and not load_lights:
-		return null
-	if type_name == "light" and _source_is_carryable(type_name, base_record):
-		return _instantiate_model_object(ref, base_record, cell_grid, type_name, cache_item_id)
-
-	# Handle different record types
-	match type_name:
-		"light":
-			var light_record := base_record as LightRecord
-			# Win 4a — lazy-spawn gate. Skip Node3D + OmniLight3D + model
-			# construction when the camera is too far for the light to
-			# meaningfully contribute, unless the light is "big" (braziers /
-			# templar sconces). cell_manager re-queues via
-			# tick_proximity_deferred when the camera approaches.
-			if _is_light_proximity_deferred(light_record, ref):
-				last_proximity_deferred = true
-				last_inst_route = "deferred"
-				return null
-			return _instantiate_light(ref, light_record)
-		"npc":
-			if not load_npcs:
-				return null
-			return _instantiate_actor(ref, base_record as NPCRecord, "npc")
-		"creature":
-			if not load_creatures:
-				return null
-			return _instantiate_actor(ref, base_record as CreatureRecord, "creature")
-		"leveled_creature":
-			if not load_creatures:
-				return null
-			var resolved: Variant = null
-			if _world_object_spawn_adapter != null and _world_object_spawn_adapter.has_method("_source_resolve_leveled_creature"):
-				resolved = _world_object_spawn_adapter.call("_source_resolve_leveled_creature", base_record, self, 10)
-			if resolved:
-				return _instantiate_actor(ref, resolved, "creature")
-			return null
-		"leveled_item":
-			# Leveled items need to be resolved at runtime
-			# Could spawn random items here if needed
-			last_inst_route = "skip"
-			return null
-		_:
-			# Standard model-based object
-			return _instantiate_model_object(ref, base_record, cell_grid, type_name, cache_item_id)
-
-
 ## Check if a model is considered "significant" for per-object LOD
 ## Significant objects include buildings, towers, large rocks, landmarks
 ## Uses ImpostorCandidates patterns (same ones used for impostor generation)
@@ -707,164 +647,17 @@ func is_significant_object(model_path: String) -> bool:
 # LOD configuration is handled by NativeStreamingManager._configure_cell_visibility()
 
 
-## Instantiate a standard object with a NIF model
-## For flora/rocks, uses StaticObjectRenderer for ~10x faster instantiation
-var _model_obj_count: int = 0
-# PHASE_A:MAIN_ONLY — the Phase A split point. Current body is fully synchronous;
-# post-Phase-A this function becomes the orchestrator that dispatches worker
-# tasks (lines 328-351 moved off-thread) and runs the main-thread tail
-# (lines 353-410: carryable / door / interior-collision / anim).
-func _instantiate_model_object(ref: CellReference, base_record: Variant, cell_grid: Vector2i = Vector2i.ZERO, type_name: String = "", cache_item_id: String = "") -> Node3D:
-	_model_obj_count += 1
-
-	# Get model path and record ID
-	var model_path: String = _get_model_path(base_record)
-	if model_path.is_empty():
-		return null
-
-	# Get record_id for collision shape library lookup
-	var record_id: String = ""
-	if "record_id" in base_record:
-		record_id = base_record.record_id
-
-	# Per-call override: interior pockets must bypass the static renderer.
-	var effective_use_static: bool = _effective_use_static_renderer()
-
-	# I.1 — Carryable check. Generic via CarryableRegistry; the type list
-	# lives in the MW adapter (mw_carryable_registry.gd). Carryables MUST
-	# bypass the static-renderer fast path (no Node3D = no physics) and
-	# the object pool (per-instance RigidBody3D state can't be pooled
-	# safely without `(model_path, body_type)` keying — deferred).
-	var is_carryable: bool = _source_is_carryable(type_name, base_record)
-
-	# Debug: Log what path each object is taking
-	if debug_lod and _model_obj_count <= 20:
-		var is_static := effective_use_static and static_renderer and _is_static_render_model(model_path) and not is_carryable
-		var is_sig := is_significant_object(model_path)
-		Log.debug("streaming", "[LOD-PATH] #%d %s: static_render=%s, significant=%s, carryable=%s" % [
-			_model_obj_count, model_path.get_file(), is_static, is_sig, is_carryable
-		])
-
-	# Check if this model should use static rendering (statics_no_node3d T.1)
-	# Route statics via RenderingServer.instance_create2 (MultiMesh) instead
-	# of Node3D. ~80% of MW refs are STAT type — eliminates per-object Node3D
-	# + StaticBody3D construction. Cell-level merged trimesh collision
-	# (cell_static_collision.gd) provides the physics. Interactive refs
-	# (doors, activators, containers, carryables, animated statics) stay on
-	# the Node3D path.
-	#
-	# Carve-outs:
-	# - is_carryable — needs RigidBody3D for pickup physics
-	# - effective_use_static false — interior pockets (§5.3 carve-out locked)
-	# - has_animation — flags, banners, rotating objects need AnimationPlayer lifecycle
-	if _should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static):
-		last_proximity_deferred = false
-		return _instantiate_static_object(ref, model_path, cell_grid)
-
-	# Lazy-spawn distance gate (statics_no_node3d follow-up 2026-04-19).
-	# Containers/doors/activators/carryables cost 12-20 ms per instantiate —
-	# defer until player is within interaction range. Re-queued by
-	# `cell_manager.tick_proximity_deferred` when camera approaches.
-	# Interior pockets always use_static=false → skip gate (pockets are
-	# bounded, every ref is expected to spawn immediately).
-	if effective_use_static and _is_proximity_gated(type_name, is_carryable):
-		var ref_world_pos := CS.vector_to_godot(ref.position)
-		if ref_world_pos.distance_squared_to(camera_position) > INTERACTIVE_PROXIMITY_THRESHOLD_M * INTERACTIVE_PROXIMITY_THRESHOLD_M:
-			_ensure_visual_proxy_for_ref(ref, model_path, cell_grid, type_name, cache_item_id)
-			last_proximity_deferred = true
-			last_inst_route = "deferred"
-			return null
-	last_proximity_deferred = false
-
-	# Try to get from object pool first (if enabled). Skip for carryables —
-	# the pool isn't keyed by body_type so a previously-converted RigidBody3D
-	# could be returned for a non-carryable acquire (or vice versa).
-	if not is_carryable and use_object_pool and object_pool:
-		var pooled: Node3D = object_pool.call("acquire", model_path)
-		if pooled:
-			last_inst_route = "node_pool"
-			pooled.name = str(ref.ref_id) + "_" + str(ref.ref_num)
-			# Note: visibility_range is already configured on pooled objects
-			_apply_transform(pooled, ref, true)
-			stats["objects_from_pool"] += 1
-			return pooled
-
-	# Load — get_model() returns a fresh Node3D (collision disabled) from PackedScene cache.
-	last_inst_route = "node_sync"
-	var model_load_start := Time.get_ticks_usec()
-	var instance: Node3D = model_loader.call("get_model", model_path, record_id)
-	last_model_load_us = Time.get_ticks_usec() - model_load_start
-	if not instance:
-		# Create a placeholder for missing models
-		last_inst_route = "placeholder"
-		return _create_placeholder(ref)
-
-	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
-
-	# Enable collision immediately for objects within NEAR tier (<150m).
-	# model_loader disables all CollisionShape3D at instantiate time to prevent
-	# Jolt overwhelm during startup bursts. Re-enable here for close objects.
-	var ref_pos := CS.vector_to_godot(ref.position)
-	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
-		if not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
-			_enable_collision_shapes_in_tree(instance)
-
-	# Hide materialless meshes (collision geometry, placeholders)
-	# LOD nodes (_LOD1, _LOD2, _LOD3) are now kept visible and configured with visibility_range
-	_hide_lod_nodes(instance)
-
-	# Apply transform
-	_apply_transform(instance, ref, true)
-
-	# Add metadata for console object picker
-	_apply_metadata(instance, ref, base_record, model_path, type_name)
-	if _uses_visual_proxy(type_name):
-		var source_key := make_source_key(type_name, ref, cell_grid)
-		instance.set_meta("source_key", source_key)
-		instance.set_meta("cell_grid", cell_grid)
-		_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
-		_wire_visual_proxy_restore_on_exit(instance, source_key)
-
-	_postprocess_source_model_object(instance, ref, base_record, type_name, cell_grid, record_id)
-
-	# Interior collision fallback — generate a StaticBody3D from the mesh
-	# AABB for non-carryable, non-door objects that lack baked collision.
-	# Interior pockets bypass the static renderer (all objects are Node3D),
-	# so floors, walls, and furniture need collision for physics to work
-	# (rigid body items resting on surfaces, player walking). The per-call
-	# load_profile tells us if we're in an interior context. Exterior objects
-	# that already have collision from the NIF converter are unaffected.
-	if not is_carryable and not (type_name == "door" and ref.is_teleport):
-		if not _effective_use_static_renderer():
-			if not _has_static_body(instance):
-				_generate_static_collision(instance)
-
-	stats["objects_instantiated"] += 1
-
-	# Auto-play NIF keyframe animations (flags, banners, rotating objects) in NEAR tier only
-	_auto_play_nif_animation(instance, ref)
-
-	# NOTE: Fade-in is NOT applied here because the node isn't in the scene tree yet.
-	# Fade-in must be applied AFTER add_child() - see CellManager._instantiate_cell()
-
-	# NOTE: visibility_range configuration happens in NativeStreamingManager._configure_cell_visibility()
-	# after the cell is added to the scene tree. No need to register with a separate distance manager.
-
-	return instance
-
-
 ## Phase A — main-thread dispatcher pre-flight. Mirrors every bailout the sync
-## `instantiate_reference` → `_instantiate_model_object` path makes BEFORE it
+## source-ref node path makes BEFORE it
 ## would reach `model_loader.get_model`:
 ##
 ##   1. Type exclusion — light / npc / creature / leveled_* go through custom
 ##      paths (`_instantiate_light`, `_instantiate_actor`, leveled resolver).
 ##      These NEVER hit the cache-hit PackedScene.instantiate path.
 ##   2. STAT → static-renderer routing. `_should_route_to_renderer` returns
-##      true for the ~80% STAT case; sync calls `_instantiate_static_object`
-##      (RS.instance_create2, no Node3D). Dispatching these to worker would
-##      REGRESS the T.1 statics_no_node3d win (reg_slots = 1301 → 0, phys_pairs
-##      1 → ~1800). Never dispatch STAT refs that will route to RS.
+##      true for the ~80% STAT case. Dispatching these to the Node3D worker
+##      would REGRESS the T.1 statics_no_node3d win by spawning per-ref
+##      physics bodies. Never dispatch STAT refs that will route to RS.
 ##   3. Proximity gate — `_is_proximity_gated` + > INTERACTIVE_PROXIMITY_THRESHOLD_M
 ##      returns null in sync, which cell_manager routes into _proximity_deferred.
 ##      Dispatching these to worker would spawn Node3Ds that sync would have
@@ -961,44 +754,6 @@ func should_dispatch_static_precompute(
 	return true
 
 
-## Phase F — Prototype pre-registration dispatcher (main-thread).
-##
-## Scans cell_record.references for unique STAT-routed model paths that are not
-## yet registered, dispatches one WorkerThreadPool task per unique path to
-## `_worker_preregister_prototype`. Runs in parallel with the cell's
-## ResourceLoader.load_threaded_request pipeline so by the time static refs
-## reach the instantiation queue, `should_dispatch_static_precompute` → true
-## (fast path) instead of falling through to sync cold-register (~20ms per
-## unique type). Eliminates the `static avg µs 200-2074 (cold 38050)` spike.
-##
-## Called by cell_manager.request_exterior_cell_async / request_cell_async
-## after the source cell data is available.
-##
-## Idempotent: if the cell's types are already registered (common after first
-## visit), dispatches 0 tasks. Duplicates across cells are harmless — worker's
-## own fast-path skips already-registered types after mutex-read of _mesh_types.
-##
-## Returns the number of tasks dispatched (for diagnostics).
-##
-## Plan: docs/plans/streaming_stutter_2026_04_25.md (Fix D)
-##
-## Fix D — formerly PHASE_F:MAIN_ONLY. The previous main-thread implementation
-## was a 1644 ms post-teleport spike: walking 200 cell refs through source lookup +
-## has_animation + has_type + resolve_disk_path on every active-loader cell
-## load, two cells per frame. After Fix C made has_animation cheap, the
-## remaining cost was still O(refs) main-thread iteration. Fix D dispatches
-## the entire body to a single worker per cell; main-thread cost is now ~µs
-## (one bind + add_task).
-##
-## Worker-safe contract — every method touched by the dispatcher worker:
-##   - spawn adapter source lookup   — cache populated at boot, read-only
-##   - CarryableRegistry.is_carryable — static, _entries set at boot, read-only
-##   - model_loader.has_animation    — Fix D mutex-protected
-##   - model_loader.resolve_disk_path / resolve_shape_pack_path — Fix D mutex
-##   - static_renderer.has_type       — already mutex-protected (_mesh_types_mutex)
-##   - WorkerThreadPool.add_task      — supported from worker threads
-##   - _prune_completed_prereg_tasks  — Fix D mutex (_prereg_task_ids_mutex)
-##   - _prereg_task_ids append        — Fix D mutex
 ## Shared main-thread classifier for callers that need to know whether a model
 ## will use the static renderer before an InstantiationEntry exists.
 func should_route_model_to_static_renderer(
@@ -1009,256 +764,6 @@ func should_route_model_to_static_renderer(
 ) -> bool:
 	var is_carryable: bool = _source_is_carryable(type_name, base_record)
 	return _should_route_to_renderer(type_name, model_path, is_carryable, effective_use_static)
-
-
-func preregister_cell_statics(cell_record: Variant) -> int:
-	# Phase 0 ablation escape hatch — tracker §12.2 crash site lived inside
-	# the old `has_animation → get_model → ResourceLoader.load` chain. Fix C
-	# rewrote has_animation as SceneState metadata and Fix D moved everything
-	# off-thread, so the original crash class is no longer reachable; flag
-	# kept for historical A/B isolation.
-	if StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG:
-		return 0
-	if static_renderer == null or model_loader == null or cell_record == null:
-		return 0
-
-	# Fix D — body runs off-thread. Caller doesn't await, so the dispatched
-	# count is no longer meaningful at return time; we return 0 and rely on
-	# stats / heartbeat to surface activity.
-	var dispatcher_id: int = WorkerThreadPool.add_task(
-		_worker_dispatch_preregister_cell.bind(cell_record),
-		false,  # low priority — the per-prototype tasks the dispatcher spawns
-				# stay HIGH so they still race the cell's instantiation queue
-		"ref_instantiator:phase_f_dispatcher",
-	)
-	_prereg_dispatcher_task_ids.append(dispatcher_id)
-	return 0
-
-
-func preregister_world_cell_statics(records: Array) -> int:
-	if StreamingConfig.DEBUG_DISABLE_PHASE_F_PREREG:
-		return 0
-	if static_renderer == null or model_loader == null or records.is_empty():
-		return 0
-	var dispatcher_id: int = WorkerThreadPool.add_task(
-		_worker_dispatch_preregister_world_records.bind(records.duplicate()),
-		false,
-		"ref_instantiator:world_record_prereg",
-	)
-	_prereg_dispatcher_task_ids.append(dispatcher_id)
-	return 0
-
-
-func _worker_dispatch_preregister_world_records(records: Array) -> void:
-	if static_renderer == null or model_loader == null:
-		return
-
-	var to_register: Dictionary = {}
-	for record: RefCounted in records:
-		if record == null or not bool(record.get("static_batch_allowed")):
-			continue
-		var model_path := str(record.get("model_path"))
-		if model_path.is_empty():
-			continue
-		if not _should_route_to_renderer("static", model_path, false, use_static_renderer):
-			continue
-		var normalized: String = model_path.to_lower().replace("/", "\\")
-		if normalized in to_register:
-			continue
-		var renderer_knows: bool = static_renderer.call("has_type", normalized)
-		var needs_shape_warm: bool = shape_cache != null
-		if renderer_knows and not needs_shape_warm:
-			continue
-		var disk_path: String = model_loader.call("resolve_disk_path", model_path)
-		if disk_path.is_empty():
-			continue
-		var shape_pack_path: String = ""
-		if shape_cache != null:
-			shape_pack_path = model_loader.call("resolve_shape_pack_path", model_path)
-		to_register[normalized] = {
-			"disk": disk_path,
-			"pack": shape_pack_path,
-		}
-
-	_dispatch_preregistration_tasks(to_register)
-
-
-# Fix D — off-thread body of preregister_cell_statics. WORKER_SAFE per the
-# contract documented on the public function above. Reads autoloads (now
-# read-only after batch populate at boot), calls mutex-protected helpers,
-# dispatches per-prototype workers via WorkerThreadPool.add_task.
-#
-# The classification step that used to sit before dedupe (carryable check,
-# _should_route_to_renderer) stays here; has_animation (called inside it)
-# is now thread-safe via the model_loader disk_cache_mutex (Fix D).
-func _worker_dispatch_preregister_cell(cell_record: Variant) -> void:
-	# Local re-check (defensive against teardown race): if any dependency
-	# is gone by the time the worker runs, bail cleanly.
-	if static_renderer == null or model_loader == null or cell_record == null:
-		return
-
-	var to_register: Dictionary = {}  # normalized_path -> { disk: String, pack: String }
-
-	for ref: CellReference in cell_record.references:
-		var record_type: Array = [""]
-		# Fix D follow-up — worker-thread-safe variant. Cache miss returns
-		# null (no on-demand creation, which is main-thread-only). Skipped
-		# refs get registered later when the main-thread instantiation path
-		# touches them.
-		var base_record: Variant = _resolve_source_reference_base_record(ref, record_type, true)
-		if base_record == null:
-			continue
-		var type_name: String = record_type[0] if record_type.size() > 0 else ""
-
-		if not "model" in base_record:
-			continue
-		var model_path: String = base_record.model
-		if model_path.is_empty():
-			continue
-
-		# Filter to STAT-routed refs only — interactives use Phase A.
-		var is_carryable: bool = _source_is_carryable(type_name, base_record)
-		if not _should_route_to_renderer(type_name, model_path, is_carryable, use_static_renderer):
-			continue
-
-		var normalized: String = model_path.to_lower().replace("/", "\\")
-		if normalized in to_register:
-			continue
-
-		# Already registered AND shape-cache warm? Skip. Otherwise we still
-		# want the per-prototype worker to fire (it covers shape-cache-only
-		# cold cases too).
-		var renderer_knows: bool = static_renderer.call("has_type", normalized)
-		var needs_shape_warm: bool = shape_cache != null
-		if renderer_knows and not needs_shape_warm:
-			continue
-
-		var disk_path: String = model_loader.call("resolve_disk_path", model_path)
-		if disk_path.is_empty():
-			continue
-
-		var shape_pack_path: String = ""
-		if shape_cache != null:
-			shape_pack_path = model_loader.call("resolve_shape_pack_path", model_path)
-
-		to_register[normalized] = {
-			"disk": disk_path,
-			"pack": shape_pack_path,
-		}
-
-	# Mutex-protected prune + append batch. Holds the lock only around the
-	# array work; doesn't span the WorkerThreadPool.add_task calls (those
-	# are themselves thread-safe and fast, but holding our local mutex
-	# during dispatch would needlessly serialize concurrent dispatchers).
-	_prereg_task_ids_mutex.lock()
-	# Prune in-place to bound array size over long sessions.
-	if not _prereg_task_ids.is_empty():
-		var still_pending: Array[int] = []
-		for tid: int in _prereg_task_ids:
-			if not WorkerThreadPool.is_task_completed(tid):
-				still_pending.append(tid)
-		_prereg_task_ids = still_pending
-	_prereg_task_ids_mutex.unlock()
-
-	for normalized: String in to_register:
-		var entry: Dictionary = to_register[normalized]
-		var disk_path: String = entry.disk
-		var shape_pack_path: String = entry.pack
-		var task_id: int = WorkerThreadPool.add_task(
-			_worker_preregister_prototype.bind(normalized, disk_path, shape_pack_path),
-			true,
-			"ref_instantiator:phase_f_prereg"
-		)
-		_prereg_task_ids_mutex.lock()
-		_prereg_task_ids.append(task_id)
-		_prereg_task_ids_mutex.unlock()
-
-
-## Phase F — block until every in-flight prototype pre-reg worker completes.
-##
-## Called from CellManager.fast_cleanup (invoked by native_streaming_manager.
-## fast_cleanup on WM_CLOSE_REQUEST) BEFORE `_static_renderer.clear()` runs.
-## Prevents the shutdown race where a worker mid-`register_from_prototype`
-## would write into freed MeshType storage — exact symptom of the sig 11
-## cluster flagged by @builder in the Phase F review.
-##
-## `wait_for_task_completion` is idempotent once the task is done, and the
-## Phase F worker is bounded (~20ms PackedScene.instantiate + microseconds
-## of subtree walk). Worst-case shutdown delay: ~50ms per in-flight task,
-## typically < 10 tasks pending = < 500ms blocked. Acceptable on quit path.
-##
-## Plan: phase_f_prototype_prereg.md §5
-func drain_prereg_tasks() -> void:
-	# Fix D — drain dispatcher tasks first; they may still be enqueueing
-	# per-prototype tasks into _prereg_task_ids when shutdown begins.
-	# Once dispatchers are done, _prereg_task_ids is stable for read.
-	for dispatcher_id: int in _prereg_dispatcher_task_ids:
-		if not WorkerThreadPool.is_task_completed(dispatcher_id):
-			WorkerThreadPool.wait_for_task_completion(dispatcher_id)
-	_prereg_dispatcher_task_ids.clear()
-
-	_prereg_task_ids_mutex.lock()
-	var snapshot: Array[int] = []
-	snapshot.append_array(_prereg_task_ids)
-	_prereg_task_ids.clear()
-	_prereg_task_ids_mutex.unlock()
-	for task_id: int in snapshot:
-		if not WorkerThreadPool.is_task_completed(task_id):
-			WorkerThreadPool.wait_for_task_completion(task_id)
-
-
-## Phase F — Prototype pre-registration worker.
-##
-## Loads the PackedScene off-thread (ResourceLoader.load is thread-safe),
-## instantiates it (PackedScene.instantiate is thread-safe since Godot 4.1 per
-## issue #79194), and calls static_renderer.register_from_prototype to extract
-## sub-meshes into _mesh_types. The register_from_prototype method has a
-## mutex-protected fast-path + atomic-insert under lock, so concurrent callers
-## on the same type_name dedupe safely.
-##
-## Ephemeral prototype node: the detached Node3D subtree is used only to walk
-## sub-meshes. register_from_prototype stores strong refs to mesh + material
-## resources in MeshType; the prototype itself has no other owners after this
-## function returns, so Godot's refcount reaper collects it. No main-thread
-## queue_free needed for un-parented nodes with refcount 0.
-##
-## Plan: docs/plans/distant_rendering_2026_04/phase_f_prototype_prereg.md §4
-## T.6 addition: also warms StaticShapeCache from the `.shapes.res` sidecar
-## when `shape_pack_path` is non-empty. Matches the rendering warm so both
-## the MID/registry pipeline AND the per-cell merged collision body see
-## warm caches by the time the cell drains its instantiation queue.
-# PHASE_F:WORKER_SAFE — by design. Zero autoload / signal / scene-tree access.
-func _worker_preregister_prototype(type_name: String, disk_path: String, shape_pack_path: String) -> void:
-	if static_renderer == null:
-		if shape_cache != null and not shape_pack_path.is_empty():
-			shape_cache.call("warm_from_path", type_name, shape_pack_path)
-		return
-	# Fast-path dedup: skip the ~20ms PackedScene.instantiate if another worker
-	# beat us to this type. Mutex-wrapped via has_type. Still warm the shape
-	# sidecar after the render fast path so collision cache work cannot delay
-	# visual prototype registration.
-	if static_renderer.call("has_type", type_name):
-		if shape_cache != null and not shape_pack_path.is_empty():
-			shape_cache.call("warm_from_path", type_name, shape_pack_path)
-		return
-
-	# ResourceLoader.load is thread-safe — returns cached PackedScene if another
-	# worker already loaded the same path.
-	var scene: PackedScene = ResourceLoader.load(disk_path, "PackedScene") as PackedScene
-	if scene == null or not scene.can_instantiate():
-		return
-
-	# PackedScene.instantiate is thread-safe since Godot 4.1 (issue #79194).
-	var raw: Node = scene.instantiate(PackedScene.GEN_EDIT_STATE_DISABLED)
-	if raw == null or not (raw is Node3D):
-		return
-
-	# register_from_prototype has mutex-protected fast-path + atomic insert.
-	# Concurrent callers on the same type_name dedupe safely.
-	static_renderer.call("register_from_prototype", type_name, raw as Node3D)
-
-	if shape_cache != null and not shape_pack_path.is_empty():
-		shape_cache.call("warm_from_path", type_name, shape_pack_path)
 
 
 ## Phase E — worker that precomputes a PrecomputedInstance for a STAT ref.
@@ -1277,11 +782,17 @@ func _worker_static_precompute(entry: Variant, cell_grid: Vector2i) -> void:
 	if static_renderer == null:
 		return
 	var normalized: String = entry.model_path.to_lower().replace("/", "\\")
-	var precomp: Variant = static_renderer.call("precompute_instance", normalized, entry.ref, cell_grid)
-	# Populate ref-metadata fields the sync add_instance would fill. Builder
-	# review 2026-04-21 BLOCKER 1: precompute_instance can't see
-	# entry.model_path / entry.item_id from its signature (it only takes the
-	# CellReference), so we fill them here. Empty strings break downstream
+	var world_transform := _source_ref_transform(entry.ref)
+	var precomp: Variant = static_renderer.call(
+		"precompute_instance",
+		normalized,
+		cell_grid,
+		world_transform,
+		StringName(str(entry.ref.ref_id)),
+		int(entry.ref.ref_num),
+	)
+	# Populate fields that do not belong in the worker-safe renderer contract.
+	# Empty strings break downstream
 	# readers — e.g. `find_instances_near` at static_object_renderer.gd ~1073
 	# skips any InstanceData whose model_path is empty. Future promotion work
 	# relies on this field being populated.
@@ -1339,9 +850,8 @@ func complete_worker_static_precompute(entry: Variant, precomp: Variant) -> Node
 ## returns true — that boundary is the implicit mutex (plan §3.4).
 ##
 ## base_record + type_name are passed via .bind() rather than on the entry
-## because they live only transiently inside instantiate_reference and the
-## slice-2 schema deliberately didn't grow to hold them. The dispatcher looks
-## them up on main thread because adapter source lookup may be worker-unsafe.
+## because adapter source lookup may be worker-unsafe and should stay on the
+## main thread.
 ##
 ## Mirrors model_loader._instantiate_from_scene's post-processing
 ## (strip_occluders + disable_collision) plus the main-thread "setup" tail
@@ -1378,9 +888,16 @@ func _worker_instantiate(
 	# Static helper — class-level callable (no instance state).
 	@warning_ignore("unsafe_method_access")
 	model_loader._disable_collision_shapes_in_tree(instance)
-	instance.name = str(entry.ref.ref_id) + "_" + str(entry.ref.ref_num)
-	_apply_transform(instance, entry.ref, true)
-	_apply_metadata(instance, entry.ref, base_record, entry.model_path, type_name)
+	var record: RefCounted = entry.world_object_record
+	if record != null:
+		var source_ref := str(record.get("source_ref_id"))
+		instance.name = source_ref if not source_ref.is_empty() else str(record.get("object_id"))
+		instance.transform = _record_transform(record)
+		_apply_record_metadata(instance, record, entry.model_path, type_name)
+	else:
+		instance.name = str(entry.ref.ref_id) + "_" + str(entry.ref.ref_num)
+		_apply_transform(instance, entry.ref, true)
+		_apply_metadata(instance, entry.ref, base_record, entry.model_path, type_name)
 	_hide_lod_nodes(instance)
 	# Last write — becomes visible to the main-thread drain once
 	# WorkerThreadPool.is_task_completed returns true.
@@ -1417,29 +934,33 @@ func complete_worker_instantiate(
 	_reset_last_inst_diagnostics("worker_node_tail")
 	# Null path removed — the cell_manager drain only calls this when
 	# entry.worker_instance != null. @roaster review 2026-04-20 §4c.
-	var ref: CellReference = entry.ref
+	var ref: Variant = entry.ref
+	var record: RefCounted = entry.world_object_record
 	var record_id: String = ""
 	if base_record != null and "record_id" in base_record:
 		record_id = base_record.record_id
-	var cell_grid: Vector2i = entry.cell_grid
+	var cell_grid: Vector2i = _record_cell_grid(record) if record != null else entry.cell_grid
+	var source_key := ""
 	if _uses_visual_proxy(type_name):
-		var source_key := make_source_key(type_name, ref, cell_grid)
-		instance.set_meta("source_key", source_key)
-		instance.set_meta("cell_grid", cell_grid)
-		_suppress_visual_proxy_for_ref(ref, cell_grid, type_name)
-		_wire_visual_proxy_restore_on_exit(instance, source_key)
+		source_key = _record_source_key(record, type_name) if record != null else ""
+		if not source_key.is_empty():
+			instance.set_meta("source_key", source_key)
+			instance.set_meta("cell_grid", cell_grid)
+			_suppress_visual_proxy(source_key, type_name)
+			_wire_visual_proxy_restore_on_exit(instance, source_key)
 
 	# NEAR-tier collision enable (mirror of _instantiate_model_object:339-342).
-	var ref_pos := CS.vector_to_godot(ref.position)
+	var ref_pos := _record_transform(record).origin if record != null else CS.vector_to_godot(ref.position)
 	if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
 		if not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
 			_enable_collision_shapes_in_tree(instance)
 
 	# Carryable conversion (mirror of _instantiate_model_object:353-374).
 	var is_carryable: bool = _source_is_carryable(type_name, base_record)
-	_postprocess_source_model_object(instance, ref, base_record, type_name, cell_grid, record_id)
+	_postprocess_source_model_object(instance, ref, base_record, type_name, cell_grid, record_id, source_key)
 	# Interior collision fallback (mirror of _instantiate_model_object:385-395).
-	if not is_carryable and not (type_name == "door" and ref.is_teleport):
+	var is_teleport_door := bool(ref != null and "is_teleport" in ref and ref.is_teleport)
+	if not is_carryable and not (type_name == "door" and is_teleport_door):
 		if not _effective_use_static_renderer():
 			if not _has_static_body(instance) and not StreamingConfig.DEBUG_DISABLE_JOLT_ATTACH:
 				_generate_static_collision(instance)
@@ -1452,25 +973,6 @@ func complete_worker_instantiate(
 	return instance
 
 
-static func make_source_key(category: String, ref: CellReference, cell_grid: Vector2i) -> String:
-	var ref_id_lower := str(ref.ref_id).to_lower()
-	return "%s|ext|%d,%d|%d|%s" % [
-		category,
-		cell_grid.x,
-		cell_grid.y,
-		ref.ref_num,
-		ref_id_lower,
-	]
-
-
-func _make_ref_transform(ref: CellReference) -> Transform3D:
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
-	return Transform3D(basis, pos)
-
-
 func _record_transform(record: RefCounted) -> Transform3D:
 	if record == null:
 		return Transform3D.IDENTITY
@@ -1478,6 +980,16 @@ func _record_transform(record: RefCounted) -> Transform3D:
 	if value is Transform3D:
 		return value as Transform3D
 	return Transform3D.IDENTITY
+
+
+func _source_ref_transform(ref: Variant) -> Transform3D:
+	if ref == null:
+		return Transform3D.IDENTITY
+	var pos := CS.vector_to_godot(ref.position)
+	var scale := CS.scale_to_godot(ref.scale)
+	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
+	basis = basis.scaled(scale)
+	return Transform3D(basis, pos)
 
 
 func _record_source_type(record: RefCounted) -> String:
@@ -1489,18 +1001,69 @@ func _record_source_type(record: RefCounted) -> String:
 	return "object"
 
 
-func _ensure_visual_proxy_for_ref(ref: CellReference, model_path: String, cell_grid: Vector2i, type_name: String, cache_item_id: String = "") -> bool:
+func _record_cell_grid(record: RefCounted) -> Vector2i:
+	if record == null:
+		return Vector2i.ZERO
+	var value: Variant = record.get("cell_grid")
+	if value is Vector2i:
+		return value
+	return Vector2i.ZERO
+
+
+func _record_source_key(record: RefCounted, type_name: String) -> String:
+	if record == null:
+		return ""
+	var source_key := str(record.get("source_key"))
+	if not source_key.is_empty():
+		return source_key
+	var object_id := str(record.get("object_id"))
+	if object_id.is_empty():
+		return ""
+	return "%s:%s" % [type_name, object_id]
+
+
+func _record_ref_num(record: RefCounted) -> int:
+	if record == null:
+		return 0
+	var object_id := str(record.get("object_id"))
+	if object_id.is_empty():
+		return 0
+	var parts := object_id.split(":")
+	if parts.is_empty():
+		return 0
+	return int(parts[parts.size() - 1])
+
+
+func _record_node_name(record: RefCounted) -> String:
+	if record == null:
+		return ""
+	var source_ref := str(record.get("source_ref_id"))
+	var ref_num := _record_ref_num(record)
+	if not source_ref.is_empty() and ref_num != 0:
+		return "%s_%d" % [source_ref, ref_num]
+	var object_id := str(record.get("object_id"))
+	return object_id if not object_id.is_empty() else source_ref
+
+
+func _ensure_visual_proxy(
+	source_key: String,
+	transform: Transform3D,
+	model_path: String,
+	cell_grid: Vector2i,
+	type_name: String,
+	cache_item_id: String = "",
+	ref_id: StringName = &"",
+	ref_num: int = 0
+) -> bool:
 	if not _uses_visual_proxy(type_name):
 		return false
 	if type_name == "container":
-		var ref_world_pos := CS.vector_to_godot(ref.position)
-		if ref_world_pos.distance_squared_to(camera_position) > CONTAINER_VISUAL_PROXY_RANGE_M * CONTAINER_VISUAL_PROXY_RANGE_M:
+		if transform.origin.distance_squared_to(camera_position) > CONTAINER_VISUAL_PROXY_RANGE_M * CONTAINER_VISUAL_PROXY_RANGE_M:
 			return false
 	if static_renderer == null or model_loader == null:
 		return false
 	if not static_renderer.has_method("add_visual_proxy"):
 		return false
-	var source_key := make_source_key(type_name, ref, cell_grid)
 	if static_renderer.has_method("is_proxy_dirty") and bool(static_renderer.call("is_proxy_dirty", source_key)):
 		return false
 
@@ -1513,12 +1076,12 @@ func _ensure_visual_proxy_for_ref(ref: CellReference, model_path: String, cell_g
 		"add_visual_proxy",
 		source_key,
 		normalized,
-		_make_ref_transform(ref),
+		transform,
 		cell_grid,
 		model_path,
 		"",
-		ref.ref_id,
-		ref.ref_num
+		ref_id,
+		ref_num
 	)
 	last_static_add_us += Time.get_ticks_usec() - add_start
 	if instance_id < 0:
@@ -1547,10 +1110,10 @@ func _ensure_visual_proxy_type_registered(type_name: String, model_path: String,
 	return registered
 
 
-func _suppress_visual_proxy_for_ref(ref: CellReference, cell_grid: Vector2i, type_name: String) -> void:
+func _suppress_visual_proxy(source_key: String, type_name: String) -> void:
 	if not _uses_visual_proxy(type_name) or static_renderer == null or not static_renderer.has_method("suppress_proxy"):
 		return
-	static_renderer.call("suppress_proxy", make_source_key(type_name, ref, cell_grid))
+	static_renderer.call("suppress_proxy", source_key)
 
 
 static func _uses_visual_proxy(type_name: String) -> bool:
@@ -1577,67 +1140,12 @@ func _restore_visual_proxy_if_clean(source_key: String) -> void:
 	static_renderer.call("restore_proxy_if_clean", source_key)
 
 
-## Instantiate a flora/rock using StaticObjectRenderer (RenderingServer direct)
-## Returns null (no Node3D created) - the instance exists only in RenderingServer
-## This is ~10x faster than Node3D.duplicate()
-# PHASE_A:MAIN_ONLY — touches static_renderer singleton (register_from_prototype,
-# add_instance). RS calls are thread-safe but registry mutation must stay main.
-func _instantiate_static_object(ref: CellReference, model_path: String, cell_grid: Vector2i) -> Node3D:
-	var normalized := model_path.to_lower().replace("/", "\\")
-	last_inst_route = "static_hot"
-
-	# Ensure model is loaded and registered with static renderer
-	if not static_renderer.call("has_type", normalized):
-		last_inst_route = "static_cold"
-		# Load prototype to get mesh
-		var load_start := Time.get_ticks_usec()
-		var prototype: Node3D = model_loader.call("get_model", model_path)
-		last_model_load_us = Time.get_ticks_usec() - load_start
-		if prototype:
-			var reg_start := Time.get_ticks_usec()
-			static_renderer.call("register_from_prototype", normalized, prototype)
-			last_static_register_us = Time.get_ticks_usec() - reg_start
-		else:
-			last_inst_route = "static_cold_fail"
-			return null
-
-	# Calculate transform using CoordinateSystem's ESM rotation conversion
-	var pos := CS.vector_to_godot(ref.position)
-	var scale := CS.scale_to_godot(ref.scale)
-	var basis := CS.esm_rotation_to_godot_basis(ref.rotation)
-	basis = basis.scaled(scale)
-	var transform := Transform3D(basis, pos)
-
-	# Get mesh AABB for GPU Scene Database
-	var mesh_type_stats: Dictionary = static_renderer.call("get_mesh_type_stats", normalized)
-	var aabb: AABB = mesh_type_stats.get("aabb", AABB())
-
-	# Add instance to static renderer
-	var add_start := Time.get_ticks_usec()
-	var instance_id: int = static_renderer.call("add_instance", normalized, transform, cell_grid)
-	last_static_add_us = Time.get_ticks_usec() - add_start
-	if instance_id >= 0:
-		stats["static_renderer_instances"] += 1
-
-		# Store data for GPU Scene Database collection by CellManager
-		last_static_data = {
-			"transform": transform,
-			"aabb": aabb,
-			"mesh_id": float(normalized.hash()), # Float-compatible float for SSBO
-			"lod_mask": 0 # Default for now
-		}
-
-	# Return null - no Node3D created, exists only in RenderingServer
-	# The cell_grid parameter lets us clean up when the cell unloads
-	return null
-
-
 ## Instantiate a light object (model + OmniLight3D)
-func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D:
+func _instantiate_light(record: RefCounted, light_record: LightRecord) -> Node3D:
 	last_inst_route = "light"
 	# Create container node
 	var light_node := Node3D.new()
-	light_node.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+	light_node.name = _record_node_name(record)
 
 	# Load the model if it has one
 	if not light_record.model.is_empty():
@@ -1648,18 +1156,18 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 			model_instance.name = "Model"
 			_hide_lod_nodes(model_instance)  # Hide materialless meshes only
 			# Lights are always within NEAR tier (150m fade-out set on OmniLight3D)
-			var ref_pos := CS.vector_to_godot(ref.position)
+			var ref_pos := _record_transform(record).origin
 			if ref_pos.distance_squared_to(camera_position) < DU.NEAR_END * DU.NEAR_END:
 				_enable_collision_shapes_in_tree(model_instance)
 			# Auto-play NIF animations on light models (rotating lights, animated lanterns)
-			_auto_play_nif_animation(model_instance, ref)
+			_auto_play_nif_animation_for_transform(model_instance, _record_transform(record))
 			light_node.add_child(model_instance)
 
 	# Apply transform first — Win 4b needs the world transform up front to
 	# register the server-direct light instance with the correct position.
 	# Reordering is safe: _apply_transform only writes node.position/scale/basis
 	# with no side effects on children (which are already attached above).
-	_apply_transform(light_node, ref, false)
+	light_node.transform = _record_transform(record)
 
 	# Create the actual light source
 	if create_lights and light_record.radius > 0 and not light_record.is_off_by_default():
@@ -1679,12 +1187,8 @@ func _instantiate_light(ref: CellReference, light_record: LightRecord) -> Node3D
 		stats["lights_created"] += 1
 
 	# Add metadata for console object picker
-	light_node.set_meta("form_id", light_record.record_id if "record_id" in light_record else str(ref.ref_id))
-	light_node.set_meta("record_type", "LIGH")
-	light_node.set_meta("model_path", light_record.model if not light_record.model.is_empty() else "")
-	light_node.set_meta("ref_id", str(ref.ref_id))
-	light_node.set_meta("ref_num", ref.ref_num)
-	light_node.set_meta("instance_id", ref.ref_num)
+	_apply_record_metadata(light_node, record, light_record.model if not light_record.model.is_empty() else "", "light")
+	light_node.set_meta("form_id", light_record.record_id if "record_id" in light_record else str(record.get("record_id")))
 
 	return light_node
 
@@ -1697,7 +1201,7 @@ func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) 
 	omni.name = "Light"
 
 	# Convert MW radius to Godot range — enforce 0.125m min per OpenMW.
-	var godot_range: float = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
+	var godot_range: float = maxf(light_record.radius * SOURCE_LIGHT_RADIUS_SCALE, 0.125)
 	omni.omni_range = godot_range
 	omni.light_color = light_record.color
 	if light_record.is_negative():
@@ -1711,7 +1215,6 @@ func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) 
 	omni.distance_fade_length = 30.0
 	# Metadata read by LightAnimator + diagnostics.
 	omni.set_meta("light_animation", _source_light_animation_for_record(light_record))
-	omni.set_meta("mw_radius", light_record.radius)
 	omni.set_meta("base_energy", omni.light_energy)
 
 	light_node.add_child(omni)
@@ -1755,7 +1258,7 @@ func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) 
 	rids.light_rid = RenderingServer.omni_light_create()
 
 	# Range — MW radius scaled to meters with 0.125m floor (OpenMW convention).
-	var godot_range: float = maxf(light_record.radius * MW_LIGHT_SCALE, 0.125)
+	var godot_range: float = maxf(light_record.radius * SOURCE_LIGHT_RADIUS_SCALE, 0.125)
 	RenderingServer.light_set_param(rids.light_rid, RenderingServer.LIGHT_PARAM_RANGE, godot_range)
 
 	RenderingServer.light_set_color(rids.light_rid, light_record.color)
@@ -1800,14 +1303,14 @@ func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) 
 
 ## Instantiate an NPC or Creature
 ## Uses CharacterFactory to create fully animated and functional characters
-func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
+func _instantiate_actor(record: RefCounted, actor_record: Variant, actor_type: String) -> Node3D:
 	last_inst_route = "actor"
 	# Skip actors beyond NEAR tier — full CharacterBody3D is too expensive at distance.
 	# Per-request override via LoadProfile: interior pockets set this to 0.0
 	# because the camera is still at exterior position during pocket load.
 	var effective_actor_dist: float = _effective_max_actor_distance()
 	if effective_actor_dist > 0.0:
-		var ref_pos := CS.vector_to_godot(ref.position)
+		var ref_pos := _record_transform(record).origin
 		if ref_pos.distance_squared_to(camera_position) > effective_actor_dist * effective_actor_dist:
 			last_proximity_deferred = true
 			last_inst_route = "deferred"
@@ -1819,21 +1322,20 @@ func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: S
 
 		if actor_record is CreatureRecord:
 			var creature_rec: CreatureRecord = actor_record as CreatureRecord
-			character = character_factory.create_creature(creature_rec, ref.ref_num)
+			character = character_factory.create_creature(creature_rec, _record_ref_num(record))
 			stats["creatures_loaded"] += 1
 		elif actor_record is NPCRecord:
 			var npc_rec: NPCRecord = actor_record as NPCRecord
-			character = character_factory.create_npc(npc_rec, ref.ref_num)
+			character = character_factory.create_npc(npc_rec, _record_ref_num(record))
 			stats["npcs_loaded"] += 1
 
 		if character:
 			# Apply transform to the CharacterBody3D
-			_apply_transform(character, ref, true)
+			character.transform = _record_transform(record)
 
 			# Add additional metadata for console object picker
-			character.set_meta("form_id", actor_record.record_id if "record_id" in actor_record else str(ref.ref_id))
-			character.set_meta("ref_id", str(ref.ref_id))
-			character.set_meta("instance_id", ref.ref_num)
+			_apply_record_metadata(character, record, str(actor_record.model) if "model" in actor_record else "", actor_type)
+			character.set_meta("form_id", actor_record.record_id if "record_id" in actor_record else str(record.get("record_id")))
 			character.set_meta("actor_type", actor_type)
 
 			# C.5 — NPC dialogue: wrap in NPCInteractable so the
@@ -1841,14 +1343,14 @@ func _instantiate_actor(ref: CellReference, actor_record: Variant, actor_type: S
 			# to find the Interactable ancestor. The wrapper inherits
 			# the character's world-space transform; the character moves
 			# to identity (local to wrapper). Same layer-3 stamp as doors.
-			return _postprocess_source_actor(character, ref, actor_record, actor_type)
+			return _postprocess_source_actor(character, null, actor_record, actor_type)
 
 	# Fallback to old system if CharacterFactory not available
-	return _instantiate_actor_legacy(ref, actor_record, actor_type)
+	return _instantiate_actor_legacy(record, actor_record, actor_type)
 
 
 ## Legacy actor instantiation (old system - basic model loading)
-func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_type: String) -> Node3D:
+func _instantiate_actor_legacy(record: RefCounted, actor_record: Variant, actor_type: String) -> Node3D:
 	var model_path: String = ""
 
 	if actor_record is CreatureRecord:
@@ -1863,13 +1365,13 @@ func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_
 	if model_path.is_empty():
 		# NPC without direct model - would need body part assembly
 		# Create a simple placeholder for now
-		return _create_actor_placeholder(ref, actor_record, actor_type)
+		return _create_actor_placeholder(record, actor_record, actor_type)
 
 	var instance: Node3D = model_loader.call("get_model", model_path)
 	if not instance:
-		return _create_actor_placeholder(ref, actor_record, actor_type)
+		return _create_actor_placeholder(record, actor_record, actor_type)
 
-	instance.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+	instance.name = _record_node_name(record)
 
 	# Actors are NEAR-only — enable collision (actor loading skips > max_actor_distance)
 	_enable_collision_shapes_in_tree(instance)
@@ -1883,16 +1385,20 @@ func _instantiate_actor_legacy(ref: CellReference, actor_record: Variant, actor_
 		_ensure_actor_collision(instance, actor_type)
 
 	# Apply transform
-	_apply_transform(instance, ref, true)
+	instance.transform = _record_transform(record)
 
 	# Add metadata for console object picker
 	var record_type := "NPC_" if actor_type == "npc" else "CREA"
-	instance.set_meta("form_id", actor_record.record_id if "record_id" in actor_record else str(ref.ref_id))
+	instance.set_meta("form_id", actor_record.record_id if "record_id" in actor_record else str(record.get("record_id")))
 	instance.set_meta("record_type", record_type)
 	instance.set_meta("model_path", model_path)
-	instance.set_meta("ref_id", str(ref.ref_id))
-	instance.set_meta("ref_num", ref.ref_num)
-	instance.set_meta("instance_id", ref.ref_num)
+	var source_ref := str(record.get("source_ref_id"))
+	if not source_ref.is_empty():
+		instance.set_meta("ref_id", source_ref)
+	var ref_num := _record_ref_num(record)
+	if ref_num != 0:
+		instance.set_meta("ref_num", ref_num)
+		instance.set_meta("instance_id", ref_num)
 	instance.set_meta("actor_type", actor_type)
 
 	return instance
@@ -1950,9 +1456,9 @@ func _ensure_actor_collision(instance: Node3D, actor_type: String) -> void:
 
 
 ## Create a placeholder for actors without models
-func _create_actor_placeholder(ref: CellReference, _actor_record: Variant, actor_type: String) -> Node3D:
+func _create_actor_placeholder(record: RefCounted, _actor_record: Variant, actor_type: String) -> Node3D:
 	var container := Node3D.new()
-	container.name = str(ref.ref_id) + "_" + str(ref.ref_num)
+	container.name = _record_node_name(record)
 
 	# Visual placeholder mesh
 	var placeholder := MeshInstance3D.new()
@@ -2000,7 +1506,7 @@ func _create_actor_placeholder(ref: CellReference, _actor_record: Variant, actor
 	container.set_meta("is_placeholder", true)
 
 	# Apply transform (no model rotation needed for placeholder)
-	_apply_transform(container, ref, false)
+	container.transform = _record_transform(record)
 
 	return container
 
@@ -2213,7 +1719,9 @@ static func _generate_static_collision(root: Node3D) -> void:
 ## Only plays if the object has a prebaked AnimationPlayer from NIF conversion.
 # PHASE_A:MAIN_ONLY — reads _current_load_profile via _effective_max_actor_distance.
 # Also called from the post-worker main-thread tail per plan §5 line 400.
-func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
+func _auto_play_nif_animation(instance: Node3D, ref: Variant) -> void:
+	if ref == null:
+		return
 	# Skip if beyond NEAR tier — animations are only visible up close
 	var effective_actor_dist: float = _effective_max_actor_distance()
 	if effective_actor_dist > 0.0:
@@ -2262,11 +1770,50 @@ func _auto_play_nif_animation(instance: Node3D, ref: CellReference) -> void:
 	)
 
 
+func _auto_play_nif_animation_for_transform(instance: Node3D, transform: Transform3D) -> void:
+	var effective_actor_dist: float = _effective_max_actor_distance()
+	if effective_actor_dist > 0.0:
+		if transform.origin.distance_squared_to(camera_position) > effective_actor_dist * effective_actor_dist:
+			return
+
+	var anim_player: AnimationPlayer = null
+	for child in instance.get_children():
+		if child is AnimationPlayer:
+			anim_player = child as AnimationPlayer
+			break
+
+	if not anim_player:
+		return
+
+	var library := anim_player.get_animation_library("")
+	if not library:
+		return
+
+	var anim_list := library.get_animation_list()
+	if anim_list.is_empty():
+		return
+
+	var first_anim_name: StringName = anim_list[0]
+	var anim: Animation = library.get_animation(first_anim_name)
+	if anim:
+		anim.loop_mode = Animation.LOOP_LINEAR
+
+	anim_player.autoplay = first_anim_name
+
+	var player_ref: AnimationPlayer = anim_player
+	instance.tree_entered.connect(
+		func() -> void:
+			if is_instance_valid(player_ref) and player_ref.is_playing():
+				player_ref.seek(randf() * player_ref.current_animation_length),
+		CONNECT_ONE_SHOT,
+	)
+
+
 ## Apply position, rotation, and scale to a node
 ## Uses unified CoordinateSystem for all conversions
 # PHASE_A:WORKER_SAFE — pure property writes on a detached Node3D.
 # Plan §5 row 347-348 confirms worker dispatch.
-func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: bool) -> void:
+func _apply_transform(node: Node3D, ref: Variant, _apply_model_rotation: bool) -> void:
 	# Position conversion via CoordinateSystem (outputs in meters)
 	node.position = CS.vector_to_godot(ref.position)
 	node.scale = CS.scale_to_godot(ref.scale)
@@ -2278,7 +1825,7 @@ func _apply_transform(node: Node3D, ref: CellReference, _apply_model_rotation: b
 
 ## Apply metadata to an object for console object picker identification
 # PHASE_A:WORKER_SAFE — set_meta on a detached node. Plan §5 row 350-351.
-func _apply_metadata(node: Node3D, ref: CellReference, base_record: Variant, model_path: String, type_name: String = "") -> void:
+func _apply_metadata(node: Node3D, ref: Variant, base_record: Variant, model_path: String, type_name: String = "") -> void:
 	# Form ID / record ID
 	if "record_id" in base_record:
 		node.set_meta("form_id", base_record.record_id)
@@ -2306,8 +1853,16 @@ func _apply_record_metadata(node: Node3D, record: RefCounted, model_path: String
 	if not model_path.is_empty():
 		node.set_meta("model_path", model_path)
 	node.set_meta("object_id", str(record.get("object_id")))
-	node.set_meta("source_ref_id", str(record.get("source_ref_id")))
+	var source_ref_id := str(record.get("source_ref_id"))
+	node.set_meta("source_ref_id", source_ref_id)
+	if not source_ref_id.is_empty():
+		node.set_meta("ref_id", source_ref_id)
+	var ref_num := _record_ref_num(record)
+	if ref_num != 0:
+		node.set_meta("ref_num", ref_num)
+		node.set_meta("instance_id", ref_num)
 	node.set_meta("source_type", type_name)
+	node.set_meta("record_type", _type_name_to_meta(type_name))
 	node.set_meta("cell_grid", record.get("cell_grid"))
 
 
@@ -2339,31 +1894,6 @@ func _get_model_path(record: Variant) -> String:
 	if "model" in record and record.model:
 		return record.model
 	return ""
-
-
-## Create a placeholder for missing models
-# PHASE_A:MAIN_ONLY — called as main-thread fallback when model_loader returns
-# null. Construction is pure, but bundling with the main-thread fallback path
-# keeps the §8.2 Q3 answer in the code.
-func _create_placeholder(ref: CellReference) -> Node3D:
-	var placeholder := MeshInstance3D.new()
-	placeholder.name = str(ref.ref_id) + "_placeholder"
-
-	# Simple box mesh (human-sized in Godot meters)
-	var box := BoxMesh.new()
-	box.size = Vector3(0.5, 1.8, 0.5)  # Roughly human-sized
-	placeholder.mesh = box
-
-	# Magenta material to stand out
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(1.0, 0.0, 1.0)  # Magenta
-	placeholder.material_override = mat
-
-	# Apply transform
-	_apply_transform(placeholder, ref, false)
-
-	stats["objects_failed"] += 1
-	return placeholder
 
 
 func _create_placeholder_for_record(record: RefCounted) -> Node3D:
@@ -2427,15 +1957,6 @@ func _is_proximity_gated(type_name: String, is_carryable: bool) -> bool:
 ##
 ## Reads `camera_position` (main-thread updated by streaming manager each frame).
 # PHASE_A:MAIN_ONLY — reads `camera_position`.
-func _is_light_proximity_deferred(light_record: LightRecord, ref: CellReference) -> bool:
-	if light_record == null:
-		return false
-	# Big-light always-spawn override.
-	if light_record.radius >= LIGHT_ALWAYS_SPAWN_RADIUS_MW:
-		return false
-	var ref_world_pos := CS.vector_to_godot(ref.position)
-	var threshold_sq := LIGHT_PROXIMITY_THRESHOLD_M * LIGHT_PROXIMITY_THRESHOLD_M
-	return ref_world_pos.distance_squared_to(camera_position) > threshold_sq
 
 
 ## Route decision for statics_no_node3d T.1 — return true if the ref should
@@ -2505,34 +2026,24 @@ func reset_stats() -> void:
 		"visual_proxies_created": 0,
 		"significant_objects_registered": 0,
 	}
+	_route_usage_stats = {
+		"world_object_id_calls": 0,
+		"world_object_record_calls": 0,
+		"world_object_static_record_calls": 0,
+		"world_object_node_record_calls": 0,
+	}
 
 
 ## Get current statistics
 func get_stats() -> Dictionary:
-	return stats.duplicate()
+	var result := stats.duplicate()
+	result["route_usage"] = _route_usage_stats.duplicate()
+	return result
 
 
-func _dispatch_preregistration_tasks(to_register: Dictionary) -> void:
-	if to_register.is_empty():
-		return
-	_prereg_task_ids_mutex.lock()
-	if not _prereg_task_ids.is_empty():
-		var still_pending: Array[int] = []
-		for tid: int in _prereg_task_ids:
-			if not WorkerThreadPool.is_task_completed(tid):
-				still_pending.append(tid)
-		_prereg_task_ids = still_pending
-	_prereg_task_ids_mutex.unlock()
+func get_route_usage_stats() -> Dictionary:
+	return _route_usage_stats.duplicate()
 
-	for normalized: String in to_register:
-		var entry: Dictionary = to_register[normalized]
-		var disk_path: String = entry.disk
-		var shape_pack_path: String = entry.pack
-		var task_id: int = WorkerThreadPool.add_task(
-			_worker_preregister_prototype.bind(normalized, disk_path, shape_pack_path),
-			true,
-			"ref_instantiator:phase_f_prereg",
-		)
-		_prereg_task_ids_mutex.lock()
-		_prereg_task_ids.append(task_id)
-		_prereg_task_ids_mutex.unlock()
+
+func _increment_route_usage_stat(key: String) -> void:
+	_route_usage_stats[key] = int(_route_usage_stats.get(key, 0)) + 1

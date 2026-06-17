@@ -19,6 +19,12 @@ Source-specific parsing, unit conversion, asset lookup, gameplay record
 translation, skeleton naming, weather tables, dialogue condition semantics, and
 content heuristics belong in importer or adapter folders.
 
+Native C# interop follows the same dependency direction. The generic
+`NativeBridge` may load the C# factory and expose source-neutral services, but
+parser/source-specific convenience wrappers belong to their owning importer or
+adapter path, such as `src/core/nif/`, `src/core/esm/`, or
+`src/core/**/morrowind/`.
+
 ## Allowed Source-Specific Domains
 
 The following paths may know about source formats directly:

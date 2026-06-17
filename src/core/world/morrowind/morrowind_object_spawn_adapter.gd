@@ -1,6 +1,7 @@
 class_name MorrowindObjectSpawnAdapter
 extends "res://src/core/world/world_object_spawn_adapter.gd"
 
+const CS := preload("res://src/core/coordinate_system.gd")
 const CarryableRegistryScript := preload("res://src/core/interaction/carryable_registry.gd")
 const RecordScript := preload("res://src/core/world/world_object_record.gd")
 
@@ -10,12 +11,19 @@ const DOOR_INTERACTABLE_PATH := "res://src/core/interaction/morrowind/door_inter
 const CONTAINER_INTERACTABLE_PATH := "res://src/core/interaction/morrowind/container_interactable.gd"
 const ACTIVATOR_INTERACTABLE_PATH := "res://src/core/interaction/morrowind/activator_interactable.gd"
 const NPC_INTERACTABLE_PATH := "res://src/core/dialogue/morrowind/npc_interactable.gd"
+const MorrowindTransitionProviderScript := preload("res://src/core/world/morrowind/morrowind_transition_provider.gd")
 const LIGHT_PROXIMITY_THRESHOLD_M: float = 60.0
 const LIGHT_ALWAYS_SPAWN_RADIUS_MW: float = 700.0
 const MW_LIGHT_FLAG_FLICKER: int = 0x0008
+const MW_LIGHT_FLAG_FIRE: int = 0x0010
 const MW_LIGHT_FLAG_FLICKER_SLOW: int = 0x0040
 const MW_LIGHT_FLAG_PULSE: int = 0x0080
 const MW_LIGHT_FLAG_PULSE_SLOW: int = 0x0100
+const MW_LIGHT_SCALE: float = 70.0 / 64.0
+const INTERACTIVE_PROXIMITY_RADIUS_M: float = 25.0
+const ACTOR_PROXIMITY_RADIUS_M: float = 150.0
+
+var _source_reference_payload_cache: Dictionary[StringName, Dictionary] = {}
 
 func instantiate_world_object(
 	record: RefCounted,
@@ -66,11 +74,57 @@ func resolve_source_reference_base_record(
 	return object_source.call(method_name, ref_id, record_type_out)
 
 
-func _source_is_carryable(type_name: String, base_record: Variant) -> bool:
+func make_world_object_record_from_source_reference(
+	source_ref: Variant,
+	base_record: Variant,
+	type_name: String,
+	model_path: String,
+	item_id: String,
+	cache_item_id: String,
+	static_route: bool,
+	cell_grid: Vector2i,
+) -> RefCounted:
+	if source_ref == null:
+		return null
+	var ref_id := _source_ref_id(source_ref)
+	if ref_id.is_empty():
+		return null
+	var record: RefCounted = RecordScript.new()
+	record.object_id = RecordScript.make_object_id(cell_grid, ref_id, _source_ref_num(source_ref))
+	record.record_id = StringName(item_id if not item_id.is_empty() else _record_id_for(base_record, ref_id))
+	record.source_ref_id = StringName(ref_id)
+	record.source_key = "%s:%s" % [type_name, str(record.object_id)]
+	record.cell_grid = cell_grid
+	record.transform = _source_ref_transform(source_ref)
+	record.model_path = model_path
+	record.model_item_id = item_id
+	record.cache_item_id = cache_item_id
+	record.source_type = StringName(type_name)
+	record.category = _category_for_type_name(type_name)
+	record.spawn_route = _spawn_route_for_source_reference(type_name, base_record, static_route, model_path)
+	record.static_batch_allowed = static_route
+	record.capability_flags = _capabilities_for_source_reference(type_name, base_record, model_path, static_route)
+	record.proximity_radius_m = _proximity_radius_for_source_reference(type_name, base_record)
+	record.adapter_payload_id = record.object_id
+	record.scale_scalar = _source_ref_scale(source_ref)
+	_cache_source_reference_payload(record.adapter_payload_id, source_ref, base_record, type_name, cell_grid)
+	if type_name == "light" and base_record != null:
+		if "color" in base_record:
+			record.light_color = base_record.color
+		if "radius" in base_record:
+			record.light_radius = float(base_record.radius) * MW_LIGHT_SCALE
+		if "flags" in base_record:
+			var light_flags := int(base_record.flags)
+			record.light_animation = source_light_animation_for_record(base_record)
+			record.light_is_fire = (light_flags & MW_LIGHT_FLAG_FIRE) != 0
+	return record
+
+
+func is_source_record_carryable(type_name: String, base_record: Variant) -> bool:
 	return CarryableRegistryScript.is_carryable(type_name, base_record)
 
 
-func _source_postprocess_model_object(
+func postprocess_source_model_object(
 	instance: Node3D,
 	ref: Variant,
 	base_record: Variant,
@@ -78,20 +132,21 @@ func _source_postprocess_model_object(
 	cell_grid: Vector2i,
 	record_id: String,
 	instantiator: RefCounted,
+	source_key: String = "",
 ) -> void:
 	if instance == null:
 		return
-	if _source_is_carryable(type_name, base_record):
+	if is_source_record_carryable(type_name, base_record):
 		_attach_carryable(instance, base_record, type_name, record_id, instantiator)
 	if type_name == "door" and ref != null and bool(ref.get("is_teleport")):
 		_attach_door(instance, ref, cell_grid, base_record, record_id, instantiator)
 	elif type_name == "container":
-		_attach_container(instance, ref, cell_grid, base_record, record_id, instantiator)
+		_attach_container(instance, ref, base_record, record_id, instantiator, source_key)
 	elif type_name == "activator":
 		_attach_activator(instance, base_record, record_id, instantiator)
 
 
-func _source_postprocess_actor(
+func postprocess_source_actor(
 	character: Node3D,
 	_ref: Variant,
 	actor_record: Variant,
@@ -109,7 +164,7 @@ func _source_resolve_leveled_creature(
 	return _resolve_leveled_creature(leveled, player_level)
 
 
-func _source_light_animation_for_record(light_record: Variant) -> int:
+func source_light_animation_for_record(light_record: Variant) -> int:
 	if light_record == null or not ("flags" in light_record):
 		return RecordScript.LightAnimation.NONE
 	var flags := int(light_record.flags)
@@ -140,13 +195,10 @@ func _spawn_node(
 ) -> Node3D:
 	var type_name := _payload_type_name(record, payload)
 	if _is_record_proximity_deferred(record, instantiator):
-		var ref: Variant = payload.get("ref", null)
-		if ref != null and instantiator.has_method("ensure_source_visual_proxy_for_ref"):
+		if instantiator.has_method("ensure_source_visual_proxy_for_record"):
 			instantiator.call(
-				"ensure_source_visual_proxy_for_ref",
-				ref,
-				str(record.get("model_path")),
-				cell_grid,
+				"ensure_source_visual_proxy_for_record",
+				record,
 				type_name,
 				cache_item_id,
 			)
@@ -164,9 +216,9 @@ func _spawn_node(
 	var record_id := str(record.get("record_id"))
 	if ref != null and instantiator.has_method("apply_source_metadata"):
 		instantiator.call("apply_source_metadata", node, ref, base_record, str(record.get("model_path")), type_name)
-	if instantiator.has_method("apply_source_visual_proxy_runtime"):
-		instantiator.call("apply_source_visual_proxy_runtime", node, ref, cell_grid, type_name)
-	_source_postprocess_model_object(node, ref, base_record, type_name, cell_grid, record_id, instantiator)
+	if instantiator.has_method("apply_source_visual_proxy_runtime_for_record"):
+		instantiator.call("apply_source_visual_proxy_runtime_for_record", node, record, type_name)
+	postprocess_source_model_object(node, ref, base_record, type_name, cell_grid, record_id, instantiator, str(record.get("source_key")))
 	return node
 
 
@@ -178,15 +230,15 @@ func _spawn_light(record: RefCounted, payload: Dictionary, instantiator: RefCoun
 		return null
 	if instantiator.has_method("should_source_load_lights") and not bool(instantiator.call("should_source_load_lights")):
 		return null
-	if _source_is_carryable("light", light_record):
+	if is_source_record_carryable("light", light_record):
 		return _spawn_node(record, payload, instantiator, _record_cell_grid(record), str(record.get("cache_item_id")))
 	if _is_light_proximity_deferred(record, light_record, instantiator):
 		_mark_deferred(instantiator, "light")
 		return null
-	if not instantiator.has_method("instantiate_source_light"):
+	if not instantiator.has_method("instantiate_source_light_record"):
 		_mark_skipped(instantiator, "light")
 		return null
-	return instantiator.call("instantiate_source_light", ref, light_record) as Node3D
+	return instantiator.call("instantiate_source_light_record", record, light_record) as Node3D
 
 
 func _spawn_actor(record: RefCounted, payload: Dictionary, instantiator: RefCounted) -> Node3D:
@@ -208,18 +260,20 @@ func _spawn_actor(record: RefCounted, payload: Dictionary, instantiator: RefCoun
 	if ref == null or actor_record == null:
 		_mark_skipped(instantiator, type_name)
 		return null
-	if not instantiator.has_method("instantiate_source_actor"):
+	if not instantiator.has_method("instantiate_source_actor_record"):
 		_mark_skipped(instantiator, type_name)
 		return null
-	return instantiator.call("instantiate_source_actor", ref, actor_record, actor_type) as Node3D
+	return instantiator.call("instantiate_source_actor_record", record, actor_record, actor_type) as Node3D
 
 
 func _get_payload(record: RefCounted) -> Dictionary:
-	if object_source == null or not object_source.has_method("get_spawn_adapter_payload"):
-		return {}
 	var payload_id: StringName = record.get("adapter_payload_id")
 	if payload_id == &"":
 		payload_id = record.get("object_id")
+	if _source_reference_payload_cache.has(payload_id):
+		return _source_reference_payload_cache[payload_id]
+	if object_source == null or not object_source.has_method("get_spawn_adapter_payload"):
+		return {}
 	return object_source.call("get_spawn_adapter_payload", payload_id)
 
 
@@ -251,11 +305,146 @@ func _source_ref_id(source_ref: Variant) -> String:
 	return str(ref_value)
 
 
+func _source_ref_num(source_ref: Variant) -> int:
+	if source_ref == null:
+		return 0
+	return int(source_ref.get("ref_num"))
+
+
+func _source_ref_scale(source_ref: Variant) -> float:
+	if source_ref == null:
+		return 1.0
+	var value: Variant = source_ref.get("scale")
+	return float(value) if value != null else 1.0
+
+
+func _source_ref_transform(source_ref: Variant) -> Transform3D:
+	if source_ref == null:
+		return Transform3D.IDENTITY
+	var position_value: Variant = source_ref.get("position")
+	var rotation_value: Variant = source_ref.get("rotation")
+	var position := Vector3.ZERO
+	if position_value is Vector3:
+		position = position_value as Vector3
+	var rotation := Vector3.ZERO
+	if rotation_value is Vector3:
+		rotation = rotation_value as Vector3
+	var scale := _source_ref_scale(source_ref)
+	return Transform3D(
+		CS.esm_rotation_to_godot_basis(rotation).scaled(CS.scale_to_godot(scale)),
+		CS.vector_to_godot(position)
+	)
+
+
 func _record_position(record: RefCounted) -> Vector3:
 	var value: Variant = record.get("transform")
 	if value is Transform3D:
 		return (value as Transform3D).origin
 	return Vector3.ZERO
+
+
+func _cache_source_reference_payload(
+	payload_id: StringName,
+	source_ref: Variant,
+	base_record: Variant,
+	type_name: String,
+	cell_grid: Vector2i,
+) -> void:
+	if payload_id == &"":
+		return
+	_source_reference_payload_cache[payload_id] = {
+		"ref": source_ref,
+		"base_record": base_record,
+		"type_name": type_name,
+		"cell_grid": cell_grid,
+	}
+
+
+func _category_for_type_name(type_name: String) -> int:
+	match type_name:
+		"static":
+			return RecordScript.Category.STATIC
+		"door":
+			return RecordScript.Category.DOOR
+		"container":
+			return RecordScript.Category.CONTAINER
+		"activator":
+			return RecordScript.Category.ACTIVATOR
+		"light":
+			return RecordScript.Category.LIGHT
+		"npc":
+			return RecordScript.Category.NPC
+		"creature", "leveled_creature":
+			return RecordScript.Category.CREATURE
+		_:
+			return RecordScript.Category.OTHER
+
+
+func _spawn_route_for_source_reference(type_name: String, base_record: Variant, static_route: bool, model_path: String) -> int:
+	if type_name == "leveled_item":
+		return RecordScript.SpawnRoute.SKIP
+	if is_source_record_carryable(type_name, base_record):
+		return RecordScript.SpawnRoute.NODE
+	if static_route:
+		return RecordScript.SpawnRoute.STATIC_BATCH
+	match type_name:
+		"light":
+			return RecordScript.SpawnRoute.LIGHT
+		"npc", "creature", "leveled_creature":
+			return RecordScript.SpawnRoute.ACTOR
+		_:
+			return RecordScript.SpawnRoute.NODE if not model_path.is_empty() or type_name in ["door", "container", "activator"] else RecordScript.SpawnRoute.NODE
+
+
+func _capabilities_for_source_reference(type_name: String, base_record: Variant, model_path: String, static_route: bool) -> int:
+	var flags := 0
+	if is_source_record_carryable(type_name, base_record):
+		flags |= RecordScript.CAP_GAMEPLAY | RecordScript.CAP_STATIC_VISUAL | RecordScript.CAP_COLLISION
+		if not model_path.is_empty():
+			flags |= RecordScript.CAP_IMPOSTOR
+		return flags
+	if static_route:
+		flags |= RecordScript.CAP_STATIC_VISUAL | RecordScript.CAP_COLLISION
+		return flags
+	match type_name:
+		"light":
+			flags |= RecordScript.CAP_GAMEPLAY
+			if base_record != null and "radius" in base_record and float(base_record.radius) >= LIGHT_ALWAYS_SPAWN_RADIUS_MW:
+				flags |= RecordScript.CAP_DISTANT_LIGHT
+		"npc", "creature", "leveled_creature":
+			flags |= RecordScript.CAP_GAMEPLAY
+		"door", "container", "activator":
+			flags |= RecordScript.CAP_GAMEPLAY
+			if not model_path.is_empty():
+				flags |= RecordScript.CAP_STATIC_VISUAL
+		_:
+			if not model_path.is_empty():
+				flags |= RecordScript.CAP_STATIC_VISUAL
+	if not model_path.is_empty():
+		flags |= RecordScript.CAP_IMPOSTOR
+	return flags
+
+
+func _proximity_radius_for_source_reference(type_name: String, base_record: Variant) -> float:
+	if is_source_record_carryable(type_name, base_record):
+		return INTERACTIVE_PROXIMITY_RADIUS_M
+	match type_name:
+		"light":
+			return LIGHT_PROXIMITY_THRESHOLD_M
+		"npc", "creature", "leveled_creature":
+			return ACTOR_PROXIMITY_RADIUS_M
+		"door", "container", "activator":
+			return INTERACTIVE_PROXIMITY_RADIUS_M
+		_:
+			return 0.0
+
+
+func _record_id_for(base_record: Variant, fallback: String) -> String:
+	if base_record != null and "record_id" in base_record:
+		var id := str(base_record.record_id)
+		if not id.is_empty():
+			return id
+	return fallback
 
 
 func _set_spawn_diagnostics(
@@ -287,28 +476,13 @@ func _is_record_proximity_deferred(record: RefCounted, instantiator: RefCounted)
 
 
 func _is_light_proximity_deferred(record: RefCounted, light_record: Variant, instantiator: RefCounted) -> bool:
+	if instantiator.has_method("is_source_static_renderer_effective") and not bool(instantiator.call("is_source_static_renderer_effective")):
+		return false
 	if light_record != null and "radius" in light_record:
 		if float(light_record.radius) >= LIGHT_ALWAYS_SPAWN_RADIUS_MW:
 			return false
 	var camera_pos: Vector3 = _get_instantiator_camera_position(instantiator)
 	return _record_position(record).distance_squared_to(camera_pos) > LIGHT_PROXIMITY_THRESHOLD_M * LIGHT_PROXIMITY_THRESHOLD_M
-
-
-func _apply_visual_proxy_runtime(
-	node: Node3D,
-	ref: Variant,
-	cell_grid: Vector2i,
-	type_name: String,
-	instantiator: RefCounted,
-) -> void:
-	if node == null or ref == null:
-		return
-	if not instantiator.has_method("uses_source_visual_proxy") or not bool(instantiator.call("uses_source_visual_proxy", type_name)):
-		return
-	var source_key: String = str(instantiator.call("make_source_visual_proxy_key", type_name, ref, cell_grid))
-	node.set_meta("source_key", source_key)
-	node.set_meta("cell_grid", cell_grid)
-	instantiator.call("apply_source_visual_proxy_runtime", node, ref, cell_grid, type_name)
 
 
 func _attach_carryable(
@@ -351,7 +525,15 @@ func _attach_door(
 ) -> void:
 	var display_name := _get_display_name(base_record, record_id)
 	var destination_name := str(ref.get("teleport_cell"))
-	var instance_key := _exterior_door_instance_key(cell_grid, str(ref.get("ref_id")), int(ref.get("ref_num")))
+	var instance_key := ""
+	if ref is Object and (ref as Object).has_meta("transition_portal_key"):
+		instance_key = str((ref as Object).get_meta("transition_portal_key"))
+	if instance_key.is_empty():
+		instance_key = str(MorrowindTransitionProviderScript.make_exterior_portal_key(
+			cell_grid,
+			StringName(str(ref.get("ref_id"))),
+			int(ref.get("ref_num"))
+		))
 	var door_script := load(DOOR_INTERACTABLE_PATH) as Script
 	if door_script == null:
 		_log_warn("interaction", "Door %s adapter script unavailable" % record_id)
@@ -372,17 +554,13 @@ func _attach_door(
 		door_instance.connect("door_activated", handler)
 
 
-static func _exterior_door_instance_key(cell_grid: Vector2i, base_ref_id: String, ref_num: int) -> String:
-	return "ext:%d,%d:%s:%d" % [cell_grid.x, cell_grid.y, base_ref_id.to_lower(), ref_num]
-
-
 func _attach_container(
 	container_instance: Node3D,
 	ref: Variant,
-	cell_grid: Vector2i,
 	base_record: Variant,
 	record_id: String,
 	instantiator: RefCounted,
+	source_key: String = "",
 ) -> void:
 	var container_script := load(CONTAINER_INTERACTABLE_PATH) as Script
 	if container_script == null:
@@ -400,7 +578,6 @@ func _attach_container(
 		container_instance.set("lock_level", int(ref.get("lock_level")))
 	_generate_interaction_area_for(container_instance, base_record, instantiator)
 	if ref != null and instantiator.has_method("uses_source_visual_proxy") and bool(instantiator.call("uses_source_visual_proxy", "container")):
-		var source_key: String = str(instantiator.call("make_source_visual_proxy_key", "container", ref, cell_grid))
 		container_instance.connect("container_opened", _mark_visual_proxy_dirty.bind(instantiator, source_key, "container_opened"))
 
 

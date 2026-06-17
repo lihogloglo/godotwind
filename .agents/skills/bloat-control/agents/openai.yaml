@@ -1,0 +1,4 @@
+interface:
+  display_name: "Bloat Control"
+  short_description: "Audit LOC, dead code, and project sprawl"
+  default_prompt: "Use $bloat-control to check Godotwind for code bloat and dead code."

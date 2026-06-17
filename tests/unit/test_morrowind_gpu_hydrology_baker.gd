@@ -13,7 +13,7 @@ func test_offline_global_hydrology_artifact_contract_is_runtime_readable() -> vo
 	assert_bool(region_data.has("flow_image")).is_true()
 	assert_bool(region_data.has("heightmap")).is_false()
 	assert_bool(region_data.has("baker")).is_false()
-	assert_that(region_data.get("algorithm")).is_equal("morrowind_gpu_hydrology_region_v1")
+	assert_that(region_data.get("algorithm")).is_equal("morrowind_hydrology_atlas_v2")
 	assert_that(region_data.get("source")).is_equal("offline_global_prebake")
 
 	var flow_image: Image = region_data["flow_image"]
@@ -475,7 +475,7 @@ func _global_hydrology_artifact_fixture() -> Dictionary:
 	}
 	return {
 		"schema": "godotwind.morrowind.hydrology.global_flow_atlas.v1",
-		"algorithm": "morrowind_gpu_hydrology_region_v1",
+		"algorithm": "morrowind_hydrology_atlas_v2",
 		"source": "offline_global_prebake",
 		"flow_format": "RGBA8 flowmap: RG=direction, B=speed, A=coverage",
 		"world_region_origin": Vector2i(0, -1),

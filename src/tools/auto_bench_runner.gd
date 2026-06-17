@@ -8,8 +8,7 @@
 ##
 ##   C. bench_tiers   — 30s static sample at Seyda Neen spawn. Captures per-sec
 ##                      rendered_objects / draw_calls / primitives / FPS plus
-##                      registry_batches / registry_slots / hlod chunks /
-##                      impostor count. Writes `bench_tiers.json`.
+##                      HLOD chunk / impostor counts. Writes `bench_tiers.json`.
 ##   D. bench_flyby   — delegates to StreamingBenchmark's existing 85s scripted
 ##                      path via init_console_mode. CSV + JSON land in
 ##                      user://benchmark_results/ as usual; we pick them up
@@ -346,10 +345,6 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 		sample["far_dirty_page_count"] = stats.get("far_dirty_page_count", 0)
 		sample["far_pages_rebuilt"] = stats.get("far_pages_rebuilt", 0)
 		sample["far_uploaded_instances"] = stats.get("far_uploaded_instances", 0)
-		if _streaming_manager.has_method("get_static_renderer_stats"):
-			var srs := _streaming_manager.get_static_renderer_stats()
-			sample["registry_batches"] = srs.get("registry_batches", 0)
-			sample["registry_slots"] = srs.get("registry_slots", 0)
 		# HLOD per-tier breakdown
 		if _streaming_manager.has_method("get_hlod_stats"):
 			var hls: Dictionary = _streaming_manager.get_hlod_stats()
@@ -374,9 +369,12 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 func _write_scenario_json(filename: String, samples: Array[Dictionary], meta: Dictionary) -> void:
 	var path := "%s/%s" % [_output_dir, filename]
 	var summary: Dictionary = _summarize(samples)
+	var mode_meta := _get_benchmark_mode_metadata_snapshot()
+	meta["benchmark_mode_metadata"] = mode_meta
 	var out := {
 		"meta": meta,
 		"stamp": _stamp,
+		"benchmark_mode_metadata": mode_meta,
 		"summary": summary,
 		"samples": samples,
 	}
@@ -390,6 +388,15 @@ func _write_scenario_json(filename: String, samples: Array[Dictionary], meta: Di
 		path, samples.size(), JSON.stringify(summary)])
 
 
+func _get_benchmark_mode_metadata_snapshot() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_benchmark_mode_metadata"):
+		return _streaming_manager.call("get_benchmark_mode_metadata")
+	if _streaming_manager:
+		var stats: Dictionary = _streaming_manager.get_stats()
+		return stats.get("benchmark_mode_metadata", {})
+	return {}
+
+
 func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	if samples.is_empty():
 		return {"samples": 0}
@@ -398,8 +405,6 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	var fps_sum := 0.0
 	var draws_sum := 0.0
 	var objs_sum := 0.0
-	var batches_max := 0
-	var slots_max := 0
 	var imp_max := 0
 	var far_texture_upload_max := 0
 	var far_normal_upload_max := 0
@@ -434,8 +439,6 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		fps_sum += f
 		draws_sum += float(s.get("draws", 0))
 		objs_sum += float(s.get("objs", 0))
-		batches_max = maxi(batches_max, int(s.get("registry_batches", 0)))
-		slots_max = maxi(slots_max, int(s.get("registry_slots", 0)))
 		imp_max = maxi(imp_max, int(s.get("total_impostors", 0)))
 		far_texture_upload_max = maxi(far_texture_upload_max, int(s.get("far_texture_upload_us", 0)))
 		far_normal_upload_max = maxi(far_normal_upload_max, int(s.get("far_normal_upload_us", 0)))
@@ -471,8 +474,6 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"fps_avg": fps_sum / n,
 		"draws_avg": draws_sum / n,
 		"objs_avg": objs_sum / n,
-		"registry_batches_max": batches_max,
-		"registry_slots_max": slots_max,
 		"impostors_max": imp_max,
 		"far_texture_upload_max_us": far_texture_upload_max,
 		"far_normal_upload_max_us": far_normal_upload_max,
