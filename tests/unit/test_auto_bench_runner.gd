@@ -26,6 +26,8 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 		"fps": 60.0, "draws": 7000, "objs": 10000,
 		"total_impostors": 800, "hlod_cells": 12,
 		"chunks_tier_1": 4, "chunks_tier_2": 1,
+		"pub_static_visuals_spent_us": 1200,
+		"pub_near_gameplay_spent_us": 3400,
 	}]
 	var summary: Dictionary = runner._summarize(samples)
 	assert_int(summary["samples"]).is_equal(1)
@@ -39,6 +41,9 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 	assert_int(summary["hlod_cells_max"]).is_equal(12)
 	assert_int(summary["chunks_tier_1_max"]).is_equal(4)
 	assert_int(summary["chunks_tier_2_max"]).is_equal(1)
+	assert_float(summary["pub_static_visuals_spent_us_max"]).is_equal(1200.0)
+	assert_float(summary["pub_static_visuals_spent_us_avg"]).is_equal(1200.0)
+	assert_float(summary["pub_near_gameplay_spent_us_max"]).is_equal(3400.0)
 	runner.free()
 
 

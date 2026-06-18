@@ -1,4 +1,0 @@
-interface:
-  display_name: "Spring Cleanup"
-  short_description: "Run the Godotwind audit workflow"
-  default_prompt: "Use $spring-cleanup to continue the Godotwind Spring cleanup audit."

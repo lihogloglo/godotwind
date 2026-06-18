@@ -21,12 +21,11 @@ feature adoption.
 Always read these files first:
 
 1. `docs/audit/performance_observatory_state.md`
-2. `docs/audit/spring_cleanup_pillar_3_0_performance_observatory_charter_2026_06_15.md`
-3. `docs/systems/benchmarking.md`
-4. `docs/systems/loading.md`
-5. `docs/systems/model_loading.md`
-6. `tests/benchmark/benchmark_thresholds.gd`
-7. `docs/STATUS.md`
+2. `docs/systems/benchmarking.md`
+3. `docs/systems/loading.md`
+4. `docs/systems/model_loading.md`
+5. `tests/benchmark/benchmark_thresholds.gd`
+6. `docs/STATUS.md`
 
 Then run the deterministic inventory:
 
@@ -41,7 +40,7 @@ and choose the next unfinished slice.
 ## Workflow
 
 1. Check `git status --short` and note unrelated dirty worktree changes.
-2. Read the state and charter docs listed above.
+2. Read the state and system docs listed above.
 3. Run `perf_observatory_scan.py`.
 4. Classify the current observability surface:
    - scenario benchmark coverage,

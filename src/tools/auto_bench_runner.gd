@@ -342,6 +342,20 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 			for i in range(mini(phases.size(), phase_keys.size())):
 				sample[phase_keys[i]] = phases[i]
 		sample["startup_phase"] = stats.get("startup_phase", false)
+		var publication_lanes: Dictionary = stats.get("publication_lanes", {})
+		for lane: String in [
+			"near_gameplay",
+			"static_visuals",
+			"hlod",
+			"far_impostors",
+			"distant_lights",
+			"unload",
+		]:
+			var lane_stats: Dictionary = publication_lanes.get(lane, {})
+			var prefix := "pub_%s" % lane
+			sample["%s_claimed_us" % prefix] = lane_stats.get("claimed_usec", 0)
+			sample["%s_spent_us" % prefix] = lane_stats.get("spent_usec", 0)
+			sample["%s_overrun_us" % prefix] = lane_stats.get("overrun_usec", 0)
 		sample["loaded_cells"] = stats.get("loaded_cells", 0)
 		sample["loading_cells"] = stats.get("loading_cells", 0)
 		sample["mid_instances"] = stats.get("mid_instances", 0)
@@ -488,6 +502,14 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"phase_static_cull_us", "inst_door_us", "inst_light_us",
 		"inst_light_modelload_us", "inst_container_us", "inst_activator_us",
 		"inst_static_us",
+		"pub_near_gameplay_claimed_us", "pub_near_gameplay_spent_us",
+		"pub_near_gameplay_overrun_us", "pub_static_visuals_claimed_us",
+		"pub_static_visuals_spent_us", "pub_static_visuals_overrun_us",
+		"pub_hlod_claimed_us", "pub_hlod_spent_us", "pub_hlod_overrun_us",
+		"pub_far_impostors_claimed_us", "pub_far_impostors_spent_us",
+		"pub_far_impostors_overrun_us", "pub_distant_lights_claimed_us",
+		"pub_distant_lights_spent_us", "pub_distant_lights_overrun_us",
+		"pub_unload_claimed_us", "pub_unload_spent_us", "pub_unload_overrun_us",
 	]
 	var max_values: Dictionary = {}
 	var sum_values: Dictionary = {}

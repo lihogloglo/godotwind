@@ -88,6 +88,14 @@ func export_all_cells_packed(loader: RefCounted) -> Dictionary:
 
 
 @warning_ignore("unsafe_method_access")
+func export_startup_supplement_packed(loader: RefCounted) -> Dictionary:
+	if loader == null:
+		return {}
+	var result: Variant = loader.call("ExportStartupSupplementPacked")
+	return result if result is Dictionary else {}
+
+
+@warning_ignore("unsafe_method_access")
 func get_record_info(loader: RefCounted, record_id: String) -> Variant:
 	if loader == null:
 		return null

@@ -415,6 +415,343 @@ public partial class NativeESMLoader : RefCounted
         return result;
     }
 
+    public Godot.Collections.Dictionary ExportStartupSupplementPacked()
+    {
+        var result = new Godot.Collections.Dictionary();
+
+        var bookKeys = new string[Books.Count];
+        var bookRecordIds = new string[Books.Count];
+        var bookModels = new string[Books.Count];
+        var bookDeleted = new byte[Books.Count];
+        var bookNames = new string[Books.Count];
+        var bookIcons = new string[Books.Count];
+        var bookScripts = new string[Books.Count];
+        var bookEnchantIds = new string[Books.Count];
+        var bookTexts = new string[Books.Count];
+        var bookWeights = new float[Books.Count];
+        var bookValues = new int[Books.Count];
+        var bookScrolls = new byte[Books.Count];
+        var bookSkillIds = new int[Books.Count];
+        var bookEnchantPoints = new int[Books.Count];
+        int i = 0;
+        foreach (var kvp in Books)
+        {
+            var r = kvp.Value;
+            bookKeys[i] = kvp.Key;
+            bookRecordIds[i] = r.RecordId ?? "";
+            bookModels[i] = r.Model ?? "";
+            bookDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            bookNames[i] = r.Name ?? "";
+            bookIcons[i] = r.Icon ?? "";
+            bookScripts[i] = r.ScriptId ?? "";
+            bookEnchantIds[i] = r.EnchantId ?? "";
+            bookTexts[i] = r.Text ?? "";
+            bookWeights[i] = r.Weight;
+            bookValues[i] = r.Value;
+            bookScrolls[i] = r.IsScroll ? (byte)1 : (byte)0;
+            bookSkillIds[i] = r.SkillId;
+            bookEnchantPoints[i] = r.EnchantPoints;
+            i++;
+        }
+
+        var classKeys = new string[Classes.Count];
+        var classRecordIds = new string[Classes.Count];
+        var classDeleted = new byte[Classes.Count];
+        var classNames = new string[Classes.Count];
+        var classDescriptions = new string[Classes.Count];
+        var classPrimaryAttributes = new int[Classes.Count * 2];
+        var classSpecializations = new int[Classes.Count];
+        var classMajorSkills = new int[Classes.Count * 5];
+        var classMinorSkills = new int[Classes.Count * 5];
+        var classPlayable = new byte[Classes.Count];
+        var classServices = new int[Classes.Count];
+        i = 0;
+        foreach (var kvp in Classes)
+        {
+            var r = kvp.Value;
+            classKeys[i] = kvp.Key;
+            classRecordIds[i] = r.RecordId ?? "";
+            classDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            classNames[i] = r.Name ?? "";
+            classDescriptions[i] = r.Description ?? "";
+            CopyFixed(r.PrimaryAttributes, classPrimaryAttributes, i * 2, 2);
+            classSpecializations[i] = r.Specialization;
+            CopyFixed(r.MajorSkills, classMajorSkills, i * 5, 5);
+            CopyFixed(r.MinorSkills, classMinorSkills, i * 5, 5);
+            classPlayable[i] = r.IsPlayable ? (byte)1 : (byte)0;
+            classServices[i] = r.Services;
+            i++;
+        }
+
+        var factionKeys = new string[Factions.Count];
+        var factionRecordIds = new string[Factions.Count];
+        var factionDeleted = new byte[Factions.Count];
+        var factionNames = new string[Factions.Count];
+        var factionRankNames = new Godot.Collections.Array();
+        var factionFavoriteAttributes = new int[Factions.Count * 2];
+        var factionRankData = new Godot.Collections.Array();
+        var factionFavoriteSkills = new int[Factions.Count * 7];
+        var factionHidden = new byte[Factions.Count];
+        var factionReactions = new Godot.Collections.Array();
+        i = 0;
+        foreach (var kvp in Factions)
+        {
+            var r = kvp.Value;
+            factionKeys[i] = kvp.Key;
+            factionRecordIds[i] = r.RecordId ?? "";
+            factionDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            factionNames[i] = r.Name ?? "";
+            factionRankNames.Add(r.RankNames);
+            CopyFixed(r.FavoriteAttributes, factionFavoriteAttributes, i * 2, 2);
+            factionRankData.Add(r.RankData);
+            CopyFixed(r.FavoriteSkills, factionFavoriteSkills, i * 7, 7);
+            factionHidden[i] = r.IsHidden ? (byte)1 : (byte)0;
+            factionReactions.Add(r.Reactions);
+            i++;
+        }
+
+        var skillKeys = new string[Skills.Count];
+        var skillRecordIds = new string[Skills.Count];
+        var skillDeleted = new byte[Skills.Count];
+        var skillDescriptions = new string[Skills.Count];
+        var skillAttributes = new int[Skills.Count];
+        var skillSpecializations = new int[Skills.Count];
+        var skillUseValues = new float[Skills.Count * 4];
+        i = 0;
+        foreach (var kvp in Skills)
+        {
+            var r = kvp.Value;
+            skillKeys[i] = kvp.Key;
+            skillRecordIds[i] = r.RecordId ?? "";
+            skillDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            skillDescriptions[i] = r.Description ?? "";
+            skillAttributes[i] = r.Attribute;
+            skillSpecializations[i] = r.Specialization;
+            CopyFixed(r.UseValues, skillUseValues, i * 4, 4);
+            i++;
+        }
+
+        var birthsignKeys = new string[Birthsigns.Count];
+        var birthsignRecordIds = new string[Birthsigns.Count];
+        var birthsignDeleted = new byte[Birthsigns.Count];
+        var birthsignNames = new string[Birthsigns.Count];
+        var birthsignDescriptions = new string[Birthsigns.Count];
+        var birthsignTextures = new string[Birthsigns.Count];
+        var birthsignPowers = new Godot.Collections.Array();
+        i = 0;
+        foreach (var kvp in Birthsigns)
+        {
+            var r = kvp.Value;
+            birthsignKeys[i] = kvp.Key;
+            birthsignRecordIds[i] = r.RecordId ?? "";
+            birthsignDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            birthsignNames[i] = r.Name ?? "";
+            birthsignDescriptions[i] = r.Description ?? "";
+            birthsignTextures[i] = r.Texture ?? "";
+            birthsignPowers.Add(r.Powers);
+            i++;
+        }
+
+        var dialogueKeys = new string[Dialogues.Count];
+        var dialogueRecordIds = new string[Dialogues.Count];
+        var dialogueDeleted = new byte[Dialogues.Count];
+        var dialogueTypes = new int[Dialogues.Count];
+        i = 0;
+        foreach (var kvp in Dialogues)
+        {
+            var r = kvp.Value;
+            dialogueKeys[i] = kvp.Key;
+            dialogueRecordIds[i] = r.RecordId ?? "";
+            dialogueDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            dialogueTypes[i] = r.DialogueType;
+            i++;
+        }
+
+        int infoCount = 0;
+        foreach (var topic in DialogueInfos.Values)
+            infoCount += topic.Count;
+
+        var infoTopics = new string[DialogueInfos.Count];
+        var infoCounts = new int[DialogueInfos.Count];
+        var infoRecordIds = new string[infoCount];
+        var infoDeleted = new byte[infoCount];
+        var infoPrevIds = new string[infoCount];
+        var infoNextIds = new string[infoCount];
+        var infoDispositions = new int[infoCount];
+        var infoSpeakerRanks = new int[infoCount];
+        var infoSpeakerSexes = new int[infoCount];
+        var infoPlayerRanks = new int[infoCount];
+        var infoActorIds = new string[infoCount];
+        var infoActorRaces = new string[infoCount];
+        var infoActorClasses = new string[infoCount];
+        var infoActorFactions = new string[infoCount];
+        var infoActorCells = new string[infoCount];
+        var infoPcFactions = new string[infoCount];
+        var infoSoundFiles = new string[infoCount];
+        var infoResponses = new string[infoCount];
+        var infoResultScripts = new string[infoCount];
+        var infoQuestNames = new byte[infoCount];
+        var infoQuestFinishes = new byte[infoCount];
+        var infoQuestRestarts = new byte[infoCount];
+        var infoConditions = new Godot.Collections.Array();
+        int topicIndex = 0;
+        int infoIndex = 0;
+        foreach (var kvp in DialogueInfos)
+        {
+            infoTopics[topicIndex] = kvp.Key;
+            infoCounts[topicIndex] = kvp.Value.Count;
+            topicIndex++;
+            foreach (var r in kvp.Value)
+            {
+                infoRecordIds[infoIndex] = r.RecordId ?? "";
+                infoDeleted[infoIndex] = r.IsDeleted ? (byte)1 : (byte)0;
+                infoPrevIds[infoIndex] = r.PrevId ?? "";
+                infoNextIds[infoIndex] = r.NextId ?? "";
+                infoDispositions[infoIndex] = r.Disposition;
+                infoSpeakerRanks[infoIndex] = r.SpeakerRank;
+                infoSpeakerSexes[infoIndex] = r.SpeakerSex;
+                infoPlayerRanks[infoIndex] = r.PlayerRank;
+                infoActorIds[infoIndex] = r.ActorId ?? "";
+                infoActorRaces[infoIndex] = r.ActorRace ?? "";
+                infoActorClasses[infoIndex] = r.ActorClass ?? "";
+                infoActorFactions[infoIndex] = r.ActorFaction ?? "";
+                infoActorCells[infoIndex] = r.ActorCell ?? "";
+                infoPcFactions[infoIndex] = r.PcFaction ?? "";
+                infoSoundFiles[infoIndex] = r.SoundFile ?? "";
+                infoResponses[infoIndex] = r.Response ?? "";
+                infoResultScripts[infoIndex] = r.ResultScript ?? "";
+                infoQuestNames[infoIndex] = r.QuestName ? (byte)1 : (byte)0;
+                infoQuestFinishes[infoIndex] = r.QuestFinish ? (byte)1 : (byte)0;
+                infoQuestRestarts[infoIndex] = r.QuestRestart ? (byte)1 : (byte)0;
+                infoConditions.Add(r.Conditions);
+                infoIndex++;
+            }
+        }
+
+        var levcKeys = new string[LeveledCreatures.Count];
+        var levcRecordIds = new string[LeveledCreatures.Count];
+        var levcDeleted = new byte[LeveledCreatures.Count];
+        var levcFlags = new int[LeveledCreatures.Count];
+        var levcChanceNone = new int[LeveledCreatures.Count];
+        var levcCreatures = new Godot.Collections.Array();
+        i = 0;
+        foreach (var kvp in LeveledCreatures)
+        {
+            var r = kvp.Value;
+            levcKeys[i] = kvp.Key;
+            levcRecordIds[i] = r.RecordId ?? "";
+            levcDeleted[i] = r.IsDeleted ? (byte)1 : (byte)0;
+            levcFlags[i] = r.Flags;
+            levcChanceNone[i] = r.ChanceNone;
+            levcCreatures.Add(r.Creatures);
+            i++;
+        }
+
+        result["book_keys"] = bookKeys;
+        result["book_record_ids"] = bookRecordIds;
+        result["book_models"] = bookModels;
+        result["book_deleted"] = bookDeleted;
+        result["book_names"] = bookNames;
+        result["book_icons"] = bookIcons;
+        result["book_scripts"] = bookScripts;
+        result["book_enchant_ids"] = bookEnchantIds;
+        result["book_texts"] = bookTexts;
+        result["book_weights"] = bookWeights;
+        result["book_values"] = bookValues;
+        result["book_scrolls"] = bookScrolls;
+        result["book_skill_ids"] = bookSkillIds;
+        result["book_enchant_points"] = bookEnchantPoints;
+
+        result["class_keys"] = classKeys;
+        result["class_record_ids"] = classRecordIds;
+        result["class_deleted"] = classDeleted;
+        result["class_names"] = classNames;
+        result["class_descriptions"] = classDescriptions;
+        result["class_primary_attributes"] = classPrimaryAttributes;
+        result["class_specializations"] = classSpecializations;
+        result["class_major_skills"] = classMajorSkills;
+        result["class_minor_skills"] = classMinorSkills;
+        result["class_playable"] = classPlayable;
+        result["class_services"] = classServices;
+
+        result["faction_keys"] = factionKeys;
+        result["faction_record_ids"] = factionRecordIds;
+        result["faction_deleted"] = factionDeleted;
+        result["faction_names"] = factionNames;
+        result["faction_rank_names"] = factionRankNames;
+        result["faction_favorite_attributes"] = factionFavoriteAttributes;
+        result["faction_rank_data"] = factionRankData;
+        result["faction_favorite_skills"] = factionFavoriteSkills;
+        result["faction_hidden"] = factionHidden;
+        result["faction_reactions"] = factionReactions;
+
+        result["skill_keys"] = skillKeys;
+        result["skill_record_ids"] = skillRecordIds;
+        result["skill_deleted"] = skillDeleted;
+        result["skill_descriptions"] = skillDescriptions;
+        result["skill_attributes"] = skillAttributes;
+        result["skill_specializations"] = skillSpecializations;
+        result["skill_use_values"] = skillUseValues;
+
+        result["birthsign_keys"] = birthsignKeys;
+        result["birthsign_record_ids"] = birthsignRecordIds;
+        result["birthsign_deleted"] = birthsignDeleted;
+        result["birthsign_names"] = birthsignNames;
+        result["birthsign_descriptions"] = birthsignDescriptions;
+        result["birthsign_textures"] = birthsignTextures;
+        result["birthsign_powers"] = birthsignPowers;
+
+        result["dialogue_keys"] = dialogueKeys;
+        result["dialogue_record_ids"] = dialogueRecordIds;
+        result["dialogue_deleted"] = dialogueDeleted;
+        result["dialogue_types"] = dialogueTypes;
+
+        result["info_topics"] = infoTopics;
+        result["info_counts"] = infoCounts;
+        result["info_record_ids"] = infoRecordIds;
+        result["info_deleted"] = infoDeleted;
+        result["info_prev_ids"] = infoPrevIds;
+        result["info_next_ids"] = infoNextIds;
+        result["info_dispositions"] = infoDispositions;
+        result["info_speaker_ranks"] = infoSpeakerRanks;
+        result["info_speaker_sexes"] = infoSpeakerSexes;
+        result["info_player_ranks"] = infoPlayerRanks;
+        result["info_actor_ids"] = infoActorIds;
+        result["info_actor_races"] = infoActorRaces;
+        result["info_actor_classes"] = infoActorClasses;
+        result["info_actor_factions"] = infoActorFactions;
+        result["info_actor_cells"] = infoActorCells;
+        result["info_pc_factions"] = infoPcFactions;
+        result["info_sound_files"] = infoSoundFiles;
+        result["info_responses"] = infoResponses;
+        result["info_result_scripts"] = infoResultScripts;
+        result["info_quest_names"] = infoQuestNames;
+        result["info_quest_finishes"] = infoQuestFinishes;
+        result["info_quest_restarts"] = infoQuestRestarts;
+        result["info_conditions"] = infoConditions;
+
+        result["levc_keys"] = levcKeys;
+        result["levc_record_ids"] = levcRecordIds;
+        result["levc_deleted"] = levcDeleted;
+        result["levc_flags"] = levcFlags;
+        result["levc_chance_none"] = levcChanceNone;
+        result["levc_creatures"] = levcCreatures;
+
+        return result;
+    }
+
+    private static void CopyFixed(int[] source, int[] target, int offset, int count)
+    {
+        for (int n = 0; n < count && n < source.Length; n++)
+            target[offset + n] = source[n];
+    }
+
+    private static void CopyFixed(float[] source, float[] target, int offset, int count)
+    {
+        for (int n = 0; n < count && n < source.Length; n++)
+            target[offset + n] = source[n];
+    }
+
     // =========================================================================
     // ON-DEMAND RECORD QUERIES (Phase 2: zero upfront cost for non-cell records)
     // =========================================================================

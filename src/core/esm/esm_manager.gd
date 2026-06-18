@@ -471,6 +471,11 @@ func _populate_from_native(loader: RefCounted) -> void:
 @warning_ignore("unsafe_method_access")
 @warning_ignore("unsafe_property_access")
 func _populate_startup_supplement_from_native(loader: RefCounted) -> void:
+	var packed: Dictionary = _bridge.export_startup_supplement_packed(loader) if _bridge != null else {}
+	if not packed.is_empty():
+		_populate_startup_supplement_from_packed(packed)
+		return
+
 	_populate_native_records(loader, "Books", ESMDefs.RecordType.REC_BOOK,
 		func(native_rec: RefCounted) -> ESMRecord:
 			var rec := BookRecord.new()
@@ -544,6 +549,229 @@ func _populate_startup_supplement_from_native(loader: RefCounted) -> void:
 			rec.chance_none = native_rec.get("ChanceNone") as int
 			rec.creatures = _native_dictionary_array(native_rec.get("Creatures"))
 			return rec)
+
+
+@warning_ignore("unsafe_property_access")
+func _populate_startup_supplement_from_packed(data: Dictionary) -> void:
+	var book_keys: PackedStringArray = data["book_keys"]
+	var book_record_ids: PackedStringArray = data["book_record_ids"]
+	var book_models: PackedStringArray = data["book_models"]
+	var book_deleted: PackedByteArray = data["book_deleted"]
+	var book_names: PackedStringArray = data["book_names"]
+	var book_icons: PackedStringArray = data["book_icons"]
+	var book_scripts: PackedStringArray = data["book_scripts"]
+	var book_enchant_ids: PackedStringArray = data["book_enchant_ids"]
+	var book_texts: PackedStringArray = data["book_texts"]
+	var book_weights: PackedFloat32Array = data["book_weights"]
+	var book_values: PackedInt32Array = data["book_values"]
+	var book_scrolls: PackedByteArray = data["book_scrolls"]
+	var book_skill_ids: PackedInt32Array = data["book_skill_ids"]
+	var book_enchant_points: PackedInt32Array = data["book_enchant_points"]
+	for i in book_keys.size():
+		var rec := BookRecord.new()
+		rec.record_id = book_record_ids[i]
+		rec.model = book_models[i]
+		rec.is_deleted = book_deleted[i] != 0
+		rec.name = book_names[i]
+		rec.icon = book_icons[i]
+		rec.script_id = book_scripts[i]
+		rec.enchant_id = book_enchant_ids[i]
+		rec.text = book_texts[i]
+		rec.weight = book_weights[i]
+		rec.value = book_values[i]
+		rec.is_scroll = book_scrolls[i] != 0
+		rec.skill_id = book_skill_ids[i]
+		rec.enchant_points = book_enchant_points[i]
+		_store_record(rec, ESMDefs.RecordType.REC_BOOK)
+
+	var class_keys: PackedStringArray = data["class_keys"]
+	var class_record_ids: PackedStringArray = data["class_record_ids"]
+	var class_deleted: PackedByteArray = data["class_deleted"]
+	var class_names: PackedStringArray = data["class_names"]
+	var class_descriptions: PackedStringArray = data["class_descriptions"]
+	var class_primary_attributes: PackedInt32Array = data["class_primary_attributes"]
+	var class_specializations: PackedInt32Array = data["class_specializations"]
+	var class_major_skills: PackedInt32Array = data["class_major_skills"]
+	var class_minor_skills: PackedInt32Array = data["class_minor_skills"]
+	var class_playable: PackedByteArray = data["class_playable"]
+	var class_services: PackedInt32Array = data["class_services"]
+	for i in class_keys.size():
+		var rec := ClassRecord.new()
+		rec.record_id = class_record_ids[i]
+		rec.is_deleted = class_deleted[i] != 0
+		rec.name = class_names[i]
+		rec.description = class_descriptions[i]
+		rec.primary_attributes = [class_primary_attributes[i * 2], class_primary_attributes[i * 2 + 1]]
+		rec.specialization = class_specializations[i]
+		rec.major_skills = [
+			class_major_skills[i * 5],
+			class_major_skills[i * 5 + 1],
+			class_major_skills[i * 5 + 2],
+			class_major_skills[i * 5 + 3],
+			class_major_skills[i * 5 + 4],
+		]
+		rec.minor_skills = [
+			class_minor_skills[i * 5],
+			class_minor_skills[i * 5 + 1],
+			class_minor_skills[i * 5 + 2],
+			class_minor_skills[i * 5 + 3],
+			class_minor_skills[i * 5 + 4],
+		]
+		rec.is_playable = class_playable[i] != 0
+		rec.services = class_services[i]
+		_store_record(rec, ESMDefs.RecordType.REC_CLAS)
+
+	var faction_keys: PackedStringArray = data["faction_keys"]
+	var faction_record_ids: PackedStringArray = data["faction_record_ids"]
+	var faction_deleted: PackedByteArray = data["faction_deleted"]
+	var faction_names: PackedStringArray = data["faction_names"]
+	var faction_rank_names: Array = data["faction_rank_names"]
+	var faction_favorite_attributes: PackedInt32Array = data["faction_favorite_attributes"]
+	var faction_rank_data: Array = data["faction_rank_data"]
+	var faction_favorite_skills: PackedInt32Array = data["faction_favorite_skills"]
+	var faction_hidden: PackedByteArray = data["faction_hidden"]
+	var faction_reactions: Array = data["faction_reactions"]
+	for i in faction_keys.size():
+		var rec := FactionRecord.new()
+		rec.record_id = faction_record_ids[i]
+		rec.is_deleted = faction_deleted[i] != 0
+		rec.name = faction_names[i]
+		rec.rank_names = _native_string_array(faction_rank_names[i])
+		rec.favorite_attributes = [faction_favorite_attributes[i * 2], faction_favorite_attributes[i * 2 + 1]]
+		rec.rank_data = _native_dictionary_array(faction_rank_data[i])
+		rec.favorite_skills = [
+			faction_favorite_skills[i * 7],
+			faction_favorite_skills[i * 7 + 1],
+			faction_favorite_skills[i * 7 + 2],
+			faction_favorite_skills[i * 7 + 3],
+			faction_favorite_skills[i * 7 + 4],
+			faction_favorite_skills[i * 7 + 5],
+			faction_favorite_skills[i * 7 + 6],
+		]
+		rec.is_hidden = faction_hidden[i] != 0
+		rec.reactions = _native_string_int_dictionary(faction_reactions[i])
+		_store_record(rec, ESMDefs.RecordType.REC_FACT)
+
+	var skill_keys: PackedStringArray = data["skill_keys"]
+	var skill_record_ids: PackedStringArray = data["skill_record_ids"]
+	var skill_deleted: PackedByteArray = data["skill_deleted"]
+	var skill_descriptions: PackedStringArray = data["skill_descriptions"]
+	var skill_attributes: PackedInt32Array = data["skill_attributes"]
+	var skill_specializations: PackedInt32Array = data["skill_specializations"]
+	var skill_use_values: PackedFloat32Array = data["skill_use_values"]
+	for i in skill_keys.size():
+		var rec := SkillRecord.new()
+		rec.record_id = skill_record_ids[i]
+		rec.is_deleted = skill_deleted[i] != 0
+		rec.description = skill_descriptions[i]
+		rec.attribute = skill_attributes[i]
+		rec.specialization = skill_specializations[i]
+		rec.use_values = [
+			skill_use_values[i * 4],
+			skill_use_values[i * 4 + 1],
+			skill_use_values[i * 4 + 2],
+			skill_use_values[i * 4 + 3],
+		]
+		_store_record(rec, ESMDefs.RecordType.REC_SKIL)
+
+	var birthsign_keys: PackedStringArray = data["birthsign_keys"]
+	var birthsign_record_ids: PackedStringArray = data["birthsign_record_ids"]
+	var birthsign_deleted: PackedByteArray = data["birthsign_deleted"]
+	var birthsign_names: PackedStringArray = data["birthsign_names"]
+	var birthsign_descriptions: PackedStringArray = data["birthsign_descriptions"]
+	var birthsign_textures: PackedStringArray = data["birthsign_textures"]
+	var birthsign_powers: Array = data["birthsign_powers"]
+	for i in birthsign_keys.size():
+		var rec := BirthsignRecord.new()
+		rec.record_id = birthsign_record_ids[i]
+		rec.is_deleted = birthsign_deleted[i] != 0
+		rec.name = birthsign_names[i]
+		rec.description = birthsign_descriptions[i]
+		rec.texture = birthsign_textures[i]
+		rec.powers = _native_string_array(birthsign_powers[i])
+		_store_record(rec, ESMDefs.RecordType.REC_BSGN)
+
+	var dialogue_keys: PackedStringArray = data["dialogue_keys"]
+	var dialogue_record_ids: PackedStringArray = data["dialogue_record_ids"]
+	var dialogue_deleted: PackedByteArray = data["dialogue_deleted"]
+	var dialogue_types: PackedInt32Array = data["dialogue_types"]
+	for i in dialogue_keys.size():
+		var rec := DialogueRecord.new()
+		rec.record_id = dialogue_record_ids[i]
+		rec.is_deleted = dialogue_deleted[i] != 0
+		rec.dialogue_type = dialogue_types[i]
+		_store_record(rec, ESMDefs.RecordType.REC_DIAL)
+
+	var info_topics: PackedStringArray = data["info_topics"]
+	var info_counts: PackedInt32Array = data["info_counts"]
+	var info_record_ids: PackedStringArray = data["info_record_ids"]
+	var info_deleted: PackedByteArray = data["info_deleted"]
+	var info_prev_ids: PackedStringArray = data["info_prev_ids"]
+	var info_next_ids: PackedStringArray = data["info_next_ids"]
+	var info_dispositions: PackedInt32Array = data["info_dispositions"]
+	var info_speaker_ranks: PackedInt32Array = data["info_speaker_ranks"]
+	var info_speaker_sexes: PackedInt32Array = data["info_speaker_sexes"]
+	var info_player_ranks: PackedInt32Array = data["info_player_ranks"]
+	var info_actor_ids: PackedStringArray = data["info_actor_ids"]
+	var info_actor_races: PackedStringArray = data["info_actor_races"]
+	var info_actor_classes: PackedStringArray = data["info_actor_classes"]
+	var info_actor_factions: PackedStringArray = data["info_actor_factions"]
+	var info_actor_cells: PackedStringArray = data["info_actor_cells"]
+	var info_pc_factions: PackedStringArray = data["info_pc_factions"]
+	var info_sound_files: PackedStringArray = data["info_sound_files"]
+	var info_responses: PackedStringArray = data["info_responses"]
+	var info_result_scripts: PackedStringArray = data["info_result_scripts"]
+	var info_quest_names: PackedByteArray = data["info_quest_names"]
+	var info_quest_finishes: PackedByteArray = data["info_quest_finishes"]
+	var info_quest_restarts: PackedByteArray = data["info_quest_restarts"]
+	var info_conditions: Array = data["info_conditions"]
+	var info_index := 0
+	for topic_i in info_topics.size():
+		var topic_key := info_topics[topic_i]
+		var infos: Array = []
+		for _j in info_counts[topic_i]:
+			if info_deleted[info_index] == 0:
+				var rec := DialogueInfoRecord.new()
+				rec.record_id = info_record_ids[info_index]
+				rec.is_deleted = false
+				rec.prev_id = info_prev_ids[info_index]
+				rec.next_id = info_next_ids[info_index]
+				rec.disposition = info_dispositions[info_index]
+				rec.speaker_rank = info_speaker_ranks[info_index]
+				rec.speaker_sex = info_speaker_sexes[info_index]
+				rec.player_rank = info_player_ranks[info_index]
+				rec.actor_id = info_actor_ids[info_index]
+				rec.actor_race = info_actor_races[info_index]
+				rec.actor_class = info_actor_classes[info_index]
+				rec.actor_faction = info_actor_factions[info_index]
+				rec.actor_cell = info_actor_cells[info_index]
+				rec.pc_faction = info_pc_factions[info_index]
+				rec.sound_file = info_sound_files[info_index]
+				rec.response = info_responses[info_index]
+				rec.result_script = info_result_scripts[info_index]
+				rec.quest_name = info_quest_names[info_index] != 0
+				rec.quest_finish = info_quest_finishes[info_index] != 0
+				rec.quest_restart = info_quest_restarts[info_index] != 0
+				rec.conditions = _native_dictionary_array(info_conditions[info_index])
+				infos.append(rec)
+			info_index += 1
+		if not infos.is_empty():
+			dialogue_infos[topic_key] = infos
+
+	var levc_keys: PackedStringArray = data["levc_keys"]
+	var levc_record_ids: PackedStringArray = data["levc_record_ids"]
+	var levc_deleted: PackedByteArray = data["levc_deleted"]
+	var levc_flags: PackedInt32Array = data["levc_flags"]
+	var levc_chance_none: PackedInt32Array = data["levc_chance_none"]
+	var levc_creatures: Array = data["levc_creatures"]
+	for i in levc_keys.size():
+		var rec := LeveledCreatureRecord.new()
+		rec.record_id = levc_record_ids[i]
+		rec.is_deleted = levc_deleted[i] != 0
+		rec.flags = levc_flags[i]
+		rec.chance_none = levc_chance_none[i]
+		rec.creatures = _native_dictionary_array(levc_creatures[i])
+		_store_record(rec, ESMDefs.RecordType.REC_LEVC)
 
 
 @warning_ignore("unsafe_method_access")

@@ -16,8 +16,6 @@ clear ownership, current use, and a verification story.
 Read these first:
 
 1. `docs/audit/bloat_control_state.md`
-2. `docs/audit/spring_cleanup_state.md`
-3. `docs/audit/spring_cleanup_pillar_1_code_quality_audit_2026_06_13.md`
 
 Then run the deterministic scan:
 

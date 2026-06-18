@@ -3643,7 +3643,7 @@ func _check_startup_complete() -> void:
 	var inner_ring_count: int = int(PI * inner_ring_radius * inner_ring_radius)
 	var impostor_processed: int = impostor_initial - impostor_pending
 	var impostor_inner_ring_done: bool = impostor_processed >= inner_ring_count or impostor_pending == 0
-	# Wait for nearby cells loaded + instantiation queue manageable + inner ring impostors
+	# Wait for nearby cells loaded + first-playable queue cap + inner ring impostors
 	# Don't be too strict — player shouldn't wait 30s for every impostor
 	var scene_tiers_disabled := not _near_tier_visible and not _mid_tier_visible
 	var nearby_cells_loaded := scene_tiers_disabled or _loaded_cells.size() >= mini(load_radius_cells * 2 + 1, 7)
@@ -3653,7 +3653,7 @@ func _check_startup_complete() -> void:
 			_loaded_cells.size(), mini(load_radius_cells * 2 + 1, 7),
 			queue_size, impostor_processed, inner_ring_count,
 			impostor_pending])
-	if nearby_cells_loaded and queue_size < 50 and impostor_inner_ring_done:
+	if nearby_cells_loaded and queue_size <= FIRST_PLAYABLE_MAX_QUEUE and impostor_inner_ring_done:
 		_startup_phase = false
 		_post_startup_start_ms = Time.get_ticks_msec()
 		# Restore normal impostor budget

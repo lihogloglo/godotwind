@@ -12,7 +12,6 @@ Performance Observatory, continue.
 
 - `.agents/skills/performance-observatory/SKILL.md`
 - `docs/audit/performance_observatory_state.md`
-- `docs/audit/spring_cleanup_pillar_3_0_performance_observatory_charter_2026_06_15.md`
 - `docs/systems/benchmarking.md`
 - `tests/benchmark/benchmark_thresholds.gd`
 

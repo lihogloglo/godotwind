@@ -11,11 +11,82 @@ continue", "benchmark foundation", or similar, use the repo-local skill:
 
 ## Current Status
 
-Loading-speed attribution for the first Pillar 3 optimization slice is now
-available. This is attribution/instrumentation only; no runtime streaming
+Runtime streaming attribution is active because the current user request
+explicitly excludes loading/startup/first-playable work. The latest accepted
+slice exposes existing publication-lane budget stats in autobench reports so
+the next runtime optimization can target the right owner. No runtime streaming
 budget, cache policy, queue behavior, or broad C# migration changed.
 
-Completed this slice:
+Completed runtime publication-lane diagnostic slice:
+
+- Ran the deterministic static observability scan:
+  `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
+- Added existing `StreamingPublicationBudget` lane counters to autobench
+  samples and summaries:
+  `pub_<lane>_claimed_us`, `pub_<lane>_spent_us`, and
+  `pub_<lane>_overrun_us` for `near_gameplay`, `static_visuals`, `hlod`,
+  `far_impostors`, `distant_lights`, and `unload`.
+- Compared the same runtime autobench setup before/after:
+  - before runtime summary:
+    `user://benchmark_results/summary_2026-06-18_18-26-58.json`
+  - after runtime summary:
+    `user://benchmark_results/summary_2026-06-18_18-38-32.json`
+- Practical result: the new reports show runtime publication cost is dominated
+  by `near_gameplay`, not `static_visuals`. In `fast_travel_streaming`,
+  `pub_near_gameplay_spent_us_avg=7384.7` and
+  `pub_static_visuals_spent_us_avg=462.8`; in `stress_dense_exterior`,
+  `pub_near_gameplay_spent_us_avg=7522.4` and
+  `pub_static_visuals_spent_us_avg=312.9`. The next runtime slice should
+  inspect the near-gameplay `CellManager.process_async_instantiation()` owner
+  below that lane, not tune static/HLOD/FAR budgets.
+- Same-scenario observed runtime numbers moved in the right direction, but this
+  slice is report-only so the movement is not claimed as a causal optimization:
+  flythrough avg FPS 29.36 -> 31.32, p95 46.20 ms -> 40.24 ms, p99
+  57.36 ms -> 46.15 ms; fast-travel sampled stream total 10.86 ms ->
+  10.01 ms and phase inst 8.24 ms -> 7.77 ms.
+- Correctness verification: focused gdUnit `test_auto_bench_runner.gd` passed
+  in `reports/report_126` with 5 tests and 0 failures / 0 errors. `dotnet
+  build Godotwind.sln` passed before visual/benchmark launch because C# files
+  were already modified in the worktree.
+- Caveat: the first after-run crashed before scenario output with
+  `Terrain3D NOTIFICATION_CRASH` while `model_loader.get_model()` was called
+  from `ReferenceInstantiator.instantiate_static_world_object_record()`. The
+  rerun completed and wrote valid runtime reports. Treat the crash as a
+  live-traversal/static-publication stability signal for the next runtime
+  slice, not as parked quit noise. No shader files changed, so shader
+  cache/import artifacts were not cleared.
+
+Previous accepted loading slice: boot-gate startup budget alignment. It is
+kept below as history, but do not continue loading work while the current user
+request excludes loading/startup/first-playable.
+
+Completed boot-gate startup budget alignment slice:
+
+Completed boot-gate startup budget alignment slice:
+
+- Ran the deterministic static observability scan:
+  `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
+- Compared the same warm-start scenario before/after:
+  - before: `user://benchmark_results/loading_baseline_warm_start_2026-06-18_18-02-19.json`
+  - after: `user://benchmark_results/loading_baseline_warm_start_2026-06-18_18-08-22.json`
+- Changed `NativeStreamingManager._check_startup_complete()` to keep startup
+  burst mode active until the same `FIRST_PLAYABLE_MAX_QUEUE=8` cap used by
+  `is_inner_ring_ready()` is reached. Previously startup burst mode could end
+  at queue < 50, leaving the final boot loading-screen tail to drain under the
+  normal runtime publication budget.
+- Practical result: first playable improved from 25.820 s to 24.646 s,
+  `inner_ring_gate_wait_ms` improved from 6.854 s to 6.647 s, accumulated
+  `cell_manager_publication_ms` improved from 2.896 s to 2.532 s, and max
+  per-frame loading-gate CellManager publication dropped from 323.670 ms to
+  281.984 ms.
+- Focused gdUnit `test_startup_phase_gate.gd` passed in `reports/report_125`
+  with 2 tests and 0 failures / 0 errors.
+- Caveat: the after run reported more cumulative startup frame overruns
+  (138 vs 127), so keep overrun count visible in the next warm-start slice.
+  No C# files changed, so `dotnet build` was not required. No shader files
+  changed, so shader cache/import artifacts were not cleared.
+
+Completed loading attribution instrumentation slice:
 
 - Reran the deterministic static observability scan:
   `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
@@ -27,23 +98,73 @@ Completed this slice:
 - Added `ESMManager.get_last_load_timing_stats()` so the main scene can attach
   primary ESM native/populate/supplement timings without scraping logs.
 - Current real-renderer integrated warm-start report:
-  `user://benchmark_results/loading_baseline_warm_start_2026-06-18_13-51-59.json`
+  `user://benchmark_results/loading_baseline_warm_start_2026-06-18_17-24-34.json`
 - Current evidence from that report:
   - valid warm-start first-playable run, no timeout
-  - process-to-first-playable: 33.788 s
-  - ready-to-init delay: 8.139 s
-  - post-init-to-boot-gate handoff: 6.273 s
-  - terrain: 4.166 s
-  - GDScript ESM populate/supplement: 4.358 s
-  - inner-ring gate wait: 6.658 s
-  - accumulated CellManager publication work inside that gate: 2.350 s
-  - model/cache index: 0.133 s
+  - process-to-first-playable: 23.747 s
+  - ready-to-init delay: 8.185 s
+  - first loading-frame await: 2 ms
+  - post-init-to-boot-gate handoff: 29 ms
+  - source data total: 6.979 s
+  - ESM native primary: 2.819 s
+  - GDScript ESM populate/supplement: 3.011 s
+  - terrain: 1.335 s
+  - inner-ring gate wait: 6.453 s
+  - accumulated CellManager publication work inside that gate: 2.394 s
+  - model/cache index: 0.136 s
   - remaining unattributed/other init: near-zero attribution noise
 - Conclusion: the next optimization should not start with shared streaming
-  budget tuning or broad GDScript-to-C# ports. The first concrete loading
-  target is splitting the 6.273 s post-init camera/streaming handoff, then
-  choosing between that handoff, ready-to-init delay, terrain/horizon startup,
-  ESM GDScript supplement/populate, or boot-gate publication.
+  budget tuning or broad GDScript-to-C# ports. The post-init camera/streaming
+  handoff is no longer a useful target; it is 29 ms. After the packed ESM
+  supplement slice, the next concrete loading target is boot-gate publication,
+  with the same warm-start report used for before/after evidence.
+
+Completed native packed ESM startup supplement slice:
+
+- Ran the deterministic static observability scan:
+  `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
+- Built C# before launch because `src/native/NativeESMLoader.cs` changed.
+- Added a focused packed supplement shape test:
+  `tests/unit/test_esm_startup_supplement_packed.gd`.
+- Compared the same warm-start scenario before/after:
+  - before: `user://benchmark_results/loading_baseline_warm_start_2026-06-18_13-51-59.json`
+  - after: `user://benchmark_results/loading_baseline_warm_start_2026-06-18_17-24-34.json`
+  - verification rerun:
+    `user://benchmark_results/loading_baseline_warm_start_2026-06-18_17-53-57.json`
+- Practical result: accepted after report reduced
+  `gdscript_supplement_populate_ms` from 4.358 s to 3.011 s and
+  `source_data_total_ms` from 7.822 s to 6.979 s. The verification rerun
+  stayed valid and still improved the target owner versus before
+  (`gdscript_supplement_populate_ms=3.349 s`,
+  `source_data_total_ms=7.555 s`), but total first playable varied upward to
+  26.243 s because ready-to-init delay and boot-gate publication were slower.
+- Focused gdUnit `test_esm_startup_supplement_packed.gd` passed in
+  `reports/report_124` with 1 test and 0 failures / 0 errors after an initial
+  assertion-helper mistake was fixed. Focused gdUnit
+  `test_loading_baseline_report.gd` passed in `reports/report_123` with
+  2 tests and 0 failures / 0 errors.
+- The ready-quit launch still logged the existing RID/resource leak warnings
+  and generated the usual crash-report text with no recorded session errors.
+
+Completed deferred startup scheduling slice:
+
+- Ran the deterministic static observability scan:
+  `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
+- Built C# before launch because `src/native/NativeESMLoader.cs` was already
+  modified in the worktree.
+- Compared the same warm-start scenario before/after:
+  - before: `user://benchmark_results/loading_baseline_warm_start_2026-06-18_17-21-36.json`
+  - after: `user://benchmark_results/loading_baseline_warm_start_2026-06-18_17-24-34.json`
+- Restored `call_deferred("_init_async")` after the loading overlay is shown.
+  This follows Godot's normal startup/frame boundary instead of running the
+  long async startup coroutine directly inside `_ready()`.
+- Practical result: first playable improved from 24.283 s to 23.747 s, and the
+  misleading `first_update_loading_await` bucket dropped from 7.639 s to 2 ms.
+  The 7-8 s window-start delay now appears as `ready_to_init_async_start_ms`,
+  where it belongs.
+- Focused gdUnit `test_loading_baseline_report.gd` exited 0 with 2 tests and
+  0 failures. The ready-quit launch still logged the existing RID/resource leak
+  warnings.
 
 Current lane-timing evidence now identifies the first measured Pillar 3 target:
 `CellManager` instantiation/publication.
@@ -59,12 +180,10 @@ Completed this slice:
   `NativeStreamingManager` phase timing, queue depth, frame-total,
   distant-tier timing, and `CellManager.get_frame_inst_route_times()` values
   into autobench JSON samples/summaries.
-- Ran a current real-renderer autobench:
-  `--bench-auto=spring_pillar3_lane_timing_2026_06_18 --start-cell=-3,-2`
+- Ran a current real-renderer autobench for lane timing from start cell `-3,-2`.
 - Current evidence:
   - `user://benchmark_results/summary_2026-06-18_12-26-41.json`
   - `user://benchmark_results/benchmark_2026-06-18_12-26-41.csv`
-  - `user://benchmark_results/autobench_spring_pillar3_lane_timing_2026_06_18/bench_teleport.json`
 - Conclusion: current `flythrough_streaming` and `fast_travel_streaming`
   evidence both point to `CellManager` instantiation/publication as the steady
   first bottleneck. Flythrough active streaming averaged 8.49 ms/frame, with
@@ -271,21 +390,21 @@ optimization:
 
 ## Latest Scan Result
 
-Regenerated 2026-06-18 local workspace time for the hot-path evidence slice
-(scan timestamp 2026-06-17 UTC):
+Regenerated 2026-06-18 local workspace time for the runtime
+publication-lane diagnostic slice:
 
 | Category | Hits |
 |---|---:|
-| `benchmark_runner` | 678 |
-| `hot_path_gdscript_signal` | 4081 |
-| `loading_metric` | 727 |
-| `memory_or_leak_metric` | 193 |
-| `native_or_csharp_surface` | 1808 |
+| `benchmark_runner` | 725 |
+| `hot_path_gdscript_signal` | 4140 |
+| `loading_metric` | 881 |
+| `memory_or_leak_metric` | 199 |
+| `native_or_csharp_surface` | 2013 |
 | `performance_builtin_monitor` | 64 |
 | `performance_custom_monitor` | 5 |
 | `pipeline_compile_metric` | 45 |
-| `streaming_metric` | 1849 |
-| `structured_report` | 1409 |
+| `streaming_metric` | 1863 |
+| `structured_report` | 1475 |
 
 Static inferred gaps:
 
@@ -586,13 +705,13 @@ changed.
 
 ## Next Best Action
 
-Use the new warm-start attribution report to pick one loading optimization
-target. The cleanest next slice is to split the 6.273 s
-`post_init_to_boot_gate_ms` bucket inside `world_explorer` /
-`NativeStreamingManager.set_camera()`, then choose between the largest named
-loading owners: ready-to-init delay (8.139 s), post-init camera/streaming
-handoff (6.273 s), terrain/horizon startup (4.166 s), ESM GDScript
-populate/supplement (4.358 s), or boot-gate wait/publication (6.658 s wall
-clock with 2.350 s accumulated CellManager publication work). Do not tune
-shared streaming budgets or migrate broad files to C# until the same
-warm-start report shows the chosen owner improving.
+Continue runtime streaming, not loading/startup, while that remains the user
+scope. Use the new publication-lane fields from the latest runtime autobench
+rerun to inspect the dominant `near_gameplay` owner inside
+`CellManager.process_async_instantiation()`. The next smallest runtime slice
+should split that lane into already-timed subpaths such as classification,
+model request starts, async disk-load drain, pending child attach, static
+record publication, and light/interactive publication, then optimize one
+measured subpath. Do not tune shared budgets, static/HLOD/FAR budgets, or port
+broad files to C# until the same runtime scenario shows the chosen owner
+improving.
