@@ -106,6 +106,8 @@ var loaded_files: Array[String] = []
 var total_records_loaded: int = 0
 var records_by_type: Dictionary = {}  # String -> int
 var load_time_ms: float = 0.0
+var _last_load_timing: Dictionary = {}
+var _load_timing_history: Array[Dictionary] = []
 
 # Current dialogue topic being loaded (INFO records follow DIAL)
 var _current_dialogue_topic: String = ""
@@ -242,6 +244,18 @@ func _load_file_native_cached(path: String) -> Error:
 	total_records_loaded += stats.get("total_records", 0) as int
 	load_time_ms += total_time as float
 	loaded_files.append(path)
+	_record_load_timing({
+		"path": path,
+		"file": path.get_file(),
+		"loader": "native_cached",
+		"total_ms": total_time,
+		"native_primary_ms": csharp_time,
+		"gdscript_populate_ms": populate_time,
+		"gdscript_supplement_ms": supplement_time,
+		"gdscript_supplement_populate_ms": populate_time + supplement_time,
+		"cache_path": cache_path,
+		"records": stats.get("total_records", 0),
+	})
 
 	# Detailed timing breakdown for optimization
 	Log.info("esm", "Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
@@ -269,6 +283,17 @@ func _load_file_native(path: String) -> Error:
 	total_records_loaded += stats.get("total_records", 0) as int
 	load_time_ms += stats.get("load_time_ms", 0.0) as float
 	loaded_files.append(path)
+	_record_load_timing({
+		"path": path,
+		"file": path.get_file(),
+		"loader": "native",
+		"total_ms": stats.get("load_time_ms", 0.0),
+		"native_primary_ms": stats.get("load_time_ms", 0.0),
+		"gdscript_populate_ms": 0,
+		"gdscript_supplement_ms": 0,
+		"gdscript_supplement_populate_ms": 0,
+		"records": stats.get("total_records", 0),
+	})
 
 	Log.info("esm", "Loaded %s via native C# in %.1f ms" % [path, stats.get("load_time_ms", 0.0)])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
@@ -685,6 +710,17 @@ func _load_file_gdscript(path: String) -> Error:
 	load_time_ms += elapsed
 	total_records_loaded += records_parsed
 	loaded_files.append(path)
+	_record_load_timing({
+		"path": path,
+		"file": path.get_file(),
+		"loader": "gdscript",
+		"total_ms": elapsed,
+		"native_primary_ms": 0,
+		"gdscript_populate_ms": 0,
+		"gdscript_supplement_ms": elapsed,
+		"gdscript_supplement_populate_ms": elapsed,
+		"records": records_parsed,
+	})
 
 	Log.info("esm", "  Loaded %d records in %d ms" % [records_parsed, elapsed])
 	if skipped_types.size() > 0:
@@ -1626,6 +1662,19 @@ func get_stats() -> Dictionary:
 		"leveled_items": leveled_items.size(),
 		"leveled_creatures": leveled_creatures.size(),
 	}
+
+
+func _record_load_timing(timing: Dictionary) -> void:
+	_last_load_timing = timing.duplicate(true)
+	_load_timing_history.append(_last_load_timing.duplicate(true))
+
+
+func get_last_load_timing_stats() -> Dictionary:
+	return _last_load_timing.duplicate(true)
+
+
+func get_load_timing_history() -> Array[Dictionary]:
+	return _load_timing_history.duplicate(true)
 
 ## Print a summary of loaded data
 func print_stats() -> void:

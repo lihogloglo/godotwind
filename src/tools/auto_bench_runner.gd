@@ -323,6 +323,24 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 	}
 	if _streaming_manager:
 		var stats: Dictionary = _streaming_manager.get_stats()
+		sample["frame_total_ms"] = stats.get("frame_total_ms", 0.0)
+		sample["streaming_phase_sum_ms"] = stats.get("streaming_phase_sum_ms", 0.0)
+		sample["streaming_distant_tiers_ms"] = stats.get("streaming_distant_tiers_ms", 0.0)
+		sample["streaming_unattributed_ms"] = stats.get("streaming_unattributed_ms", 0.0)
+		sample["instantiation_queue"] = stats.get("instantiation_queue", 0)
+		sample["load_queue_size"] = stats.get("load_queue_size", 0)
+		sample["unload_queue_size"] = stats.get("unload_queue_size", 0)
+		if _streaming_manager.has_method("get_frame_streaming_ms"):
+			sample["stream_total_ms"] = _streaming_manager.get_frame_streaming_ms()
+		if _streaming_manager.has_method("get_phase_times"):
+			var phases: PackedFloat64Array = _streaming_manager.get_phase_times()
+			var phase_keys: Array[String] = [
+				"phase_unload_us", "phase_async_us", "phase_inst_us",
+				"phase_promo_us", "phase_coll_us", "phase_defer_us",
+				"phase_queue_us", "phase_cellupd_us", "phase_static_cull_us",
+			]
+			for i in range(mini(phases.size(), phase_keys.size())):
+				sample[phase_keys[i]] = phases[i]
 		sample["startup_phase"] = stats.get("startup_phase", false)
 		sample["loaded_cells"] = stats.get("loaded_cells", 0)
 		sample["loading_cells"] = stats.get("loading_cells", 0)
@@ -364,6 +382,14 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 			sample["hlod_stale_completions"] = hls.get("stale_completions_discarded", 0)
 			sample["hlod_merge_queue_us"] = hls.get("merge_queue_last_usec", 0)
 			sample["hlod_completion_us"] = hls.get("completion_last_usec", 0)
+	if _cell_manager and _cell_manager.has_method("get_frame_inst_route_times"):
+		var routes: Dictionary = _cell_manager.get_frame_inst_route_times()
+		sample["inst_door_us"] = routes.get("door", 0)
+		sample["inst_light_us"] = routes.get("light", 0)
+		sample["inst_light_modelload_us"] = routes.get("light_modelload", 0)
+		sample["inst_container_us"] = routes.get("container", 0)
+		sample["inst_activator_us"] = routes.get("activator", 0)
+		sample["inst_static_us"] = routes.get("static", 0)
 	return sample
 
 
@@ -453,6 +479,18 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 	var hlod_stale_max := 0
 	var hlod_merge_queue_max := 0
 	var hlod_completion_max := 0
+	var max_keys: Array[String] = [
+		"frame_total_ms", "stream_total_ms", "streaming_phase_sum_ms",
+		"streaming_distant_tiers_ms", "streaming_unattributed_ms",
+		"instantiation_queue", "load_queue_size", "unload_queue_size",
+		"phase_unload_us", "phase_async_us", "phase_inst_us", "phase_promo_us",
+		"phase_coll_us", "phase_defer_us", "phase_queue_us", "phase_cellupd_us",
+		"phase_static_cull_us", "inst_door_us", "inst_light_us",
+		"inst_light_modelload_us", "inst_container_us", "inst_activator_us",
+		"inst_static_us",
+	]
+	var max_values: Dictionary = {}
+	var sum_values: Dictionary = {}
 	for s: Dictionary in samples:
 		var f := float(s.get("fps", 0.0))
 		fps_min = minf(fps_min, f)
@@ -487,8 +525,12 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		hlod_stale_max = maxi(hlod_stale_max, int(s.get("hlod_stale_completions", 0)))
 		hlod_merge_queue_max = maxi(hlod_merge_queue_max, int(s.get("hlod_merge_queue_us", 0)))
 		hlod_completion_max = maxi(hlod_completion_max, int(s.get("hlod_completion_us", 0)))
+		for key in max_keys:
+			var value := float(s.get(key, 0.0))
+			max_values[key] = maxf(float(max_values.get(key, 0.0)), value)
+			sum_values[key] = float(sum_values.get(key, 0.0)) + value
 	var n := float(samples.size())
-	return {
+	var summary := {
 		"samples": samples.size(),
 		"fps_min": fps_min,
 		"fps_max": fps_max,
@@ -523,6 +565,10 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"hlod_merge_queue_max_us": hlod_merge_queue_max,
 		"hlod_completion_max_us": hlod_completion_max,
 	}
+	for key in max_keys:
+		summary["%s_max" % key] = max_values.get(key, 0.0)
+		summary["%s_avg" % key] = float(sum_values.get(key, 0.0)) / n
+	return summary
 
 
 # -----------------------------------------------------------------------------

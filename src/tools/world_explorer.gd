@@ -172,10 +172,15 @@ var _shutdown_refs_released: bool = false
 var _loading_state_machine: LoadingStateMachineScript = null  # Phase 8 — canonical loading gate (boot + teleport)
 var _boot_gate_entered: bool = false  # Latches the one-shot boot enter_loading call
 var _loading_phase_times: Dictionary = {}  # Per-phase loading times
+var _loading_esm_primary_timing: Dictionary = {}
+var _loading_gate_phase_totals_ms: Dictionary = {}
+var _loading_gate_phase_max_ms: Dictionary = {}
+var _loading_gate_phase_frames: int = 0
 var _observatory_process_start_msec: int = Time.get_ticks_msec()
 var _observatory_ready_msec: int = 0
 var _observatory_init_async_start_msec: int = 0
 var _observatory_init_async_done_msec: int = 0
+var _observatory_boot_gate_start_msec: int = 0
 var _lifetime_probe_started: bool = false
 
 # State
@@ -345,6 +350,7 @@ func _ready() -> void:
 	_loading_state_machine = LoadingStateMachineScript.new()
 	_loading_state_machine.name = "LoadingStateMachine"
 	add_child(_loading_state_machine)
+	_loading_state_machine.loading_started.connect(_on_loading_started)
 	_loading_state_machine.loading_finished.connect(_on_loading_finished)
 
 	# Enable wireframe debug-buffer generation BEFORE any mesh loads. The flag
@@ -551,6 +557,8 @@ func _init_async() -> void:
 		_log("[color=red]ERROR: Failed to load ESM: %s[/color]" % error_string(error))
 		_hide_loading()
 		return
+	if ESMManager.has_method("get_last_load_timing_stats"):
+		_loading_esm_primary_timing = ESMManager.call("get_last_load_timing_stats")
 	_ta = _log_timing(_ta, "ESM load (primary)")
 
 	# 2. Load mod ESPs
@@ -587,13 +595,12 @@ func _init_async() -> void:
 
 	# Ocean system is now lazy-loaded - created on first toggle
 
-	# Pre-warm model cache with common models (improves first-cell loading)
-	await _update_loading(80, "Pre-loading common models...")
+	# Index the prebaked cache only; first-cell models load through the existing
+	# budgeted ResourceLoader threaded path instead of speculative sync preload.
+	await _update_loading(80, "Indexing model cache...")
 	var indexed_models: int = cell_manager.prewarm_model_cache_index()
 	_log("Indexed %d prebaked model cache files" % indexed_models)
-	var preload_count := cell_manager.preload_common_models()
-	_log("Pre-loaded %d common models into cache" % preload_count)
-	_ta = _log_timing(_ta, "preload common models")
+	_ta = _log_timing(_ta, "model cache index")
 
 	# Auto-prebake character animations if not cached (one-time ~28s, then <1s on future launches)
 	await _update_loading(85, "Checking character animations...")
@@ -708,6 +715,7 @@ func _enter_boot_loading_gate() -> void:
 	if not _loading_state_machine or not native_streaming_manager:
 		return
 	_boot_gate_entered = true
+	_observatory_boot_gate_start_msec = Time.get_ticks_msec()
 	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
 	var progress_fn := Callable(self, "_format_boot_progress")
 	# pause_gameplay=false for the 2026-04-17 first-runtime pass — the
@@ -747,6 +755,12 @@ func _format_boot_progress() -> String:
 ## here; `duration_s` becomes the canonical "time-to-playable" number
 ## going forward, replacing the misleading `startup_complete` frame-count
 ## metric that currently drops too early.
+func _on_loading_started(_reason: String) -> void:
+	_loading_gate_phase_frames = 0
+	_loading_gate_phase_totals_ms.clear()
+	_loading_gate_phase_max_ms.clear()
+
+
 func _on_loading_finished(reason: String, duration_s: float, timed_out: bool) -> void:
 	var suffix := " (TIMEOUT)" if timed_out else ""
 	_log("[color=green]LoadingState '%s' complete in %.1fs%s[/color]" % [reason, duration_s, suffix])
@@ -780,6 +794,11 @@ func _write_loading_baseline_report(
 	var streaming_stats: Dictionary = {}
 	if native_streaming_manager and native_streaming_manager.has_method("get_stats"):
 		streaming_stats = native_streaming_manager.call("get_stats")
+	var model_loader_stats: Dictionary = {}
+	if cell_manager and cell_manager.has_method("get_model_loader"):
+		var model_loader: RefCounted = cell_manager.call("get_model_loader") as RefCounted
+		if model_loader and model_loader.has_method("get_stats"):
+			model_loader_stats = model_loader.call("get_stats")
 	var path: String = LoadingBaselineReportScript.write({
 		"scenario": args.get("scenario", "first_playable"),
 		"cache_state": args.get("cache_state", "unspecified"),
@@ -791,12 +810,19 @@ func _write_loading_baseline_report(
 			"ready_msec": _observatory_ready_msec,
 			"init_async_start_msec": _observatory_init_async_start_msec,
 			"init_async_done_msec": _observatory_init_async_done_msec,
+			"boot_gate_start_msec": _observatory_boot_gate_start_msec,
 			"first_playable_msec": Time.get_ticks_msec(),
 		},
 		"phase_times_ms": _loading_phase_times,
+		"esm_primary_timing": _loading_esm_primary_timing,
+		"loading_gate_phase_totals_ms": _loading_gate_phase_totals_ms,
+		"loading_gate_phase_max_ms": _loading_gate_phase_max_ms,
+		"loading_gate_phase_frames": _loading_gate_phase_frames,
 		"inner_ring": inner_status,
 		"cell_manager": cell_manager_stats,
 		"streaming": streaming_stats,
+		"bsa_cache": BSAManager.get_cache_stats() if BSAManager.has_method("get_cache_stats") else {},
+		"model_loader": model_loader_stats,
 		"benchmark_mode_metadata": streaming_stats.get("benchmark_mode_metadata", {}),
 	})
 	if path.is_empty():
@@ -4064,9 +4090,45 @@ func _spawn_debug_ball() -> void:
 	_log("[color=cyan]Debug ball spawned at %s[/color]" % spawn_xf.origin)
 
 
+func _sample_loading_gate_phase_attribution() -> void:
+	if not _loading_state_machine or not _loading_state_machine.is_loading():
+		return
+	if _loading_state_machine.get_current_reason() != "boot":
+		return
+	if not native_streaming_manager or not native_streaming_manager.has_method("get_phase_times"):
+		return
+	var phases: PackedFloat64Array = native_streaming_manager.call("get_phase_times")
+	var labels: Array[String] = [
+		"unload",
+		"async_complete",
+		"instantiate",
+		"promote",
+		"collision",
+		"deferred",
+		"queue",
+		"cell_update",
+		"static_cull",
+	]
+	_loading_gate_phase_frames += 1
+	for i in range(mini(phases.size(), labels.size())):
+		_add_loading_gate_phase_sample(labels[i], float(phases[i]) / 1000.0)
+	var cell_manager_publication_ms := 0.0
+	if phases.size() > 1:
+		cell_manager_publication_ms += float(phases[1]) / 1000.0
+	if phases.size() > 2:
+		cell_manager_publication_ms += float(phases[2]) / 1000.0
+	_add_loading_gate_phase_sample("cell_manager_publication", cell_manager_publication_ms)
+
+
+func _add_loading_gate_phase_sample(label: String, value_ms: float) -> void:
+	_loading_gate_phase_totals_ms[label] = float(_loading_gate_phase_totals_ms.get(label, 0.0)) + value_ms
+	_loading_gate_phase_max_ms[label] = maxf(float(_loading_gate_phase_max_ms.get(label, 0.0)), value_ms)
+
+
 func _process(delta: float) -> void:
 	if not _initialized:
 		return
+	_sample_loading_gate_phase_attribution()
 
 	# Fly-camera interact hold-threshold polling. Cheap; safe to run every
 	# frame even when the press state is inactive (early-outs immediately).

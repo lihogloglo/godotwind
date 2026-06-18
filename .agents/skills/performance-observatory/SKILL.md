@@ -87,6 +87,9 @@ For implementation work, keep slices small and verify the changed path:
 
 - Measure before optimizing.
 - Separate runtime frame performance from startup/loading latency.
+- Prefer narrow scenario harnesses and subsystem-specific test scenes/tools for
+  attribution. Use the full `scenes/Godotwind.tscn` launch as final integrated
+  proof for boot/world-streaming behavior, not as the default inner-loop check.
 - Separate cold-cache, warm-cache, and hot-session results.
 - Treat Godot editor profiler output as a diagnostic aid, not as the only
   benchmark truth; profiling has overhead.
@@ -99,6 +102,9 @@ For implementation work, keep slices small and verify the changed path:
   fallback paths that are not valid performance baselines.
 - Do not rewrite GDScript to C# by ideology. First prove the GDScript is a hot
   path or data-heavy path, then migrate or replace it with native Godot APIs.
+- If current reports show first-playable/loading latency is still large or
+  invalid, prioritize loading attribution before runtime FPS work because it
+  reduces every later benchmark iteration cost.
 
 ## Scenario Matrix
 

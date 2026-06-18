@@ -63,6 +63,10 @@ from the state file and proceed.
    Pillar 3/5 optimization. Use `.agents/skills/performance-observatory/SKILL.md`
    when the user says "Performance Observatory", "Pillar 3.0", or asks for the
    benchmark/diagnostic foundation.
+3/5 Optimization: performance and loading time are one program. If current
+   state says loading speed is the best leverage, start there before runtime
+   streaming/rendering tuning because every later benchmark compounds on boot
+   iteration time.
 4. Debugability: A/B testing, debug panels, console, tooling.
 5. Loading time: startup, source data boot, cache use, prebakes, asset loading.
 
@@ -77,8 +81,11 @@ For audit-only work, produce:
 - next best action.
 
 For implementation cleanup, keep slices small and verify with the narrowest
-relevant test, benchmark, visual scene, or smoke. Follow the project
-verification rules in `AGENTS.md`.
+relevant test, benchmark, visual scene, or smoke. Prefer subsystem-specific
+test scenes/tools for investigation and changed-path checks; use
+`scenes/Godotwind.tscn` only for final integrated acceptance or when the main
+world scene is the path under test. Follow the project verification rules in
+`AGENTS.md`.
 
 ## Important Boundaries
 

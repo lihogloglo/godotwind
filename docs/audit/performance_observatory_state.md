@@ -11,6 +11,71 @@ continue", "benchmark foundation", or similar, use the repo-local skill:
 
 ## Current Status
 
+Loading-speed attribution for the first Pillar 3 optimization slice is now
+available. This is attribution/instrumentation only; no runtime streaming
+budget, cache policy, queue behavior, or broad C# migration changed.
+
+Completed this slice:
+
+- Reran the deterministic static observability scan:
+  `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
+- Extended the existing loading baseline report with owner attribution for:
+  engine scene ready, ready-to-init delay, source-data total/other, ESM native
+  primary, GDScript populate/supplement, BSA/cache, terrain, model/cache index,
+  init misc, post-init-to-boot-gate handoff, CellManager publication work
+  inside the boot gate, and inner-ring gate wait.
+- Added `ESMManager.get_last_load_timing_stats()` so the main scene can attach
+  primary ESM native/populate/supplement timings without scraping logs.
+- Current real-renderer integrated warm-start report:
+  `user://benchmark_results/loading_baseline_warm_start_2026-06-18_13-51-59.json`
+- Current evidence from that report:
+  - valid warm-start first-playable run, no timeout
+  - process-to-first-playable: 33.788 s
+  - ready-to-init delay: 8.139 s
+  - post-init-to-boot-gate handoff: 6.273 s
+  - terrain: 4.166 s
+  - GDScript ESM populate/supplement: 4.358 s
+  - inner-ring gate wait: 6.658 s
+  - accumulated CellManager publication work inside that gate: 2.350 s
+  - model/cache index: 0.133 s
+  - remaining unattributed/other init: near-zero attribution noise
+- Conclusion: the next optimization should not start with shared streaming
+  budget tuning or broad GDScript-to-C# ports. The first concrete loading
+  target is splitting the 6.273 s post-init camera/streaming handoff, then
+  choosing between that handoff, ready-to-init delay, terrain/horizon startup,
+  ESM GDScript supplement/populate, or boot-gate publication.
+
+Current lane-timing evidence now identifies the first measured Pillar 3 target:
+`CellManager` instantiation/publication.
+
+Completed this slice:
+
+- Ran the deterministic static observability scan:
+  `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`
+- Regenerated:
+  - `reports/performance_observatory_scan.md`
+  - `reports/performance_observatory_scan.json`
+- Added lane timing to `src/tools/auto_bench_runner.gd` by persisting existing
+  `NativeStreamingManager` phase timing, queue depth, frame-total,
+  distant-tier timing, and `CellManager.get_frame_inst_route_times()` values
+  into autobench JSON samples/summaries.
+- Ran a current real-renderer autobench:
+  `--bench-auto=spring_pillar3_lane_timing_2026_06_18 --start-cell=-3,-2`
+- Current evidence:
+  - `user://benchmark_results/summary_2026-06-18_12-26-41.json`
+  - `user://benchmark_results/benchmark_2026-06-18_12-26-41.csv`
+  - `user://benchmark_results/autobench_spring_pillar3_lane_timing_2026_06_18/bench_teleport.json`
+- Conclusion: current `flythrough_streaming` and `fast_travel_streaming`
+  evidence both point to `CellManager` instantiation/publication as the steady
+  first bottleneck. Flythrough active streaming averaged 8.49 ms/frame, with
+  `phase_inst` averaging 7.63 ms. Fast travel sampled `stream_total_ms` at
+  9.40 ms average, with `phase_inst` averaging 7.60 ms and the instantiation
+  queue reaching 1748 after 20 seconds. The flythrough run segment also showed
+  a one-off `phase_queue` spike at 100.93 ms; inspect it, but do not treat it
+  as the steady bottleneck.
+- No runtime optimization, C# migration, budget tuning, cache-policy change, or
+  queue behavior change was performed.
+
 Hot-path GDScript evidence report complete after the object/memory lifetime,
 loading-time baseline, and custom Performance monitor instrumentation slices.
 
@@ -211,16 +276,16 @@ Regenerated 2026-06-18 local workspace time for the hot-path evidence slice
 
 | Category | Hits |
 |---|---:|
-| `benchmark_runner` | 643 |
-| `hot_path_gdscript_signal` | 4068 |
-| `loading_metric` | 665 |
-| `memory_or_leak_metric` | 191 |
-| `native_or_csharp_surface` | 1730 |
+| `benchmark_runner` | 678 |
+| `hot_path_gdscript_signal` | 4081 |
+| `loading_metric` | 727 |
+| `memory_or_leak_metric` | 193 |
+| `native_or_csharp_surface` | 1808 |
 | `performance_builtin_monitor` | 64 |
 | `performance_custom_monitor` | 5 |
 | `pipeline_compile_metric` | 45 |
-| `streaming_metric` | 1815 |
-| `structured_report` | 1349 |
+| `streaming_metric` | 1849 |
+| `structured_report` | 1409 |
 
 Static inferred gaps:
 
@@ -402,9 +467,12 @@ optimization:
 ```text
 Performance Observatory, continue.
 
-Do not optimize runtime code yet. Read the performance observatory state and
-charter, run the static scan, then add targeted current scenario evidence for
-the top-ranked hot-path GDScript candidates before any C# migration.
+Read the performance observatory state and charter, run the static scan, then
+start loading-speed attribution before runtime streaming optimization. Use or
+build the narrowest loading harness/report that splits first-playable time by
+owner, then run `scenes/Godotwind.tscn --loading-baseline=warm_start` only as
+the integrated acceptance check. Do not tune shared budgets or migrate broad
+files to C# until same-scenario evidence identifies the bottleneck.
 ```
 
 ## Verification Expectations
@@ -417,6 +485,22 @@ the top-ranked hot-path GDScript candidates before any C# migration.
 - Shader touched: follow the shader cache/import rule in `AGENTS.md`.
 
 ## Latest Verification
+
+Commands run 2026-06-18 for the loading attribution slice:
+
+```powershell
+python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .
+D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/run_tests.tscn -- --test res://tests/unit/test_loading_baseline_report.gd
+D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://scenes/Godotwind.tscn -- --quit-after-ready=60 --loading-baseline=warm_start
+python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .
+```
+
+Focused gdUnit exited 0 after rerunning with no pre-existing Godot process. The
+integrated warm-start scene exited 0 and wrote
+`user://benchmark_results/loading_baseline_warm_start_2026-06-18_13-13-10.json`.
+No C# files changed, so `dotnet build` was not required. No `.glsl`,
+`.gdshader`, or `.gdshaderinc` files changed, so shader cache/import artifacts
+were not cleared.
 
 Commands run 2026-06-18 for the hot-path GDScript evidence slice:
 
@@ -502,5 +586,13 @@ changed.
 
 ## Next Best Action
 
-Add targeted current scenario evidence for the top-ranked hot-path GDScript
-candidates before any C# migration or optimization.
+Use the new warm-start attribution report to pick one loading optimization
+target. The cleanest next slice is to split the 6.273 s
+`post_init_to_boot_gate_ms` bucket inside `world_explorer` /
+`NativeStreamingManager.set_camera()`, then choose between the largest named
+loading owners: ready-to-init delay (8.139 s), post-init camera/streaming
+handoff (6.273 s), terrain/horizon startup (4.166 s), ESM GDScript
+populate/supplement (4.358 s), or boot-gate wait/publication (6.658 s wall
+clock with 2.350 s accumulated CellManager publication work). Do not tune
+shared streaming budgets or migrate broad files to C# until the same
+warm-start report shows the chosen owner improving.

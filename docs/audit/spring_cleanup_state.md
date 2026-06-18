@@ -1,6 +1,6 @@
 # Spring Cleanup State
 
-Last updated: 2026-06-17
+Last updated: 2026-06-18
 
 Purpose: durable state file for the Godotwind Spring cleanup audit. When the
 user says "Spring cleanup, continue" or "continue the audit", read this file
@@ -23,13 +23,14 @@ continue" is enough.
 
 ## Current Pillar
 
-Pillar 2: Morrowind/framework boundary.
+Pillar 3 preparation: systematic performance/loading optimization.
 
-Current mode: audit triage from the new Pillar 2 charter. Classify current
-boundary-test failures before changing runtime code. Keep runtime cleanup
-slices small, do not delete parser-shaped legacy routes until route usage and
-focused smokes prove they are not load-bearing, and verify each slice with the
-narrowest relevant test or smoke.
+Current mode: charter prepared. Pillar 3.0 observability is the evidence gate;
+Pillar 3 optimization may change runtime code only after a current scenario
+report identifies a bottleneck and the slice names the canonical Godot or
+industry pattern. Keep each optimization slice small, compare before/after
+reports from the same scenario, and verify with the narrowest changed-path
+test, benchmark, visual scene, or smoke.
 
 Current docs:
 
@@ -40,6 +41,12 @@ Current docs:
   `docs/audit/spring_cleanup_pillar_1_code_quality_audit_2026_06_13.md`
 - Pillar 2 charter:
   `docs/audit/spring_cleanup_pillar_2_morrowind_framework_boundary_charter_2026_06_14.md`
+- Pillar 3.0 observability charter:
+  `docs/audit/spring_cleanup_pillar_3_0_performance_observatory_charter_2026_06_15.md`
+- Pillar 3 optimization charter:
+  `docs/audit/spring_cleanup_pillar_3_optimization_charter_2026_06_18.md`
+- Pillar 3.0 state:
+  `docs/audit/performance_observatory_state.md`
 - Session template: `docs/audit/spring_cleanup_session_template.md`
 
 ## Pillar Progress
@@ -47,10 +54,11 @@ Current docs:
 | Pillar | Topic | Status |
 |---:|---|---|
 | 1 | Code quality / architecture | Slices 1-10 implemented; bloat-control deletion candidates remain optional future work |
-| 2 | Morrowind/framework boundary | Charter created 2026-06-14; next step is boundary test/audit triage |
-| 3 | Performance | Not started |
+| 2 | Morrowind/framework boundary | Many ownership slices completed through terrain manager cleanup; remaining boundary work is optional unless it blocks Pillar 3 |
+| 3.0 | Performance Observatory | Benchmark/report/loading/lifetime/hot-path evidence foundation complete enough to gate optimization |
+| 3 | Performance + loading optimization | Lane evidence and loading-speed attribution collected 2026-06-18; next step is one measured loading optimization target from the warm-start attribution report |
 | 4 | Debugability | Not started |
-| 5 | Loading time | Not started |
+| 5 | Loading time | Folded into Pillar 3 optimization because the same systems own startup, streaming, and runtime frame cost |
 
 ## Known Context
 
@@ -1001,29 +1009,117 @@ Current docs:
   for the deprecated physics-interpolation compatibility shim, Terrain3D's
   32-slot LTEX cap, and unmapped texture-index fallback. No C# or shader files
   changed, so no `dotnet build` or shader cache/import clearing was required.
+- Pillar 3 lane-timing evidence slice completed on 2026-06-18. The static
+  observatory scan was rerun and regenerated `reports/performance_observatory_scan.*`.
+  `AutoBenchRunner` now copies existing `NativeStreamingManager` phase timings,
+  queue depths, and `CellManager.get_frame_inst_route_times()` buckets into
+  autobench JSON samples/summaries. This is instrumentation only; no runtime
+  streaming budgets, queue behavior, loading policy, cache policy, C# code, or
+  renderer behavior changed. Current real-renderer reports:
+  `user://benchmark_results/summary_2026-06-18_12-26-41.json`,
+  `user://benchmark_results/benchmark_2026-06-18_12-26-41.csv`, and
+  `user://benchmark_results/autobench_spring_pillar3_lane_timing_2026_06_18/bench_teleport.json`.
+  Practical result: both `flythrough_streaming` and `fast_travel_streaming`
+  identify `CellManager` instantiation/publication as the steady first
+  bottleneck. Flythrough averaged 39.3 FPS / 25.46 ms, p95 31.29 ms, p99
+  38.19 ms, max 91.51 ms; the streaming lane averaged 8.49 ms on active
+  frames and `phase_inst` averaged 7.63 ms, with a 115.41 ms max in settle
+  and a 21.15 ms run-segment max. The run segment also had a one-off
+  `phase_queue` spike at 100.93 ms, so queue bookkeeping should be inspected
+  but is not the steady cost. Fast travel averaged 52.9 FPS in the 20 s
+  sample; `stream_total_ms` averaged 9.40 ms, `phase_inst` averaged 7.60 ms,
+  `phase_unload` maxed at 8.83 ms on the first sample, and the instantiation
+  queue climbed to 1748 after 20 s. Route buckets did not explain the whole
+  `phase_inst` cost, so the next slice should inspect `CellManager`'s broader
+  instantiation/publication path before choosing a code change.
+- Verification on 2026-06-18 for the lane-timing instrumentation slice:
+  focused gdUnit `test_auto_bench_runner.gd` and
+  `test_performance_report_contract.gd` both exited 0. The first attempt ran
+  them in parallel and left two Godot processes; they were closed and the tests
+  were rerun sequentially, closing each lingering process before the next
+  launch. The real-renderer autobench with
+  `--bench-auto=spring_pillar3_lane_timing_2026_06_18 --start-cell=-3,-2`
+  completed and wrote current `flythrough_streaming` and
+  `fast_travel_streaming` evidence. No C# files changed, so no `dotnet build`
+  was required. No `.glsl`, `.gdshader`, or `.gdshaderinc` files changed, so
+  shader cache/import artifacts were not cleared.
+- Pillar 3 loading attribution slice completed on 2026-06-18. The static
+  observatory scan was rerun and regenerated
+  `reports/performance_observatory_scan.*`. `LoadingBaselineReport` now
+  summarizes first-playable warm-start attribution by source-data total/other,
+  ESM native primary, GDScript ESM populate/supplement, BSA/cache, terrain,
+  model/material warmup, inner-ring gate wait, and accumulated CellManager
+  publication work inside that gate. `ESMManager` exposes the last load timing
+  snapshot so the report no longer depends on scraping the ESM log line.
+  Practical result from
+  `user://benchmark_results/loading_baseline_warm_start_2026-06-18_13-13-10.json`:
+  valid warm-start first playable reached in 36.359 s; source-data total
+  8.364 s; ESM native primary 2.422 s; GDScript ESM populate/supplement
+  4.820 s; BSA/cache 1.119 s; terrain 5.143 s; model/material warmup
+  0.226 s; inner-ring gate wait 6.675 s; accumulated CellManager publication
+  inside that gate 2.566 s; unattributed/other init 15.951 s. This is
+  instrumentation/attribution only: no streaming budget, queue behavior, cache
+  policy, terrain loading policy, or C# migration changed.
+- Verification on 2026-06-18 for the loading attribution slice: focused gdUnit
+  `test_loading_baseline_report.gd` exited 0 after closing a pre-existing
+  Godot process and rerunning sequentially. The integrated warm-start launch
+  `scenes/Godotwind.tscn -- --quit-after-ready=60 --loading-baseline=warm_start`
+  exited 0 and wrote the attribution JSON above. No C# files changed, so
+  `dotnet build` was not required. No shader files changed, so shader
+  cache/import artifacts were not cleared.
+- Pillar 3 startup attribution/preload slice completed on 2026-06-18. Online
+  research confirmed the native Godot pattern is `ResourceLoader` background
+  loading with status polling, main-thread SceneTree publication, and load-time
+  pipeline evidence rather than custom loader threads. The startup report now
+  splits first-playable attribution into engine scene ready, ready-to-init
+  delay, source-data, terrain, model/cache index, init misc,
+  post-init-to-boot-gate handoff, and inner-ring gate wait. `world_explorer`
+  keeps the cheap model cache index but no longer synchronously calls
+  `cell_manager.preload_common_models()` before streaming starts; first-cell
+  model loads use the existing budgeted threaded `ResourceLoader` path. The
+  accepted warm-start report is
+  `user://benchmark_results/loading_baseline_warm_start_2026-06-18_13-51-59.json`:
+  first playable 33.788 s, valid, `ready_to_init_async_start_ms=8.139 s`,
+  `post_init_to_boot_gate_ms=6.273 s`, `inner_ring_gate_wait_ms=6.658 s`,
+  `terrain_ms=4.166 s`, `gdscript_supplement_populate_ms=4.358 s`, and
+  model/cache index 0.133 s. A direct `_init_async()` scheduling probe was
+  rejected because it worsened first playable to 35.040 s. Focused
+  `test_loading_baseline_report.gd` exited 0 after final code. No C# files or
+  shader files changed, so no `dotnet build` or shader cache/import clearing
+  was required.
 - The preferred recurring entry point is the `spring-cleanup` skill, not pasted
   prompts.
 
 ## Next Best Action
 
-Start the next Pillar 2 ownership slice:
+Use the completed loading-speed attribution before runtime streaming
+optimization:
 
-1. Parser-cell loading is deleted from generic `CellManager`; do not recreate
-   `parser_cell_bridge`, `get_parser_cell_bridge`, `set_parser_cell_bridge`,
-   `_instantiate_cell`, `get_source_cell`, or `get_source_exterior_cell`.
-2. Treat the impostor candidate boundary as settled for now; only return to it
-   if a new concrete source leak appears. Do not do marker-only cleanup on this
-   file.
-3. Audit the next real Pillar 2 boundary candidate with proof before edits.
-   The transition-space payload/environment seam, Morrowind LTEX loader
-   location, and Morrowind LAND/control-map terrain manager ownership are
-   settled; choose another source-neutral API cleanup from current evidence.
-4. Do not delete `CellRecord` / `CellReference` routes or lower ledgers until
-   route counters, focused boundary tests, and a narrow main-world or interior
-   smoke prove the affected route is not load-bearing.
-5. Do not broaden this into the full transition state-machine refactor until
-   the remaining transition-space payload and exterior-target resolution seams
-   have focused tests.
+1. Read `docs/audit/spring_cleanup_pillar_3_optimization_charter_2026_06_18.md`
+   and `docs/audit/performance_observatory_state.md`.
+2. Run
+   `python .agents/skills/performance-observatory/scripts/perf_observatory_scan.py --root .`.
+3. Treat the 2026-06-18 lane reports as the runtime-streaming baseline, but do
+   not optimize runtime `CellManager` yet. Loading still compounds every later
+   benchmark run, and the current valid warm-start first-playable report is
+   33.788 s.
+4. The next smallest loading slice is to split the 6.273 s
+   `post_init_to_boot_gate_ms` bucket inside `world_explorer` /
+   `NativeStreamingManager.set_camera()`, then decide whether the synchronous
+   initial `_update_loaded_cells()` handoff can be bounded or moved without
+   merely shifting the same work into the boot gate.
+5. Then choose one named loading owner for a same-scenario before/after:
+   ready-to-init delay (8.139 s), post-init camera/streaming handoff (6.273 s),
+   terrain/horizon startup (4.166 s), GDScript ESM populate/supplement
+   (4.358 s), or boot-gate wait/publication (6.658 s wall clock with 2.350 s
+   accumulated CellManager publication work inside the gate).
+6. Do not tune shared streaming budgets or migrate broad files to C# without
+   a same-scenario warm-start report showing the chosen owner improving.
+7. Keep the runtime streaming evidence in mind: `CellManager`
+   instantiation/publication is the next runtime target after loading
+   iteration time improves.
+8. Keep the Pillar 2 guardrails: do not recreate parser-cell bridges or move
+   Morrowind-specific source logic back into generic framework code.
 
 ## Useful Short Prompts
 
@@ -1031,3 +1127,4 @@ Start the next Pillar 2 ownership slice:
 - `Spring cleanup, start pillar 1.`
 - `Spring cleanup, use agents for pillar 1.`
 - `Spring cleanup, move to pillar 2.`
+- `Spring cleanup, start Pillar 3 optimization.`

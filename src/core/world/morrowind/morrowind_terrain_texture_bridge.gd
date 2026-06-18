@@ -9,8 +9,10 @@ extends RefCounted
 const TextureLoaderScript := preload("res://src/core/texture/texture_loader.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
 const NativeBridgeScript := preload("res://src/core/native_bridge.gd")
+const TerrainTextureCacheScript := preload("res://src/core/world/morrowind/morrowind_terrain_texture_cache.gd")
 
 const DEFAULT_TEXTURE_PATH := "textures\\_land_default.dds"
+const CACHE_VERSION := 1
 const ALBEDO_LAYER_SIZE := 512
 const INDEX_MAP_SIZE := 65
 const INDEX_MAP_LAYER_COUNT := 1024
@@ -29,6 +31,9 @@ var _mw_index_to_layer: Dictionary = {}
 var _normalized_path_to_layer: Dictionary = {}
 var _blank_index_map: Image = null
 var _initialized := false
+var _source_signature: String = ""
+var _index_map_signature: String = ""
+var _index_maps_from_cache: bool = false
 
 
 func initialize(terrain: Terrain3D) -> Error:
@@ -37,13 +42,21 @@ func initialize(terrain: Terrain3D) -> Error:
 		Log.warn("textures", "MorrowindTerrainTextureBridge: Terrain3D material unavailable")
 		return ERR_UNCONFIGURED
 
-	var err := _build_albedo_array()
-	if err != OK:
-		return err
+	_source_signature = _build_source_signature()
+	if not _load_albedo_cache(_source_signature):
+		var err := _build_albedo_array()
+		if err != OK:
+			return err
+		_save_texture_cache(_source_signature)
 
-	err = _build_index_map_array()
-	if err != OK:
-		return err
+	_index_map_signature = "%s|regions=%s" % [_source_signature, _build_region_signature()]
+	_index_maps_from_cache = _load_index_map_cache(_index_map_signature)
+	if not _index_maps_from_cache:
+		var err := _build_index_map_array()
+		if err != OK:
+			return err
+	else:
+		_build_blank_index_map()
 
 	_material_rid = _terrain.material.get_material_rid()
 	_initialized = true
@@ -52,6 +65,98 @@ func initialize(terrain: Terrain3D) -> Error:
 		_mw_index_to_layer.size(), _normalized_path_to_layer.size()
 	])
 	return OK
+
+
+func _get_albedo_cache_path() -> String:
+	return SettingsManager.get_terrain_path().path_join("mw_terrain_texture_albedo_cache.res")
+
+
+func _build_source_signature() -> String:
+	var parts := PackedStringArray()
+	parts.append("v=%d" % CACHE_VERSION)
+	parts.append("lands=%d" % ESMManager.lands.size())
+	parts.append("ltex=%d" % ESMManager.land_textures.size())
+
+	var esm_path := SettingsManager.get_data_path().path_join(SettingsManager.get_esm_file())
+	_append_file_signature(parts, esm_path)
+	for archive_path: String in BSAManager.get_loaded_archives():
+		_append_file_signature(parts, archive_path)
+	return "|".join(parts)
+
+
+func _build_region_signature() -> String:
+	if not _terrain or not _terrain.data:
+		return "none"
+	var parts := PackedStringArray()
+	var locations: Variant = _terrain.data.get_region_locations()
+	for layer_index in range(locations.size()):
+		var loc: Vector2 = locations[layer_index]
+		if _is_invalid_region_location(loc):
+			continue
+		parts.append("%d:%d,%d" % [layer_index, roundi(loc.x), roundi(loc.y)])
+	return ";".join(parts)
+
+
+func _append_file_signature(parts: PackedStringArray, path: String) -> void:
+	if path.is_empty() or not FileAccess.file_exists(path):
+		return
+	parts.append("%s:%d:%d" % [path, FileAccess.get_modified_time(path), FileAccess.get_size(path)])
+
+
+func _load_albedo_cache(signature: String) -> bool:
+	var cache_path := _get_albedo_cache_path()
+	if not FileAccess.file_exists(cache_path):
+		return false
+	var cache: Resource = ResourceLoader.load(cache_path, "Resource", ResourceLoader.CACHE_MODE_IGNORE) as Resource
+	if cache == null:
+		return false
+	if int(cache.get("cache_version")) != CACHE_VERSION or str(cache.get("source_signature")) != signature:
+		return false
+	var cached_albedo: Texture2DArray = cache.get("land_albedo_array") as Texture2DArray
+	var cached_index_to_layer: Dictionary = cache.get("mw_index_to_layer")
+	var cached_path_to_layer: Dictionary = cache.get("normalized_path_to_layer")
+	if cached_albedo == null or cached_index_to_layer.is_empty() or cached_path_to_layer.is_empty():
+		return false
+	_land_albedo_array = cached_albedo
+	_mw_index_to_layer = cached_index_to_layer.duplicate(true)
+	_normalized_path_to_layer = cached_path_to_layer.duplicate(true)
+	Log.info("textures", "MW terrain texture bridge loaded cached albedo array: %d layers" % _normalized_path_to_layer.size())
+	return true
+
+
+func _load_index_map_cache(signature: String) -> bool:
+	var cache_path := _get_albedo_cache_path()
+	if not FileAccess.file_exists(cache_path):
+		return false
+	var cache: Resource = ResourceLoader.load(cache_path, "Resource", ResourceLoader.CACHE_MODE_IGNORE) as Resource
+	if cache == null:
+		return false
+	if int(cache.get("cache_version")) != CACHE_VERSION or str(cache.get("index_map_signature")) != signature:
+		return false
+	var cached_maps: Texture2DArray = cache.get("land_index_maps") as Texture2DArray
+	if cached_maps == null:
+		return false
+	_land_index_maps = cached_maps
+	Log.info("textures", "MW terrain texture bridge loaded cached region index maps")
+	return true
+
+
+func _save_texture_cache(source_signature: String, index_map_signature: String = "") -> void:
+	if _land_albedo_array == null:
+		return
+	var cache_path := _get_albedo_cache_path()
+	DirAccess.make_dir_recursive_absolute(cache_path.get_base_dir())
+	var cache: Resource = TerrainTextureCacheScript.new() as Resource
+	cache.set("cache_version", CACHE_VERSION)
+	cache.set("source_signature", source_signature)
+	cache.set("index_map_signature", index_map_signature)
+	cache.set("land_albedo_array", _land_albedo_array)
+	cache.set("land_index_maps", _land_index_maps)
+	cache.set("mw_index_to_layer", _mw_index_to_layer.duplicate(true))
+	cache.set("normalized_path_to_layer", _normalized_path_to_layer.duplicate(true))
+	var err := ResourceSaver.save(cache, cache_path)
+	if err != OK:
+		Log.warn("textures", "MW terrain texture bridge failed to save texture cache: %s" % error_string(err))
 
 
 func is_initialized() -> bool:
@@ -88,6 +193,10 @@ func push_shader_params() -> void:
 func rebuild_all_active_regions() -> void:
 	if not _initialized or not _terrain or not _terrain.data:
 		return
+	if _index_maps_from_cache:
+		push_shader_params()
+		Log.info("textures", "MW terrain texture bridge reused cached active region index maps")
+		return
 
 	var locations: Variant = _terrain.data.get_region_locations()
 	var updated := 0
@@ -100,6 +209,7 @@ func rebuild_all_active_regions() -> void:
 		updated += 1
 
 	push_shader_params()
+	_save_texture_cache(_source_signature, _index_map_signature)
 	Log.info("textures", "MW terrain texture bridge updated %d active Terrain3D region index maps" % updated)
 
 
@@ -162,8 +272,7 @@ func _build_albedo_array() -> Error:
 
 
 func _build_index_map_array() -> Error:
-	_blank_index_map = Image.create(INDEX_MAP_SIZE, INDEX_MAP_SIZE, false, Image.FORMAT_R8)
-	_blank_index_map.fill(Color.BLACK)
+	_build_blank_index_map()
 
 	var images: Array[Image] = []
 	images.resize(INDEX_MAP_LAYER_COUNT)
@@ -173,6 +282,11 @@ func _build_index_map_array() -> Error:
 	_land_index_maps = Texture2DArray.new()
 	_land_index_maps.create_from_images(images)
 	return OK
+
+
+func _build_blank_index_map() -> void:
+	_blank_index_map = Image.create(INDEX_MAP_SIZE, INDEX_MAP_SIZE, false, Image.FORMAT_R8)
+	_blank_index_map.fill(Color.BLACK)
 
 
 func _update_region_layer(region_coord: Vector2i, layer_index: int) -> void:
