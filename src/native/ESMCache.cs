@@ -29,7 +29,7 @@ namespace Godotwind.Native;
 public partial class ESMCache : RefCounted
 {
     private const string CACHE_MAGIC = "ESMCACHE";
-    private const int CACHE_VERSION = 3;  // Bumped for light LHDT data (radius, color, flags)
+    private const int CACHE_VERSION = 4;  // Bumped for native startup supplement records
 
     // Statistics
     public float LoadTimeMs { get; private set; } = 0f;
@@ -130,6 +130,14 @@ public partial class ESMCache : RefCounted
             writer.Write(loader.Weapons.Count);
             writer.Write(loader.Armors.Count);
             writer.Write(loader.Clothing.Count);
+            writer.Write(loader.Books.Count);
+            writer.Write(loader.Classes.Count);
+            writer.Write(loader.Factions.Count);
+            writer.Write(loader.Skills.Count);
+            writer.Write(loader.Birthsigns.Count);
+            writer.Write(loader.Dialogues.Count);
+            writer.Write(loader.DialogueInfos.Count);
+            writer.Write(loader.LeveledCreatures.Count);
 
             // Write statics
             WriteModelRecords(writer, loader.Statics);
@@ -163,6 +171,14 @@ public partial class ESMCache : RefCounted
             WriteWeapons(writer, loader.Weapons);
             WriteArmors(writer, loader.Armors);
             WriteClothing(writer, loader.Clothing);
+            WriteBooks(writer, loader.Books);
+            WriteClasses(writer, loader.Classes);
+            WriteFactions(writer, loader.Factions);
+            WriteSkills(writer, loader.Skills);
+            WriteBirthsigns(writer, loader.Birthsigns);
+            WriteDialogues(writer, loader.Dialogues);
+            WriteDialogueInfos(writer, loader.DialogueInfos);
+            WriteLeveledCreatures(writer, loader.LeveledCreatures);
 
             sw.Stop();
             SaveTimeMs = (float)sw.Elapsed.TotalMilliseconds;
@@ -228,6 +244,14 @@ public partial class ESMCache : RefCounted
             int weaponsCount = reader.ReadInt32();
             int armorsCount = reader.ReadInt32();
             int clothingCount = reader.ReadInt32();
+            int booksCount = reader.ReadInt32();
+            int classesCount = reader.ReadInt32();
+            int factionsCount = reader.ReadInt32();
+            int skillsCount = reader.ReadInt32();
+            int birthsignsCount = reader.ReadInt32();
+            int dialoguesCount = reader.ReadInt32();
+            int dialogueInfoTopicsCount = reader.ReadInt32();
+            int leveledCreaturesCount = reader.ReadInt32();
 
             // Read statics
             ReadStatics(reader, loader.Statics, staticsCount);
@@ -261,6 +285,14 @@ public partial class ESMCache : RefCounted
             ReadWeapons(reader, loader.Weapons, weaponsCount);
             ReadArmors(reader, loader.Armors, armorsCount);
             ReadClothing(reader, loader.Clothing, clothingCount);
+            ReadBooks(reader, loader.Books, booksCount);
+            ReadClasses(reader, loader.Classes, classesCount);
+            ReadFactions(reader, loader.Factions, factionsCount);
+            ReadSkills(reader, loader.Skills, skillsCount);
+            ReadBirthsigns(reader, loader.Birthsigns, birthsignsCount);
+            ReadDialogues(reader, loader.Dialogues, dialoguesCount);
+            ReadDialogueInfos(reader, loader.DialogueInfos, dialogueInfoTopicsCount);
+            ReadLeveledCreatures(reader, loader.LeveledCreatures, leveledCreaturesCount);
 
             sw.Stop();
             LoadTimeMs = (float)sw.Elapsed.TotalMilliseconds;
@@ -618,6 +650,211 @@ public partial class ESMCache : RefCounted
             writer.Write(r.Weight);
             writer.Write(r.Value);
             writer.Write(r.EnchantPoints);
+        }
+    }
+
+    private static void WriteBooks(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeBookRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            WriteString(writer, r.Model);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.Icon);
+            WriteString(writer, r.ScriptId);
+            WriteString(writer, r.EnchantId);
+            WriteString(writer, r.Text);
+            writer.Write(r.Weight);
+            writer.Write(r.Value);
+            writer.Write(r.IsScroll);
+            writer.Write(r.SkillId);
+            writer.Write(r.EnchantPoints);
+        }
+    }
+
+    private static void WriteClasses(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeClassRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.Description);
+            WriteIntArray(writer, r.PrimaryAttributes);
+            writer.Write(r.Specialization);
+            WriteIntArray(writer, r.MajorSkills);
+            WriteIntArray(writer, r.MinorSkills);
+            writer.Write(r.IsPlayable);
+            writer.Write(r.Services);
+        }
+    }
+
+    private static void WriteFactions(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeFactionRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteStringArray(writer, r.RankNames);
+            WriteIntArray(writer, r.FavoriteAttributes);
+            WriteDictionaryArray(writer, r.RankData);
+            WriteIntArray(writer, r.FavoriteSkills);
+            writer.Write(r.IsHidden);
+            writer.Write(r.Reactions.Count);
+            foreach (var reaction in r.Reactions)
+            {
+                WriteString(writer, reaction.Key);
+                writer.Write(reaction.Value);
+            }
+        }
+    }
+
+    private static void WriteSkills(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeSkillRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Description);
+            writer.Write(r.Attribute);
+            writer.Write(r.Specialization);
+            WriteFloatArray(writer, r.UseValues);
+        }
+    }
+
+    private static void WriteBirthsigns(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeBirthsignRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            WriteString(writer, r.Name);
+            WriteString(writer, r.Description);
+            WriteString(writer, r.Texture);
+            WriteStringArray(writer, r.Powers);
+        }
+    }
+
+    private static void WriteDialogues(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeDialogueRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            writer.Write(r.DialogueType);
+        }
+    }
+
+    private static void WriteDialogueInfos(BinaryWriter writer, Godot.Collections.Dictionary<string, Godot.Collections.Array<NativeDialogueInfoRecord>> topics)
+    {
+        foreach (var kvp in topics)
+        {
+            WriteString(writer, kvp.Key);
+            writer.Write(kvp.Value.Count);
+            foreach (var r in kvp.Value)
+            {
+                WriteString(writer, r.RecordId);
+                writer.Write(r.IsDeleted);
+                WriteString(writer, r.ParentTopic);
+                WriteString(writer, r.PrevId);
+                WriteString(writer, r.NextId);
+                writer.Write(r.Disposition);
+                writer.Write(r.SpeakerRank);
+                writer.Write(r.SpeakerSex);
+                writer.Write(r.PlayerRank);
+                WriteString(writer, r.ActorId);
+                WriteString(writer, r.ActorRace);
+                WriteString(writer, r.ActorClass);
+                WriteString(writer, r.ActorFaction);
+                WriteString(writer, r.ActorCell);
+                WriteString(writer, r.PcFaction);
+                WriteString(writer, r.SoundFile);
+                WriteString(writer, r.Response);
+                WriteString(writer, r.ResultScript);
+                writer.Write(r.QuestName);
+                writer.Write(r.QuestFinish);
+                writer.Write(r.QuestRestart);
+                WriteDictionaryArray(writer, r.Conditions);
+            }
+        }
+    }
+
+    private static void WriteLeveledCreatures(BinaryWriter writer, Godot.Collections.Dictionary<string, NativeLeveledCreatureRecord> records)
+    {
+        foreach (var kvp in records)
+        {
+            var r = kvp.Value;
+            WriteString(writer, kvp.Key);
+            WriteString(writer, r.RecordId);
+            writer.Write(r.IsDeleted);
+            writer.Write(r.Flags);
+            writer.Write(r.ChanceNone);
+            WriteDictionaryArray(writer, r.Creatures);
+        }
+    }
+
+    private static void WriteIntArray(BinaryWriter writer, int[] values)
+    {
+        writer.Write(values.Length);
+        foreach (int value in values)
+            writer.Write(value);
+    }
+
+    private static void WriteFloatArray(BinaryWriter writer, float[] values)
+    {
+        writer.Write(values.Length);
+        foreach (float value in values)
+            writer.Write(value);
+    }
+
+    private static void WriteStringArray(BinaryWriter writer, Godot.Collections.Array<string> values)
+    {
+        writer.Write(values.Count);
+        foreach (string value in values)
+            WriteString(writer, value);
+    }
+
+    private static void WriteDictionaryArray(BinaryWriter writer, Godot.Collections.Array<Godot.Collections.Dictionary> values)
+    {
+        writer.Write(values.Count);
+        foreach (var dict in values)
+        {
+            writer.Write(dict.Count);
+            foreach (var keyVariant in dict.Keys)
+            {
+                string key = keyVariant.AsString();
+                WriteString(writer, key);
+                var value = dict[key];
+                if (value.VariantType == Variant.Type.Float)
+                {
+                    writer.Write((byte)Variant.Type.Float);
+                    writer.Write(value.AsSingle());
+                }
+                else if (value.VariantType == Variant.Type.String || value.VariantType == Variant.Type.StringName)
+                {
+                    writer.Write((byte)Variant.Type.String);
+                    WriteString(writer, value.AsString());
+                }
+                else
+                {
+                    writer.Write((byte)Variant.Type.Int);
+                    writer.Write(value.AsInt32());
+                }
+            }
         }
     }
 
@@ -1050,6 +1287,228 @@ public partial class ESMCache : RefCounted
             };
             dict[key] = rec;
         }
+    }
+
+    private static void ReadBooks(BinaryReader reader, Godot.Collections.Dictionary<string, NativeBookRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            dict[key] = new NativeBookRecord
+            {
+                RecordId = ReadString(reader),
+                Model = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                Icon = ReadString(reader),
+                ScriptId = ReadString(reader),
+                EnchantId = ReadString(reader),
+                Text = ReadString(reader),
+                Weight = reader.ReadSingle(),
+                Value = reader.ReadInt32(),
+                IsScroll = reader.ReadBoolean(),
+                SkillId = reader.ReadInt32(),
+                EnchantPoints = reader.ReadInt32()
+            };
+        }
+    }
+
+    private static void ReadClasses(BinaryReader reader, Godot.Collections.Dictionary<string, NativeClassRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            dict[key] = new NativeClassRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                Description = ReadString(reader),
+                PrimaryAttributes = ReadIntArray(reader),
+                Specialization = reader.ReadInt32(),
+                MajorSkills = ReadIntArray(reader),
+                MinorSkills = ReadIntArray(reader),
+                IsPlayable = reader.ReadBoolean(),
+                Services = reader.ReadInt32()
+            };
+        }
+    }
+
+    private static void ReadFactions(BinaryReader reader, Godot.Collections.Dictionary<string, NativeFactionRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            var rec = new NativeFactionRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                RankNames = ReadStringArray(reader),
+                FavoriteAttributes = ReadIntArray(reader),
+                RankData = ReadDictionaryArray(reader),
+                FavoriteSkills = ReadIntArray(reader),
+                IsHidden = reader.ReadBoolean()
+            };
+            int reactionCount = reader.ReadInt32();
+            for (int r = 0; r < reactionCount; r++)
+                rec.Reactions[ReadString(reader)] = reader.ReadInt32();
+            dict[key] = rec;
+        }
+    }
+
+    private static void ReadSkills(BinaryReader reader, Godot.Collections.Dictionary<string, NativeSkillRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            dict[key] = new NativeSkillRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Description = ReadString(reader),
+                Attribute = reader.ReadInt32(),
+                Specialization = reader.ReadInt32(),
+                UseValues = ReadFloatArray(reader)
+            };
+        }
+    }
+
+    private static void ReadBirthsigns(BinaryReader reader, Godot.Collections.Dictionary<string, NativeBirthsignRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            dict[key] = new NativeBirthsignRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Name = ReadString(reader),
+                Description = ReadString(reader),
+                Texture = ReadString(reader),
+                Powers = ReadStringArray(reader)
+            };
+        }
+    }
+
+    private static void ReadDialogues(BinaryReader reader, Godot.Collections.Dictionary<string, NativeDialogueRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            dict[key] = new NativeDialogueRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                DialogueType = reader.ReadInt32()
+            };
+        }
+    }
+
+    private static void ReadDialogueInfos(BinaryReader reader, Godot.Collections.Dictionary<string, Godot.Collections.Array<NativeDialogueInfoRecord>> dict, int topicCount)
+    {
+        for (int i = 0; i < topicCount; i++)
+        {
+            string topicKey = ReadString(reader);
+            int infoCount = reader.ReadInt32();
+            var infos = new Godot.Collections.Array<NativeDialogueInfoRecord>();
+            for (int j = 0; j < infoCount; j++)
+            {
+                infos.Add(new NativeDialogueInfoRecord
+                {
+                    RecordId = ReadString(reader),
+                    IsDeleted = reader.ReadBoolean(),
+                    ParentTopic = ReadString(reader),
+                    PrevId = ReadString(reader),
+                    NextId = ReadString(reader),
+                    Disposition = reader.ReadInt32(),
+                    SpeakerRank = reader.ReadInt32(),
+                    SpeakerSex = reader.ReadInt32(),
+                    PlayerRank = reader.ReadInt32(),
+                    ActorId = ReadString(reader),
+                    ActorRace = ReadString(reader),
+                    ActorClass = ReadString(reader),
+                    ActorFaction = ReadString(reader),
+                    ActorCell = ReadString(reader),
+                    PcFaction = ReadString(reader),
+                    SoundFile = ReadString(reader),
+                    Response = ReadString(reader),
+                    ResultScript = ReadString(reader),
+                    QuestName = reader.ReadBoolean(),
+                    QuestFinish = reader.ReadBoolean(),
+                    QuestRestart = reader.ReadBoolean(),
+                    Conditions = ReadDictionaryArray(reader)
+                });
+            }
+            dict[topicKey] = infos;
+        }
+    }
+
+    private static void ReadLeveledCreatures(BinaryReader reader, Godot.Collections.Dictionary<string, NativeLeveledCreatureRecord> dict, int count)
+    {
+        for (int i = 0; i < count; i++)
+        {
+            string key = ReadString(reader);
+            dict[key] = new NativeLeveledCreatureRecord
+            {
+                RecordId = ReadString(reader),
+                IsDeleted = reader.ReadBoolean(),
+                Flags = reader.ReadInt32(),
+                ChanceNone = reader.ReadInt32(),
+                Creatures = ReadDictionaryArray(reader)
+            };
+        }
+    }
+
+    private static int[] ReadIntArray(BinaryReader reader)
+    {
+        int count = reader.ReadInt32();
+        var values = new int[count];
+        for (int i = 0; i < count; i++)
+            values[i] = reader.ReadInt32();
+        return values;
+    }
+
+    private static float[] ReadFloatArray(BinaryReader reader)
+    {
+        int count = reader.ReadInt32();
+        var values = new float[count];
+        for (int i = 0; i < count; i++)
+            values[i] = reader.ReadSingle();
+        return values;
+    }
+
+    private static Godot.Collections.Array<string> ReadStringArray(BinaryReader reader)
+    {
+        int count = reader.ReadInt32();
+        var values = new Godot.Collections.Array<string>();
+        for (int i = 0; i < count; i++)
+            values.Add(ReadString(reader));
+        return values;
+    }
+
+    private static Godot.Collections.Array<Godot.Collections.Dictionary> ReadDictionaryArray(BinaryReader reader)
+    {
+        int count = reader.ReadInt32();
+        var values = new Godot.Collections.Array<Godot.Collections.Dictionary>();
+        for (int i = 0; i < count; i++)
+        {
+            int entryCount = reader.ReadInt32();
+            var dict = new Godot.Collections.Dictionary();
+            for (int e = 0; e < entryCount; e++)
+            {
+                string key = ReadString(reader);
+                var type = (Variant.Type)reader.ReadByte();
+                dict[key] = type switch
+                {
+                    Variant.Type.Float => reader.ReadSingle(),
+                    Variant.Type.String => ReadString(reader),
+                    _ => reader.ReadInt32()
+                };
+            }
+            values.Add(dict);
+        }
+        return values;
     }
 
     private static Vector3 ReadVector3(BinaryReader reader)

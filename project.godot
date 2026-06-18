@@ -11,7 +11,7 @@ config_version=5
 [application]
 
 config/name="Godotwind"
-run/main_scene="uid://clb74pwrqrgok"
+run/main_scene="res://scenes/MainMenu.tscn"
 config/features=PackedStringArray("4.6", "C#")
 config/icon="res://icon.svg"
 

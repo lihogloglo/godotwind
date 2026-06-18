@@ -233,11 +233,7 @@ func _load_file_native_cached(path: String) -> Error:
 	_populate_from_native(loader)
 	var populate_time := Time.get_ticks_msec() - populate_start
 
-	# Supplement with GDScript loading for record types not handled by C# loader
-	# (NPCs, creatures, races, body_parts, etc.)
-	var supplement_start := Time.get_ticks_msec()
-	_supplement_actor_data(path)
-	var supplement_time := Time.get_ticks_msec() - supplement_start
+	var supplement_time := 0
 
 	var total_time := Time.get_ticks_msec() - start_time
 	var stats: Dictionary = bridge.get_esm_stats(loader)
@@ -258,7 +254,7 @@ func _load_file_native_cached(path: String) -> Error:
 	})
 
 	# Detailed timing breakdown for optimization
-	Log.info("esm", "Loaded %s in %d ms (C#: %d ms, populate: %d ms, actors: %d ms)" % [
+	Log.info("esm", "Loaded %s in %d ms (C#: %d ms, populate: %d ms, supplement: %d ms)" % [
 		path.get_file(), total_time, csharp_time, populate_time, supplement_time])
 	loading_completed.emit(path, stats.get("total_records", 0) as int)
 
@@ -453,6 +449,8 @@ func _populate_from_native(loader: RefCounted) -> void:
 			rec.mesh_type = native_rec.get("MeshType") as int
 			return rec)
 
+	_populate_startup_supplement_from_native(loader)
+
 	var t5 := Time.get_ticks_msec()
 
 	# All other record types (statics, doors, activators, containers, lights,
@@ -466,8 +464,193 @@ func _populate_from_native(loader: RefCounted) -> void:
 		for cell_key: Variant in cells:
 			var cell_rec: CellRecord = cells[cell_key]
 			ref_count += cell_rec.references.size()
-		Log.debug("esm", "Populate timing: cells=%dms (%d refs), lands=%dms, ltex=%dms, races+bparts=%dms" % [
+		Log.debug("esm", "Populate timing: cells=%dms (%d refs), lands=%dms, ltex=%dms, races+bparts+supplement=%dms" % [
 			t1 - t0, ref_count, t3 - t1, t4 - t3, t5 - t4])
+
+
+@warning_ignore("unsafe_method_access")
+@warning_ignore("unsafe_property_access")
+func _populate_startup_supplement_from_native(loader: RefCounted) -> void:
+	_populate_native_records(loader, "Books", ESMDefs.RecordType.REC_BOOK,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := BookRecord.new()
+			_copy_model_fields(native_rec, rec)
+			rec.name = str(native_rec.get("Name"))
+			rec.icon = str(native_rec.get("Icon"))
+			rec.script_id = str(native_rec.get("ScriptId"))
+			rec.enchant_id = str(native_rec.get("EnchantId"))
+			rec.text = str(native_rec.get("Text"))
+			rec.weight = native_rec.get("Weight") as float
+			rec.value = native_rec.get("Value") as int
+			rec.is_scroll = native_rec.get("IsScroll") as bool
+			rec.skill_id = native_rec.get("SkillId") as int
+			rec.enchant_points = native_rec.get("EnchantPoints") as int
+			return rec)
+	_populate_native_records(loader, "Classes", ESMDefs.RecordType.REC_CLAS,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := ClassRecord.new()
+			_copy_base_fields(native_rec, rec)
+			rec.name = str(native_rec.get("Name"))
+			rec.description = str(native_rec.get("Description"))
+			rec.primary_attributes = _native_int_array(native_rec.get("PrimaryAttributes"))
+			rec.specialization = native_rec.get("Specialization") as int
+			rec.major_skills = _native_int_array(native_rec.get("MajorSkills"))
+			rec.minor_skills = _native_int_array(native_rec.get("MinorSkills"))
+			rec.is_playable = native_rec.get("IsPlayable") as bool
+			rec.services = native_rec.get("Services") as int
+			return rec)
+	_populate_native_records(loader, "Factions", ESMDefs.RecordType.REC_FACT,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := FactionRecord.new()
+			_copy_base_fields(native_rec, rec)
+			rec.name = str(native_rec.get("Name"))
+			rec.rank_names = _native_string_array(native_rec.get("RankNames"))
+			rec.favorite_attributes = _native_int_array(native_rec.get("FavoriteAttributes"))
+			rec.rank_data = _native_dictionary_array(native_rec.get("RankData"))
+			rec.favorite_skills = _native_int_array(native_rec.get("FavoriteSkills"))
+			rec.is_hidden = native_rec.get("IsHidden") as bool
+			rec.reactions = _native_string_int_dictionary(native_rec.get("Reactions"))
+			return rec)
+	_populate_native_records(loader, "Skills", ESMDefs.RecordType.REC_SKIL,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := SkillRecord.new()
+			_copy_base_fields(native_rec, rec)
+			rec.description = str(native_rec.get("Description"))
+			rec.attribute = native_rec.get("Attribute") as int
+			rec.specialization = native_rec.get("Specialization") as int
+			rec.use_values = _native_float_array(native_rec.get("UseValues"))
+			return rec)
+	_populate_native_records(loader, "Birthsigns", ESMDefs.RecordType.REC_BSGN,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := BirthsignRecord.new()
+			_copy_base_fields(native_rec, rec)
+			rec.name = str(native_rec.get("Name"))
+			rec.description = str(native_rec.get("Description"))
+			rec.texture = str(native_rec.get("Texture"))
+			rec.powers = _native_string_array(native_rec.get("Powers"))
+			return rec)
+	_populate_native_records(loader, "Dialogues", ESMDefs.RecordType.REC_DIAL,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := DialogueRecord.new()
+			_copy_base_fields(native_rec, rec)
+			rec.dialogue_type = native_rec.get("DialogueType") as int
+			return rec)
+	_populate_dialogue_infos_from_native(loader)
+	_populate_native_records(loader, "LeveledCreatures", ESMDefs.RecordType.REC_LEVC,
+		func(native_rec: RefCounted) -> ESMRecord:
+			var rec := LeveledCreatureRecord.new()
+			_copy_base_fields(native_rec, rec)
+			rec.flags = native_rec.get("Flags") as int
+			rec.chance_none = native_rec.get("ChanceNone") as int
+			rec.creatures = _native_dictionary_array(native_rec.get("Creatures"))
+			return rec)
+
+
+@warning_ignore("unsafe_method_access")
+@warning_ignore("unsafe_property_access")
+func _populate_native_records(loader: RefCounted, native_property: String, rec_type: int, converter: Callable) -> void:
+	var native_dict: Variant = loader.get(native_property)
+	if not (native_dict is Dictionary):
+		return
+	for key: Variant in native_dict:
+		var native_rec: RefCounted = native_dict[key]
+		var rec: ESMRecord = converter.call(native_rec)
+		if rec.is_deleted:
+			_remove_record(rec, rec_type)
+		else:
+			_store_record(rec, rec_type)
+
+
+@warning_ignore("unsafe_property_access")
+func _populate_dialogue_infos_from_native(loader: RefCounted) -> void:
+	var native_topics: Variant = loader.get("DialogueInfos")
+	if not (native_topics is Dictionary):
+		return
+	for topic_key_v: Variant in native_topics:
+		var topic_key := str(topic_key_v)
+		var native_infos: Variant = native_topics[topic_key_v]
+		if not (native_infos is Array):
+			continue
+		var infos: Array = []
+		for native_info_v: Variant in native_infos:
+			var native_rec := native_info_v as RefCounted
+			if native_rec == null or native_rec.get("IsDeleted") as bool:
+				continue
+			var rec := DialogueInfoRecord.new()
+			rec.record_id = str(native_rec.get("RecordId"))
+			rec.is_deleted = false
+			rec.prev_id = str(native_rec.get("PrevId"))
+			rec.next_id = str(native_rec.get("NextId"))
+			rec.disposition = native_rec.get("Disposition") as int
+			rec.speaker_rank = native_rec.get("SpeakerRank") as int
+			rec.speaker_sex = native_rec.get("SpeakerSex") as int
+			rec.player_rank = native_rec.get("PlayerRank") as int
+			rec.actor_id = str(native_rec.get("ActorId"))
+			rec.actor_race = str(native_rec.get("ActorRace"))
+			rec.actor_class = str(native_rec.get("ActorClass"))
+			rec.actor_faction = str(native_rec.get("ActorFaction"))
+			rec.actor_cell = str(native_rec.get("ActorCell"))
+			rec.pc_faction = str(native_rec.get("PcFaction"))
+			rec.sound_file = str(native_rec.get("SoundFile"))
+			rec.response = str(native_rec.get("Response"))
+			rec.result_script = str(native_rec.get("ResultScript"))
+			rec.quest_name = native_rec.get("QuestName") as bool
+			rec.quest_finish = native_rec.get("QuestFinish") as bool
+			rec.quest_restart = native_rec.get("QuestRestart") as bool
+			rec.conditions = _native_dictionary_array(native_rec.get("Conditions"))
+			infos.append(rec)
+		if not infos.is_empty():
+			dialogue_infos[topic_key] = infos
+
+
+static func _native_int_array(value: Variant) -> Array[int]:
+	var out: Array[int] = []
+	if value is PackedInt32Array:
+		for item: int in value:
+			out.append(item)
+	elif value is Array:
+		for item: Variant in value:
+			out.append(int(item))
+	return out
+
+
+static func _native_float_array(value: Variant) -> Array[float]:
+	var out: Array[float] = []
+	if value is PackedFloat32Array:
+		for item: float in value:
+			out.append(item)
+	elif value is Array:
+		for item: Variant in value:
+			out.append(float(item))
+	return out
+
+
+static func _native_string_array(value: Variant) -> Array[String]:
+	var out: Array[String] = []
+	if value is PackedStringArray:
+		for item: String in value:
+			out.append(item)
+	elif value is Array:
+		for item: Variant in value:
+			out.append(str(item))
+	return out
+
+
+static func _native_dictionary_array(value: Variant) -> Array[Dictionary]:
+	var out: Array[Dictionary] = []
+	if value is Array:
+		for item: Variant in value:
+			if item is Dictionary:
+				out.append((item as Dictionary).duplicate(true))
+	return out
+
+
+static func _native_string_int_dictionary(value: Variant) -> Dictionary:
+	var out: Dictionary = {}
+	if value is Dictionary:
+		for key: Variant in value:
+			out[str(key)] = int(value[key])
+	return out
 
 
 ## Batch populate cells + references from packed arrays (Phase 1 optimization)
@@ -606,8 +789,8 @@ func _populate_cells_from_native_fallback(loader: RefCounted) -> void:
 				exterior_cells["%d,%d" % [rec.grid_x, rec.grid_y]] = rec
 
 
-## Supplement native C# load with actor data not handled by native loader
-## This loads classes, factions, skills, birthsigns, and leveled creatures
+## Supplement native C# load with data not handled by native loader
+## This loads classes, factions, skills, birthsigns, books, and dialogue
 ## that are not yet implemented in the C# loader
 ## using GDScript parsing (slower but comprehensive)
 func _supplement_actor_data(path: String) -> void:
@@ -628,7 +811,6 @@ func _supplement_actor_data(path: String) -> void:
 		ESMDefs.RecordType.REC_BOOK,  # Books, scrolls, notes
 		ESMDefs.RecordType.REC_DIAL,  # Dialogue topics
 		ESMDefs.RecordType.REC_INFO,  # Dialogue info entries
-		ESMDefs.RecordType.REC_LIGH,  # Light definitions (color, radius, flags)
 	]
 
 	while reader.has_more_recs():
@@ -1120,7 +1302,15 @@ func get_misc_item(id: String) -> MiscRecord:
 func get_container(id: String) -> ContainerRecord:
 	return containers.get(id.to_lower())
 func get_light(id: String) -> LightRecord:
-	return lights.get(id.to_lower())
+	var key := id.to_lower()
+	var rec: LightRecord = lights.get(key)
+	if rec != null:
+		return rec
+	var out_type := [""]
+	var any_record := get_any_record(id, out_type)
+	if any_record is LightRecord:
+		return any_record as LightRecord
+	return null
 func get_door(id: String) -> DoorRecord:
 	return doors.get(id.to_lower())
 func get_activator(id: String) -> ActivatorRecord:

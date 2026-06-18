@@ -68,6 +68,7 @@ static func build(options: Dictionary, output_path: String = "") -> Dictionary:
 		gate_duration_s,
 		process_to_first_playable_s
 	)
+	var gap_breakdown := _build_gap_breakdown(timestamps)
 	var summary := {
 		"loading_reason": reason,
 		"loading_gate_duration_s": gate_duration_s,
@@ -80,6 +81,7 @@ static func build(options: Dictionary, output_path: String = "") -> Dictionary:
 		"cache_state": cache_state,
 		"phase_count": phase_times.size(),
 		"first_playable_attribution_ms": attribution.get("owner_ms", {}),
+		"loading_gap_breakdown_ms": gap_breakdown,
 		"source_data_total_ms": attribution.get("source_data_total_ms", 0.0),
 		"cell_manager_publication_ms": attribution.get("cell_manager_publication_ms", 0.0),
 		"inner_ring_gate_wait_ms": attribution.get("inner_ring_gate_wait_ms", 0.0),
@@ -91,6 +93,7 @@ static func build(options: Dictionary, output_path: String = "") -> Dictionary:
 			"related_scenarios": ["cold_start", "warm_start", "first_playable"],
 		},
 		"timings_msec": _json_safe(timestamps),
+		"loading_gap_breakdown_ms": _json_safe(gap_breakdown),
 		"loading_phase_times_ms": _json_safe(phase_times),
 		"esm_primary_timing": _json_safe(esm_primary_timing),
 		"loading_gate_phase_totals_ms": _json_safe(loading_gate_phase_totals),
@@ -121,6 +124,33 @@ static func _as_dict(value: Variant) -> Dictionary:
 	return {}
 
 
+static func _build_gap_breakdown(timestamps: Dictionary) -> Dictionary:
+	var out := {}
+	_add_gap(out, timestamps, "ready_to_show_loading", "ready_msec", "show_loading_msec")
+	_add_gap(out, timestamps, "show_loading_to_init_async_start", "show_loading_msec", "init_async_start_msec")
+	_add_gap(out, timestamps, "first_update_loading_await", "first_update_loading_before_await_msec", "first_update_loading_after_await_msec")
+	_add_gap(out, timestamps, "terrain3d_init", "terrain3d_init_start_msec", "terrain3d_init_done_msec")
+	_add_gap(out, timestamps, "terrain_import", "terrain_import_start_msec", "terrain_import_done_msec")
+	_add_gap(out, timestamps, "horizon_maps", "horizon_maps_start_msec", "horizon_maps_done_msec")
+	_add_gap(out, timestamps, "terrain_texture_bridge", "terrain_texture_bridge_start_msec", "terrain_texture_bridge_done_msec")
+	_add_gap(out, timestamps, "hide_loading", "hide_loading_start_msec", "hide_loading_done_msec")
+	_add_gap(out, timestamps, "init_done_to_teleport_start", "init_async_done_msec", "teleport_to_cell_start_msec")
+	_add_gap(out, timestamps, "teleport_to_cell", "teleport_to_cell_start_msec", "teleport_to_cell_done_msec")
+	_add_gap(out, timestamps, "teleport_done_to_subsystem_toggles", "teleport_to_cell_done_msec", "subsystem_toggles_start_msec")
+	_add_gap(out, timestamps, "subsystem_toggles", "subsystem_toggles_start_msec", "subsystem_toggles_done_msec")
+	_add_gap(out, timestamps, "toggles_done_to_set_camera", "subsystem_toggles_done_msec", "streaming_set_camera_start_msec")
+	_add_gap(out, timestamps, "streaming_set_camera", "streaming_set_camera_start_msec", "streaming_set_camera_done_msec")
+	_add_gap(out, timestamps, "set_camera_done_to_boot_gate", "streaming_set_camera_done_msec", "boot_gate_start_msec")
+	_add_gap(out, timestamps, "set_camera_done_to_first_process", "streaming_set_camera_done_msec", "first_process_after_tracking_start_msec")
+	return out
+
+
+static func _add_gap(out: Dictionary, timestamps: Dictionary, label: String, from_key: String, to_key: String) -> void:
+	var delta := _delta_ms(timestamps, from_key, to_key)
+	if delta >= 0.0:
+		out[label] = delta
+
+
 static func _strings(value: Variant) -> Array[String]:
 	var out: Array[String] = []
 	if value is Array:
@@ -149,7 +179,7 @@ static func _build_first_playable_attribution(
 	))
 	var gdscript_supplement_populate_ms := _number(esm_primary_timing.get("gdscript_supplement_populate_ms", 0.0))
 	var bsa_cache_ms := _sum_keys(phase_times, ["BSA archives", "BSA prewarm"])
-	var terrain_ms := _sum_keys(phase_times, ["Terrain3D init", "terrain data load", "horizon maps"])
+	var terrain_ms := _sum_keys(phase_times, ["Terrain3D init", "terrain data load", "horizon maps", "terrain texture bridge"])
 	var model_material_warmup_ms := _sum_keys(phase_times, ["model cache index", "preload common models"])
 	var source_data_total_ms := (
 		source_data_other_ms

@@ -41,6 +41,14 @@ public partial class NativeESMLoader : RefCounted
     private const uint REC_WEAP = 0x50414557;  // "WEAP"
     private const uint REC_ARMO = 0x4F4D5241;  // "ARMO"
     private const uint REC_CLOT = 0x544F4C43;  // "CLOT"
+    private const uint REC_BOOK = 0x4B4F4F42;  // "BOOK"
+    private const uint REC_CLAS = 0x53414C43;  // "CLAS"
+    private const uint REC_FACT = 0x54434146;  // "FACT"
+    private const uint REC_SKIL = 0x4C494B53;  // "SKIL"
+    private const uint REC_BSGN = 0x4E475342;  // "BSGN"
+    private const uint REC_DIAL = 0x4C414944;  // "DIAL"
+    private const uint REC_INFO = 0x4F464E49;  // "INFO"
+    private const uint REC_LEVC = 0x4356454C;  // "LEVC"
 
     // FourCC constants for subrecord types
     private const uint SUB_NAME = 0x454D414E;
@@ -83,6 +91,23 @@ public partial class NativeESMLoader : RefCounted
     private const uint SUB_RADT = 0x54444152;  // "RADT" - Race data
     private const uint SUB_DESC = 0x43534544;  // "DESC" - Description
     private const uint SUB_ENAM = 0x4D414E45;  // "ENAM" - Enchantment
+    private const uint SUB_BKDT = 0x54444B42;  // "BKDT" - Book data
+    private const uint SUB_TEXT = 0x54584554;  // "TEXT" - Book text
+    private const uint SUB_CLDT = 0x54444C43;  // "CLDT" - Class data
+    private const uint SUB_FADT = 0x54444146;  // "FADT" - Faction data
+    private const uint SUB_INDX = 0x58444E49;  // "INDX" - Index/count
+    private const uint SUB_SKDT = 0x54444B53;  // "SKDT" - Skill data
+    private const uint SUB_TNAM = 0x4D414E54;  // "TNAM" - Texture
+    private const uint SUB_NPCS = 0x5343504E;  // "NPCS" - Spell/power
+    private const uint SUB_INAM = 0x4D414E49;  // "INAM" - Info id
+    private const uint SUB_PNAM = 0x4D414E50;  // "PNAM" - Previous info
+    private const uint SUB_NNAM = 0x4D414E4E;  // "NNAM" - Next info/chance none
+    private const uint SUB_ONAM = 0x4D414E4F;  // "ONAM" - Actor id
+    private const uint SUB_QSTN = 0x4E545351;  // "QSTN"
+    private const uint SUB_QSTF = 0x46545351;  // "QSTF"
+    private const uint SUB_QSTR = 0x52545351;  // "QSTR"
+    private const uint SUB_SCVR = 0x52564353;  // "SCVR"
+    private const uint SUB_FLTV = 0x56544C46;  // "FLTV"
 
     // Record storage - accessible from GDScript
     public Godot.Collections.Dictionary<string, NativeStaticRecord> Statics { get; } = new();
@@ -103,6 +128,14 @@ public partial class NativeESMLoader : RefCounted
     public Godot.Collections.Dictionary<string, NativeWeaponRecord> Weapons { get; } = new();
     public Godot.Collections.Dictionary<string, NativeArmorRecord> Armors { get; } = new();
     public Godot.Collections.Dictionary<string, NativeClothingRecord> Clothing { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeBookRecord> Books { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeClassRecord> Classes { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeFactionRecord> Factions { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeSkillRecord> Skills { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeBirthsignRecord> Birthsigns { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeDialogueRecord> Dialogues { get; } = new();
+    public Godot.Collections.Dictionary<string, Godot.Collections.Array<NativeDialogueInfoRecord>> DialogueInfos { get; } = new();
+    public Godot.Collections.Dictionary<string, NativeLeveledCreatureRecord> LeveledCreatures { get; } = new();
 
     // Statistics
     public int TotalRecordsLoaded { get; private set; } = 0;
@@ -139,6 +172,7 @@ public partial class NativeESMLoader : RefCounted
 
         // Parse all records
         int recordCount = 0;
+        string currentDialogueTopic = "";
         while (reader.HasMoreRecs)
         {
             uint recName = reader.GetRecName();
@@ -191,6 +225,30 @@ public partial class NativeESMLoader : RefCounted
                 case REC_CLOT:
                     LoadClothingRecord(reader);
                     break;
+                case REC_BOOK:
+                    LoadBookRecord(reader);
+                    break;
+                case REC_CLAS:
+                    LoadClassRecord(reader);
+                    break;
+                case REC_FACT:
+                    LoadFactionRecord(reader);
+                    break;
+                case REC_SKIL:
+                    LoadSkillRecord(reader);
+                    break;
+                case REC_BSGN:
+                    LoadBirthsignRecord(reader);
+                    break;
+                case REC_DIAL:
+                    currentDialogueTopic = LoadDialogueRecord(reader);
+                    break;
+                case REC_INFO:
+                    LoadDialogueInfoRecord(reader, currentDialogueTopic);
+                    break;
+                case REC_LEVC:
+                    LoadLeveledCreatureRecord(reader);
+                    break;
                 default:
                     // Skip unknown record types
                     reader.SkipRecord();
@@ -210,6 +268,7 @@ public partial class NativeESMLoader : RefCounted
         GD.Print($"  Cells: {Cells.Count} ({ExteriorCells.Count} exterior), Lands: {Lands.Count}");
         GD.Print($"  NPCs: {NPCs.Count}, Creatures: {Creatures.Count}, Races: {Races.Count}, BodyParts: {BodyParts.Count}");
         GD.Print($"  Weapons: {Weapons.Count}, Armors: {Armors.Count}, Clothing: {Clothing.Count}");
+        GD.Print($"  Books: {Books.Count}, Classes: {Classes.Count}, Factions: {Factions.Count}, Dialogues: {Dialogues.Count}");
 
         return Error.Ok;
     }
@@ -1672,6 +1731,467 @@ public partial class NativeESMLoader : RefCounted
         {
             Clothing[record.RecordId.ToLowerInvariant()] = record;
         }
+    }
+
+    private void LoadBookRecord(NativeESMReader reader)
+    {
+        var record = new NativeBookRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_MODL:
+                    record.Model = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_ITEX:
+                    record.Icon = reader.GetHString();
+                    break;
+                case SUB_SCRI:
+                    record.ScriptId = reader.GetHString();
+                    break;
+                case SUB_ENAM:
+                    record.EnchantId = reader.GetHString();
+                    break;
+                case SUB_TEXT:
+                    record.Text = reader.GetHString();
+                    break;
+                case SUB_BKDT:
+                    reader.GetSubHeader();
+                    record.Weight = reader.GetFloat();
+                    record.Value = reader.GetS32();
+                    record.IsScroll = reader.GetS32() != 0;
+                    record.SkillId = reader.GetS32();
+                    record.EnchantPoints = reader.GetS32();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            Books[record.RecordId.ToLowerInvariant()] = record;
+    }
+
+    private void LoadClassRecord(NativeESMReader reader)
+    {
+        var record = new NativeClassRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_CLDT:
+                    reader.GetSubHeader();
+                    record.PrimaryAttributes[0] = reader.GetS32();
+                    record.PrimaryAttributes[1] = reader.GetS32();
+                    record.Specialization = reader.GetS32();
+                    for (int i = 0; i < 5; i++)
+                    {
+                        record.MinorSkills[i] = reader.GetS32();
+                        record.MajorSkills[i] = reader.GetS32();
+                    }
+                    record.IsPlayable = reader.GetS32() != 0;
+                    record.Services = reader.GetS32();
+                    break;
+                case SUB_DESC:
+                    record.Description = reader.GetHString();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            Classes[record.RecordId.ToLowerInvariant()] = record;
+    }
+
+    private void LoadFactionRecord(NativeESMReader reader)
+    {
+        var record = new NativeFactionRecord();
+        string currentReactionFaction = "";
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_FADT:
+                    reader.GetSubHeader();
+                    record.FavoriteAttributes[0] = reader.GetS32();
+                    record.FavoriteAttributes[1] = reader.GetS32();
+                    for (int i = 0; i < 10; i++)
+                    {
+                        record.RankData.Add(new Godot.Collections.Dictionary
+                        {
+                            ["attribute1"] = reader.GetS32(),
+                            ["attribute2"] = reader.GetS32(),
+                            ["primary_skill"] = reader.GetS32(),
+                            ["favoured_skill"] = reader.GetS32(),
+                            ["faction_reaction"] = reader.GetS32(),
+                        });
+                    }
+                    for (int i = 0; i < 7; i++)
+                        record.FavoriteSkills[i] = reader.GetS32();
+                    record.IsHidden = reader.GetS32() != 0;
+                    break;
+                case SUB_RNAM:
+                    record.RankNames.Add(reader.GetHString());
+                    break;
+                case SUB_ANAM:
+                    currentReactionFaction = reader.GetHString();
+                    break;
+                case SUB_INTV:
+                    reader.GetSubHeader();
+                    if (!string.IsNullOrEmpty(currentReactionFaction))
+                        record.Reactions[currentReactionFaction.ToLowerInvariant()] = reader.GetS32();
+                    else
+                        reader.GetS32();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            Factions[record.RecordId.ToLowerInvariant()] = record;
+    }
+
+    private void LoadSkillRecord(NativeESMReader reader)
+    {
+        var record = new NativeSkillRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_INDX:
+                    reader.GetSubHeader();
+                    record.RecordId = reader.GetS32().ToString();
+                    break;
+                case SUB_SKDT:
+                    reader.GetSubHeader();
+                    record.Attribute = reader.GetS32();
+                    record.Specialization = reader.GetS32();
+                    for (int i = 0; i < 4; i++)
+                        record.UseValues[i] = reader.GetFloat();
+                    break;
+                case SUB_DESC:
+                    record.Description = reader.GetHString();
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            Skills[record.RecordId.ToLowerInvariant()] = record;
+    }
+
+    private void LoadBirthsignRecord(NativeESMReader reader)
+    {
+        var record = new NativeBirthsignRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.Name = reader.GetHString();
+                    break;
+                case SUB_DESC:
+                    record.Description = reader.GetHString();
+                    break;
+                case SUB_TNAM:
+                    record.Texture = reader.GetHString();
+                    break;
+                case SUB_NPCS:
+                    record.Powers.Add(reader.GetHString());
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            Birthsigns[record.RecordId.ToLowerInvariant()] = record;
+    }
+
+    private string LoadDialogueRecord(NativeESMReader reader)
+    {
+        var record = new NativeDialogueRecord();
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_DATA:
+                    reader.GetSubHeader();
+                    record.DialogueType = reader.GetByte();
+                    if (reader.SubSize > 1)
+                        reader.Skip(reader.SubSize - 1);
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            Dialogues[record.RecordId.ToLowerInvariant()] = record;
+        return record.RecordId;
+    }
+
+    private void LoadDialogueInfoRecord(NativeESMReader reader, string currentTopic)
+    {
+        var record = new NativeDialogueInfoRecord { ParentTopic = currentTopic };
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_INAM:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_PNAM:
+                    record.PrevId = reader.GetHString();
+                    break;
+                case SUB_NNAM:
+                    record.NextId = reader.GetHString();
+                    break;
+                case SUB_DATA:
+                    reader.GetSubHeader();
+                    if (reader.SubSize >= 12)
+                    {
+                        reader.GetS32();
+                        record.Disposition = reader.GetS32();
+                        record.SpeakerRank = ByteToSigned(reader.GetByte());
+                        record.SpeakerSex = ByteToSigned(reader.GetByte());
+                        record.PlayerRank = ByteToSigned(reader.GetByte());
+                        reader.GetByte();
+                        if (reader.SubSize > 12)
+                            reader.Skip(reader.SubSize - 12);
+                    }
+                    else
+                    {
+                        reader.Skip(reader.SubSize);
+                    }
+                    break;
+                case SUB_ONAM:
+                    record.ActorId = reader.GetHString();
+                    break;
+                case SUB_RNAM:
+                    record.ActorRace = reader.GetHString();
+                    break;
+                case SUB_CNAM:
+                    record.ActorClass = reader.GetHString();
+                    break;
+                case SUB_FNAM:
+                    record.ActorFaction = reader.GetHString();
+                    break;
+                case SUB_ANAM:
+                    record.ActorCell = reader.GetHString();
+                    break;
+                case SUB_DNAM:
+                    record.PcFaction = reader.GetHString();
+                    break;
+                case SUB_SNAM:
+                    record.SoundFile = reader.GetHString();
+                    break;
+                case SUB_NAME:
+                    record.Response = reader.GetHString();
+                    break;
+                case SUB_BNAM:
+                    record.ResultScript = reader.GetHString();
+                    break;
+                case SUB_SCVR:
+                    reader.GetSubHeader();
+                    record.Conditions.Add(new Godot.Collections.Dictionary { ["raw"] = reader.GetString(reader.SubSize) });
+                    break;
+                case SUB_INTV:
+                    reader.GetSubHeader();
+                    SetLastConditionValue(record.Conditions, "int_value", reader.GetS32());
+                    break;
+                case SUB_FLTV:
+                    reader.GetSubHeader();
+                    SetLastConditionValue(record.Conditions, "float_value", reader.GetFloat());
+                    break;
+                case SUB_QSTN:
+                    reader.SkipHSub();
+                    record.QuestName = true;
+                    break;
+                case SUB_QSTF:
+                    reader.SkipHSub();
+                    record.QuestFinish = true;
+                    break;
+                case SUB_QSTR:
+                    reader.SkipHSub();
+                    record.QuestRestart = true;
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (string.IsNullOrEmpty(record.ParentTopic) || string.IsNullOrEmpty(record.RecordId))
+            return;
+
+        string topicKey = record.ParentTopic.ToLowerInvariant();
+        if (!DialogueInfos.TryGetValue(topicKey, out var infos))
+        {
+            infos = new Godot.Collections.Array<NativeDialogueInfoRecord>();
+            DialogueInfos[topicKey] = infos;
+        }
+        infos.Add(record);
+    }
+
+    private void LoadLeveledCreatureRecord(NativeESMReader reader)
+    {
+        var record = new NativeLeveledCreatureRecord();
+        string currentCreature = "";
+
+        while (reader.HasMoreSubs)
+        {
+            reader.GetSubName();
+            uint subName = reader.CurrentSubName;
+
+            switch (subName)
+            {
+                case SUB_NAME:
+                    record.RecordId = reader.GetHString();
+                    break;
+                case SUB_DATA:
+                    reader.GetSubHeader();
+                    record.Flags = reader.GetS32();
+                    break;
+                case SUB_NNAM:
+                    reader.GetSubHeader();
+                    record.ChanceNone = reader.GetByte();
+                    if (reader.SubSize > 1)
+                        reader.Skip(reader.SubSize - 1);
+                    break;
+                case SUB_INDX:
+                    reader.SkipHSub();
+                    break;
+                case SUB_CNAM:
+                    currentCreature = reader.GetHString();
+                    break;
+                case SUB_INTV:
+                    reader.GetSubHeader();
+                    int level = reader.GetU16();
+                    if (!string.IsNullOrEmpty(currentCreature))
+                    {
+                        record.Creatures.Add(new Godot.Collections.Dictionary
+                        {
+                            ["creature_id"] = currentCreature,
+                            ["level"] = level,
+                        });
+                        currentCreature = "";
+                    }
+                    if (reader.SubSize > 2)
+                        reader.Skip(reader.SubSize - 2);
+                    break;
+                case SUB_DELE:
+                    reader.SkipHSub();
+                    record.IsDeleted = true;
+                    break;
+                default:
+                    reader.SkipHSub();
+                    break;
+            }
+        }
+
+        if (!string.IsNullOrEmpty(record.RecordId))
+            LeveledCreatures[record.RecordId.ToLowerInvariant()] = record;
+    }
+
+    private static int ByteToSigned(byte value)
+    {
+        return value > 127 ? value - 256 : value;
+    }
+
+    private static void SetLastConditionValue(Godot.Collections.Array<Godot.Collections.Dictionary> conditions, string key, Variant value)
+    {
+        if (conditions.Count > 0)
+            conditions[conditions.Count - 1][key] = value;
     }
 
     // =========================================================================

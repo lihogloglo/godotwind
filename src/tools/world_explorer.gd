@@ -165,6 +165,7 @@ var _door_prompt_label: Label = null  # "Press E to enter" prompt
 var _horizon_map_manager: HorizonMapManager = null  # Terrain self-shadowing
 var _mw_terrain_texture_bridge: RefCounted = null  # MW LTEX sidecar terrain texturing
 var _subsystem_toggles: RefCounted = null  # SubsystemToggles — benchmark A/B feature flags
+var _boot_deferred_ocean_enable: bool = false
 var _benchmark_hud: CanvasLayer = null  # BenchmarkHUD — live perf overlay, default hidden
 var _loading_time_ms: int = 0  # Total loading time (for benchmark harness)
 var _world_streaming_disabled: bool = false
@@ -181,6 +182,8 @@ var _observatory_ready_msec: int = 0
 var _observatory_init_async_start_msec: int = 0
 var _observatory_init_async_done_msec: int = 0
 var _observatory_boot_gate_start_msec: int = 0
+var _observatory_loading_marks_msec: Dictionary = {}
+var _observatory_waiting_for_tracking_frame: bool = false
 var _lifetime_probe_started: bool = false
 
 # State
@@ -574,24 +577,35 @@ func _init_async() -> void:
 
 	# Initialize Terrain3D
 	await _update_loading(50, "Initializing Terrain3D...")
+	_mark_loading_timestamp("terrain3d_init_start_msec")
 	_init_terrain3d()
+	_mark_loading_timestamp("terrain3d_init_done_msec")
 	_ta = _log_timing(_ta, "Terrain3D init")
 
 	# Load pre-processed terrain (terrain is always prebaked)
 	await _update_loading(70, "Loading terrain data...")
+	_mark_loading_timestamp("terrain_import_start_msec")
 	_load_preprocessed_terrain()
+	_mark_loading_timestamp("terrain_import_done_msec")
 	_ta = _log_timing(_ta, "terrain data load")
 
 	# Load horizon maps for terrain self-shadowing (if prebaked)
 	_horizon_map_manager = HorizonMapManager.new()
 	var sun: DirectionalLight3D = _find_sun_light()
 	if terrain_3d and sun:
+		_mark_loading_timestamp("horizon_maps_start_msec")
 		_horizon_map_manager.initialize(terrain_3d, sun)
+		_mark_loading_timestamp("horizon_maps_done_msec")
+		_ta = _log_timing(_ta, "horizon maps")
 		# Push wet map uniforms (sea_level from WaterSystem or project settings)
 		var sea_lvl: float = ProjectSettings.get_setting("ocean/sea_level", 0.0)
+		_mark_loading_timestamp("terrain_texture_bridge_start_msec")
 		_horizon_map_manager.push_wet_map(sea_lvl)
 		_init_mw_terrain_textures()
-	_ta = _log_timing(_ta, "horizon maps")
+		_mark_loading_timestamp("terrain_texture_bridge_done_msec")
+		_ta = _log_timing(_ta, "terrain texture bridge")
+	else:
+		_ta = _log_timing(_ta, "horizon maps")
 
 	# Ocean system is now lazy-loaded - created on first toggle
 
@@ -625,7 +639,9 @@ func _init_async() -> void:
 
 	# Done
 	await _update_loading(100, "Ready!")
+	_mark_loading_timestamp("hide_loading_start_msec")
 	_hide_loading()
+	_mark_loading_timestamp("hide_loading_done_msec")
 
 	_initialized = true
 	_loading_time_ms = Time.get_ticks_msec() - _ta0
@@ -643,10 +659,14 @@ func _init_async() -> void:
 	# First teleport camera to Seyda Neen BEFORE starting to track.
 	# --start-cell=X,Y overrides (Phase 0 ablation; booting at Balmora avoids
 	# the mid-session teleport that triggers tracker §12.2 crash).
+	_mark_loading_timestamp("teleport_to_cell_start_msec")
 	_teleport_to_cell(_start_cell.x, _start_cell.y)
+	_mark_loading_timestamp("teleport_to_cell_done_msec")
 
 	# Setup subsystem toggles (needs all managers initialized)
+	_mark_loading_timestamp("subsystem_toggles_start_msec")
 	_setup_subsystem_toggles()
+	_mark_loading_timestamp("subsystem_toggles_done_msec")
 
 	# NOW start tracking the camera - cells will generate around Seyda Neen.
 	# Apply subsystem CLI isolation before this call so `--near-only` /
@@ -654,7 +674,10 @@ func _init_async() -> void:
 	if _world_streaming_disabled:
 		Log.info("streaming", "[--disable-world-streaming] skipping NativeStreamingManager.set_camera()")
 	else:
+		_mark_loading_timestamp("streaming_set_camera_start_msec")
 		world_streaming_manager.set_camera(camera)
+		_mark_loading_timestamp("streaming_set_camera_done_msec")
+		_observatory_waiting_for_tracking_frame = true
 
 	# Update debug overlay with references to managers
 	_update_debug_overlay_references()
@@ -716,6 +739,7 @@ func _enter_boot_loading_gate() -> void:
 		return
 	_boot_gate_entered = true
 	_observatory_boot_gate_start_msec = Time.get_ticks_msec()
+	_mark_loading_timestamp("boot_gate_start_msec")
 	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
 	var progress_fn := Callable(self, "_format_boot_progress")
 	# pause_gameplay=false for the 2026-04-17 first-runtime pass — the
@@ -780,7 +804,16 @@ func _on_loading_finished(reason: String, duration_s: float, timed_out: bool) ->
 		])
 		_write_loading_baseline_report(reason, duration_s, timed_out, status, cm_stats)
 		if not timed_out:
+			_activate_deferred_boot_visuals.call_deferred()
 			_maybe_start_lifetime_probe()
+
+
+func _activate_deferred_boot_visuals() -> void:
+	if not _boot_deferred_ocean_enable:
+		return
+	_boot_deferred_ocean_enable = false
+	if _ocean_controls and _subsystem_toggles and _subsystem_toggles.get_flag("ocean"):
+		_ocean_controls.on_show_ocean_toggled(true)
 
 
 func _write_loading_baseline_report(
@@ -805,14 +838,7 @@ func _write_loading_baseline_report(
 		"reason": reason,
 		"duration_s": duration_s,
 		"timed_out": timed_out,
-		"timestamps": {
-			"process_start_msec": _observatory_process_start_msec,
-			"ready_msec": _observatory_ready_msec,
-			"init_async_start_msec": _observatory_init_async_start_msec,
-			"init_async_done_msec": _observatory_init_async_done_msec,
-			"boot_gate_start_msec": _observatory_boot_gate_start_msec,
-			"first_playable_msec": Time.get_ticks_msec(),
-		},
+		"timestamps": _build_loading_timestamps(),
 		"phase_times_ms": _loading_phase_times,
 		"esm_primary_timing": _loading_esm_primary_timing,
 		"loading_gate_phase_totals_ms": _loading_gate_phase_totals_ms,
@@ -829,6 +855,21 @@ func _write_loading_baseline_report(
 		Log.error("loading", "[LOADING_BASELINE] failed to write loading baseline report")
 	else:
 		Log.info("loading", "[LOADING_BASELINE] wrote %s" % path)
+
+
+func _build_loading_timestamps() -> Dictionary:
+	var timestamps := _observatory_loading_marks_msec.duplicate()
+	timestamps["process_start_msec"] = _observatory_process_start_msec
+	timestamps["ready_msec"] = _observatory_ready_msec
+	timestamps["init_async_start_msec"] = _observatory_init_async_start_msec
+	timestamps["init_async_done_msec"] = _observatory_init_async_done_msec
+	timestamps["boot_gate_start_msec"] = _observatory_boot_gate_start_msec
+	timestamps["first_playable_msec"] = Time.get_ticks_msec()
+	return timestamps
+
+
+func _mark_loading_timestamp(label: String) -> void:
+	_observatory_loading_marks_msec[label] = Time.get_ticks_msec()
 
 
 func _get_loading_baseline_report_args() -> Dictionary:
@@ -2394,7 +2435,13 @@ func _setup_subsystem_toggles() -> void:
 		"terrain": func(on: bool) -> void:
 			if terrain_3d: terrain_3d.visible = on,
 		"ocean": func(on: bool) -> void:
-			if _ocean_controls: _ocean_controls.on_show_ocean_toggled(on),
+			if _ocean_controls:
+				if on and _is_loading:
+					_boot_deferred_ocean_enable = true
+					_ocean_controls.show_ocean = true
+					return
+				_boot_deferred_ocean_enable = false
+				_ocean_controls.on_show_ocean_toggled(on),
 		"sky": func(on: bool) -> void:
 			_on_show_sky_toggled(on),
 		"weather": func(on: bool) -> void:
@@ -3853,6 +3900,7 @@ func _auto_prebake_animations() -> void:
 
 
 func _show_loading(title: String, status: String) -> void:
+	_mark_loading_timestamp("show_loading_msec")
 	loading_overlay.visible = true
 	loading_label.text = title
 	status_label.text = status
@@ -3898,7 +3946,11 @@ func _log_hlod_flyby_stats() -> void:
 func _update_loading(progress: float, status: String) -> void:
 	progress_bar.value = progress
 	status_label.text = status
+	if not _observatory_loading_marks_msec.has("first_update_loading_before_await_msec"):
+		_mark_loading_timestamp("first_update_loading_before_await_msec")
 	await get_tree().process_frame
+	if not _observatory_loading_marks_msec.has("first_update_loading_after_await_msec"):
+		_mark_loading_timestamp("first_update_loading_after_await_msec")
 
 
 ## Timing helper: prints elapsed ms since last checkpoint, returns new checkpoint
@@ -4128,6 +4180,9 @@ func _add_loading_gate_phase_sample(label: String, value_ms: float) -> void:
 func _process(delta: float) -> void:
 	if not _initialized:
 		return
+	if _observatory_waiting_for_tracking_frame:
+		_observatory_waiting_for_tracking_frame = false
+		_mark_loading_timestamp("first_process_after_tracking_start_msec")
 	_sample_loading_gate_phase_attribution()
 
 	# Fly-camera interact hold-threshold polling. Cheap; safe to run every

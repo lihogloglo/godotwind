@@ -537,3 +537,118 @@ public partial class NativeClothingRecord : NativeModelRecord
 
     public override string ToString() => $"Clothing('{RecordId}', type={ClothingType})";
 }
+
+// =============================================================================
+// STARTUP SUPPLEMENT RECORDS
+// =============================================================================
+
+[GlobalClass]
+public partial class NativeBookRecord : NativeModelRecord
+{
+    public string Name { get; set; } = "";
+    public string Icon { get; set; } = "";
+    public string ScriptId { get; set; } = "";
+    public string EnchantId { get; set; } = "";
+    public string Text { get; set; } = "";
+    public float Weight { get; set; } = 0f;
+    public int Value { get; set; } = 0;
+    public bool IsScroll { get; set; } = false;
+    public int SkillId { get; set; } = -1;
+    public int EnchantPoints { get; set; } = 0;
+}
+
+[GlobalClass]
+public partial class NativeClassRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public int[] PrimaryAttributes { get; set; } = new int[2];
+    public int Specialization { get; set; } = 0;
+    public int[] MajorSkills { get; set; } = new int[5];
+    public int[] MinorSkills { get; set; } = new int[5];
+    public bool IsPlayable { get; set; } = false;
+    public int Services { get; set; } = 0;
+}
+
+[GlobalClass]
+public partial class NativeFactionRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public string Name { get; set; } = "";
+    public Godot.Collections.Array<string> RankNames { get; set; } = new();
+    public int[] FavoriteAttributes { get; set; } = new int[2];
+    public Godot.Collections.Array<Godot.Collections.Dictionary> RankData { get; set; } = new();
+    public int[] FavoriteSkills { get; set; } = new int[7] { -1, -1, -1, -1, -1, -1, -1 };
+    public bool IsHidden { get; set; } = false;
+    public Godot.Collections.Dictionary<string, int> Reactions { get; set; } = new();
+}
+
+[GlobalClass]
+public partial class NativeSkillRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public string Description { get; set; } = "";
+    public int Attribute { get; set; } = 0;
+    public int Specialization { get; set; } = 0;
+    public float[] UseValues { get; set; } = new float[4];
+}
+
+[GlobalClass]
+public partial class NativeBirthsignRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public string Name { get; set; } = "";
+    public string Description { get; set; } = "";
+    public string Texture { get; set; } = "";
+    public Godot.Collections.Array<string> Powers { get; set; } = new();
+}
+
+[GlobalClass]
+public partial class NativeDialogueRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public int DialogueType { get; set; } = 0;
+}
+
+[GlobalClass]
+public partial class NativeDialogueInfoRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public string ParentTopic { get; set; } = "";
+    public string PrevId { get; set; } = "";
+    public string NextId { get; set; } = "";
+    public int Disposition { get; set; } = 0;
+    public int SpeakerRank { get; set; } = -1;
+    public int SpeakerSex { get; set; } = -1;
+    public int PlayerRank { get; set; } = -1;
+    public string ActorId { get; set; } = "";
+    public string ActorRace { get; set; } = "";
+    public string ActorClass { get; set; } = "";
+    public string ActorFaction { get; set; } = "";
+    public string ActorCell { get; set; } = "";
+    public string PcFaction { get; set; } = "";
+    public string SoundFile { get; set; } = "";
+    public string Response { get; set; } = "";
+    public string ResultScript { get; set; } = "";
+    public bool QuestName { get; set; } = false;
+    public bool QuestFinish { get; set; } = false;
+    public bool QuestRestart { get; set; } = false;
+    public Godot.Collections.Array<Godot.Collections.Dictionary> Conditions { get; set; } = new();
+}
+
+[GlobalClass]
+public partial class NativeLeveledCreatureRecord : RefCounted
+{
+    public string RecordId { get; set; } = "";
+    public bool IsDeleted { get; set; } = false;
+    public int Flags { get; set; } = 0;
+    public int ChanceNone { get; set; } = 0;
+    public Godot.Collections.Array<Godot.Collections.Dictionary> Creatures { get; set; } = new();
+}

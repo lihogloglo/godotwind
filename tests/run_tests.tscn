@@ -7,6 +7,7 @@ extends Node
 
 func _ready() -> void:
 	var args := OS.get_cmdline_args()
+	args.append_array(OS.get_cmdline_user_args())
 	# Default: run all tests in tests/ directory
 	var test_path := \"res://tests/unit/\"
 	for i in range(args.size()):
