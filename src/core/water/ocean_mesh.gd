@@ -718,13 +718,15 @@ func clear_runtime_textures() -> void:
 	_cached_water_interaction_debug_enabled = false
 	_cached_water_body_atlas_texture = null
 	_cached_water_body_atlas_available = false
+	_water_interaction_fallback_texture = null
+	_water_body_atlas_fallback_texture = null
 	if _material:
 		_material.set_shader_parameter("shore_mask", null)
 		_material.set_shader_parameter("foam_texture", null)
-		_material.set_shader_parameter("water_interaction_map", _get_water_interaction_fallback_texture())
+		_material.set_shader_parameter("water_interaction_map", null)
 		_material.set_shader_parameter("water_interaction_enabled", false)
 		_material.set_shader_parameter("water_interaction_debug_enabled", false)
-		_material.set_shader_parameter("water_body_atlas_map", _get_water_body_atlas_fallback_texture())
+		_material.set_shader_parameter("water_body_atlas_map", null)
 		_material.set_shader_parameter("water_body_atlas_available", false)
 	material_override = null
 

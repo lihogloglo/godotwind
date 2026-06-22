@@ -321,6 +321,8 @@ func _dispose_water_interaction_layer() -> void:
 	_water_interaction_sim = null
 	if sim.get_parent() == self:
 		remove_child(sim)
+	if sim.has_method("shutdown"):
+		sim.call("shutdown")
 	sim.queue_free()
 	_water_interactors.clear()
 	_sync_water_interaction_to_renderers(true)
@@ -2381,6 +2383,8 @@ func is_initialized() -> bool:
 func set_ocean_surface_visible(enabled: bool) -> void:
 	if _ocean_mesh != null:
 		_ocean_mesh.visible = enabled
+	if _ocean_spray != null:
+		_ocean_spray.visible = enabled
 
 
 func toggle_ocean() -> bool:
@@ -2428,6 +2432,7 @@ func release_runtime_resources() -> void:
 	_system_enabled = false
 	_enabled = false
 	set_process(false)
+	set_physics_process(false)
 	_dispose_spray_layer()
 	_dispose_underwater_particulates_layer()
 	_dispose_water_interaction_layer()

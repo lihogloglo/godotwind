@@ -461,6 +461,78 @@ func test_partial_bucket_inputs_still_render_but_do_not_suppress_mid() -> void:
 	assert_int(state.refs_partial_bucket_rejected).is_equal(1)
 
 
+func test_mid_replacement_cost_gate_rejects_partial_bucket_coverage() -> void:
+	var merger := Merger.new()
+	merger.set_mid_replacement_cost_gate_enabled(true)
+	var state := Merger.MergePrepState.new()
+	state.size_level = 0
+	var partial := Kernel.RefInput.new()
+	partial.bucket_key = "0,0:partial"
+	partial.surface_count = 4
+	var complete := Kernel.RefInput.new()
+	complete.bucket_key = "0,0:complete"
+	complete.surface_count = 4
+	state.inputs = [partial, complete]
+	state.source_bucket_counts = {
+		"0,0:partial": 1,
+		"0,0:complete": 1,
+	}
+	state.bucket_total_counts = {
+		"0,0:partial": 2,
+		"0,0:complete": 1,
+	}
+	state.bucket_draw_group_counts = {
+		"0,0:partial": 64,
+		"0,0:complete": 64,
+	}
+
+	merger._apply_surface_budget(state)
+	merger._update_complete_bucket_counts(state)
+
+	assert_str(merger._evaluate_mid_replacement_cost_gate(state)).is_equal("partial_bucket")
+	assert_int(state.refs_partial_bucket_rejected).is_equal(1)
+
+
+func test_mid_replacement_cost_gate_rejects_low_draw_group_benefit() -> void:
+	var merger := Merger.new()
+	merger.set_mid_replacement_cost_gate_enabled(true)
+	var state := Merger.MergePrepState.new()
+	state.size_level = 0
+	var input := Kernel.RefInput.new()
+	input.bucket_key = "0,0:thin"
+	input.surface_count = 16
+	state.inputs = [input]
+	state.source_bucket_counts = {"0,0:thin": 1}
+	state.bucket_total_counts = {"0,0:thin": 1}
+	state.bucket_draw_group_counts = {"0,0:thin": 24}
+
+	merger._apply_surface_budget(state)
+	merger._update_complete_bucket_counts(state)
+
+	assert_str(merger._evaluate_mid_replacement_cost_gate(state)).is_equal("cost_gate")
+	assert_int(state.suppressed_draw_group_estimate).is_equal(24)
+
+
+func test_mid_replacement_cost_gate_accepts_clear_draw_group_win() -> void:
+	var merger := Merger.new()
+	merger.set_mid_replacement_cost_gate_enabled(true)
+	var state := Merger.MergePrepState.new()
+	state.size_level = 0
+	var input := Kernel.RefInput.new()
+	input.bucket_key = "0,0:dense"
+	input.surface_count = 16
+	state.inputs = [input]
+	state.source_bucket_counts = {"0,0:dense": 1}
+	state.bucket_total_counts = {"0,0:dense": 1}
+	state.bucket_draw_group_counts = {"0,0:dense": 64}
+
+	merger._apply_surface_budget(state)
+	merger._update_complete_bucket_counts(state)
+
+	assert_str(merger._evaluate_mid_replacement_cost_gate(state)).is_equal("")
+	assert_int(state.suppressed_draw_group_estimate).is_equal(64)
+
+
 func test_hlod_manifest_uses_source_object_ids_not_source_ref_nums() -> void:
 	var merger := Merger.new()
 	var state := Merger.MergePrepState.new()
@@ -809,6 +881,15 @@ func test_hlod_visual_floor_starts_at_hlod_boundary() -> void:
 	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 0))).is_false()
 	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 1))).is_true()
 	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 2))).is_true()
+
+
+func test_mid_object_paging_visual_range_uses_tier_zero_only() -> void:
+	var merger := Merger.new()
+	merger.set_visual_begin_floor(DU.NEAR_END)
+	merger.set_visual_end_cap(DU.HLOD_START)
+	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 0))).is_true()
+	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 1))).is_false()
+	assert_bool(merger._chunk_has_visual_range(Vector3i(0, 0, 2))).is_false()
 
 
 func test_paging_ring_radius_bounds() -> void:

@@ -24,7 +24,7 @@ func test_scene_load_radius_is_capped_at_mid_bridge() -> void:
 	assert_int(StreamingConfig.scene_load_radius_cells_for_view_distance_meters(250)).is_less_equal(StreamingConfig.MAX_SCENE_LOAD_RADIUS_CELLS)
 	assert_int(StreamingConfig.scene_load_radius_cells_for_view_distance_meters(5000)).is_equal(StreamingConfig.MAX_SCENE_LOAD_RADIUS_CELLS)
 	var cap := StreamingConfig.scene_load_distance_cap_for_view_distance_meters(5000)
-	assert_float(cap).is_equal(StreamingConfig.DU.HLOD_START + StreamingConfig.DU.CELL_SIZE_METERS)
+	assert_float(cap).is_equal(StreamingConfig.DU.HLOD_START)
 
 
 func test_distant_stream_radius_tracks_view_cap() -> void:

@@ -209,6 +209,20 @@ var _stats: Dictionary = {
 var _first_saved_model: String = ""
 var _last_save_report_count: int = 0
 
+var _last_async_load_times: Dictionary = {
+	"total": 0,
+	"phase_a": 0,
+	"phase_b": 0,
+	"phase_b_get": 0,
+	"deferred": 0,
+	"completed": 0,
+	"phase_b_get_count": 0,
+	"status_polls": 0,
+	"pending_instantiate_queue": 0,
+	"pending_async_loads": 0,
+	"deferred_async_queue": 0,
+}
+
 
 ## Get or load a model prototype
 ## Returns cached model if available, loads provider/native resources or disk
@@ -888,6 +902,35 @@ func is_loading_async(model_path: String, item_id: String = "") -> bool:
 	return disk_path in _pending_async_loads
 
 
+func get_last_async_load_times() -> Dictionary:
+	return _last_async_load_times.duplicate()
+
+
+func _store_last_async_load_times(
+	total_us: int,
+	phase_a_us: int,
+	phase_b_us: int,
+	phase_b_get_us: int,
+	deferred_us: int,
+	completed: int,
+	phase_b_get_count: int,
+	status_polls: int,
+) -> void:
+	_last_async_load_times = {
+		"total": total_us,
+		"phase_a": phase_a_us,
+		"phase_b": phase_b_us,
+		"phase_b_get": phase_b_get_us,
+		"deferred": deferred_us,
+		"completed": completed,
+		"phase_b_get_count": phase_b_get_count,
+		"status_polls": status_polls,
+		"pending_instantiate_queue": _pending_instantiate_queue.size(),
+		"pending_async_loads": _pending_async_loads.size(),
+		"deferred_async_queue": _deferred_async_queue.size(),
+	}
+
+
 ## Process pending async loads - call this every frame
 ## Returns number of loads completed this frame
 ##
@@ -914,11 +957,31 @@ func process_async_loads(budget_usec: int = 0) -> int:
 
 	if _pending_async_loads.is_empty() and _deferred_async_queue.is_empty():
 		_try_drain_requested_eviction()
+		_store_last_async_load_times(
+			t_phase_a - t0,
+			t_phase_a - t0,
+			0,
+			0,
+			0,
+			completed,
+			0,
+			0
+		)
 		return completed
 	if _pending_async_loads.is_empty():
 		_drain_deferred_queue(phase_b_budget_left, MAX_DEFERRED_DRAIN_PER_FRAME)
 		var t_dd := Time.get_ticks_usec()
 		var ml_total: int = t_dd - t0
+		_store_last_async_load_times(
+			ml_total,
+			t_phase_a - t0,
+			0,
+			0,
+			t_dd - t_phase_a,
+			completed,
+			0,
+			0
+		)
 		if ml_total > 8_000:
 			Log.warn("streaming", "[ml-spike %.1fms] phaseA=%.1f phaseB=0.0 dd=%.1f items_completed=%d pending_instq=%d pending_async=%d deferred=%d" % [
 				ml_total / 1000.0,
@@ -934,6 +997,7 @@ func process_async_loads(budget_usec: int = 0) -> int:
 
 	var to_remove: Array[String] = []
 	var phase_b_get_count: int = 0
+	var phase_b_get_us: int = 0
 	var status_polls := 0
 
 	# Phase B: poll in-flight loads, defer instantiate for next frame.
@@ -955,7 +1019,9 @@ func process_async_loads(budget_usec: int = 0) -> int:
 				# Unity Addressables layer split). A failed load here is logged,
 				# cached as null, and left for the next prebake pass to repair.
 				# See docs/audit/MODEL_LOADER_RACE.md.
+				var get_start := Time.get_ticks_usec()
 				var packed_scene := ResourceLoader.load_threaded_get(disk_path) as PackedScene
+				phase_b_get_us += Time.get_ticks_usec() - get_start
 				phase_b_get_count += 1
 				var cache_key: String = _pending_async_loads[disk_path].cache_key
 				var callbacks: Array = _pending_async_loads[disk_path].callbacks
@@ -1014,6 +1080,16 @@ func process_async_loads(budget_usec: int = 0) -> int:
 
 	var t_dd := Time.get_ticks_usec()
 	var ml_total: int = t_dd - t0
+	_store_last_async_load_times(
+		ml_total,
+		t_phase_a - t0,
+		t_phase_b - t_phase_a,
+		phase_b_get_us,
+		t_dd - t_phase_b,
+		completed,
+		phase_b_get_count,
+		status_polls
+	)
 	if ml_total > 50_000:
 		Log.warn("streaming", "[ml-spike %.1fms] phaseA=%.1f phaseB=%.1f dd=%.1f items_completed=%d phaseB_get=%d pending_instq=%d pending_async=%d deferred=%d" % [
 			ml_total / 1000.0,

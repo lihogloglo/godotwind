@@ -99,7 +99,15 @@ func on_show_ocean_toggled(enabled: bool) -> void:
 	if _panels and _panels.ocean_controls_container:
 		_panels.ocean_controls_container.visible = all_water_enabled
 
-	set_world_space_ocean_visible(enabled)
+	if enabled and not all_water_enabled:
+		set_all_water_enabled(true)
+
+	if enabled:
+		set_enabled(true)
+		set_world_space_ocean_visible(true)
+	else:
+		set_world_space_ocean_visible(false)
+		set_enabled(false)
 
 	_log("Ocean: %s" % ("ON" if enabled else "OFF"))
 	_update_stats()

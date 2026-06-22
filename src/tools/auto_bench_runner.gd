@@ -1,8 +1,8 @@
 ## AutoBenchRunner — autonomous performance-audit orchestrator.
 ##
-## Wires in when `--bench-auto` is present on the command line. Waits for the
-## streaming pipeline to actually settle (FPS ≥ 50 for 3 consecutive seconds,
-## OR absolute 4-minute fallback), then runs the four scenarios required by
+## Wires in when `--bench-auto` is present on the command line. Waits for a
+## short post-startup readiness window (FPS >= 50 for 3 consecutive seconds,
+## OR absolute 60-second fallback), then runs the four scenarios required by
 ## the autonomous-perf-audit handoff (docs/audit/AUTONOMOUS_PERF_AUDIT_HANDOFF_
 ## 2026_04_17.md §1, missions C-F):
 ##
@@ -33,19 +33,15 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const StreamingBenchmarkScript := preload("res://src/tools/streaming_benchmark.gd")
 const PerformanceReportContract := preload("res://src/tools/performance_report_contract.gd")
 
-## Seconds of FPS >= SETTLE_FPS_TARGET required to call the pipeline settled.
-## Phase 0 ablation (2026-04-21): relaxed threshold to TRUE steady state.
-## User reports Balmora eye-level steady = 180-200 FPS. Old 50/3s fired while
-## the instantiation queue was still draining (queue=866 with inst:14ms/frame
-## chronic overrun = 71 FPS cap), giving misleading "steady" numbers. New
-## threshold requires fps>=150 sustained 10s → guarantees queue drained +
-## true GPU-bound steady state.
-const SETTLE_WINDOW_SEC: float = 10.0
-const SETTLE_FPS_TARGET: float = 150.0
+## Short readiness gate before automated scenarios. This must not require the
+## target FPS; fastospeedo uses the moving-camera pass to measure why target
+## FPS is not being reached.
+const SETTLE_WINDOW_SEC: float = 3.0
+const SETTLE_FPS_TARGET: float = 50.0
 
 ## Hard cap — if FPS never recovers, start the bench anyway at this point so
 ## the report captures a "never settled" run instead of spinning forever.
-const SETTLE_FALLBACK_SEC: float = 240.0
+const SETTLE_FALLBACK_SEC: float = 60.0
 
 ## Watchdog — if the full run exceeds this wall-clock, force-quit.
 const RUN_WATCHDOG_SEC: float = 900.0
@@ -404,6 +400,24 @@ func _snapshot_sample(elapsed_s: float) -> Dictionary:
 		sample["inst_container_us"] = routes.get("container", 0)
 		sample["inst_activator_us"] = routes.get("activator", 0)
 		sample["inst_static_us"] = routes.get("static", 0)
+		sample["inst_total_us"] = routes.get("total", 0)
+		sample["inst_collision_dispatch_us"] = routes.get("collision_dispatch", 0)
+		sample["inst_classify_us"] = routes.get("classify", 0)
+		sample["inst_model_request_start_us"] = routes.get("model_request_start", 0)
+		sample["inst_disk_us"] = routes.get("disk", 0)
+		sample["inst_model_loader_total_us"] = routes.get("model_loader_total", 0)
+		sample["inst_model_loader_phase_a_us"] = routes.get("model_loader_phase_a", 0)
+		sample["inst_model_loader_phase_b_us"] = routes.get("model_loader_phase_b", 0)
+		sample["inst_model_loader_get_us"] = routes.get("model_loader_get", 0)
+		sample["inst_model_loader_deferred_us"] = routes.get("model_loader_deferred", 0)
+		sample["inst_model_loader_completed"] = routes.get("model_loader_completed", 0)
+		sample["inst_model_loader_get_count"] = routes.get("model_loader_get_count", 0)
+		sample["inst_model_loader_status_polls"] = routes.get("model_loader_status_polls", 0)
+		sample["inst_conversion_us"] = routes.get("conversion", 0)
+		sample["inst_prewarm_us"] = routes.get("prewarm", 0)
+		sample["inst_attach_us"] = routes.get("attach", 0)
+		sample["inst_loop_us"] = routes.get("loop", 0)
+		sample["inst_collision_finalize_us"] = routes.get("collision_finalize", 0)
 	return sample
 
 
@@ -501,7 +515,14 @@ func _summarize(samples: Array[Dictionary]) -> Dictionary:
 		"phase_coll_us", "phase_defer_us", "phase_queue_us", "phase_cellupd_us",
 		"phase_static_cull_us", "inst_door_us", "inst_light_us",
 		"inst_light_modelload_us", "inst_container_us", "inst_activator_us",
-		"inst_static_us",
+		"inst_static_us", "inst_total_us", "inst_collision_dispatch_us",
+		"inst_classify_us", "inst_model_request_start_us", "inst_disk_us",
+		"inst_model_loader_total_us", "inst_model_loader_phase_a_us",
+		"inst_model_loader_phase_b_us", "inst_model_loader_get_us",
+		"inst_model_loader_deferred_us", "inst_model_loader_completed",
+		"inst_model_loader_get_count", "inst_model_loader_status_polls",
+		"inst_conversion_us", "inst_prewarm_us", "inst_attach_us",
+		"inst_loop_us", "inst_collision_finalize_us",
 		"pub_near_gameplay_claimed_us", "pub_near_gameplay_spent_us",
 		"pub_near_gameplay_overrun_us", "pub_static_visuals_claimed_us",
 		"pub_static_visuals_spent_us", "pub_static_visuals_overrun_us",

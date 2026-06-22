@@ -12,6 +12,19 @@ it, and one small runnable check for non-trivial logic. Do not use Ponytail as
 an excuse to skip required verification, safety, accessibility, security, or
 the Godotwind industry-standard architecture rules below.
 
+## Fastospeedo Performance Pass Rule
+
+When the user says `fastospeedo`, `continue improving performances`, asks to
+improve FPS, or asks to reduce cell-boundary stutter, use the repo-local
+`.agents/skills/fastospeedo/SKILL.md` plus
+`.agents/skills/performance-observatory/SKILL.md` before editing runtime code.
+Read `docs/audit/fastospeedo_state.md` first, run the static observability scan,
+then use the existing automated diagnostics (`--bench-auto`, `--bench-ladder`,
+loading/lifetime probes as relevant) for same-scenario evidence. Do not tune
+budgets, port broad files to C#, or write bespoke systems until the reports
+identify one measured owner and the native-first canonical pattern for that
+owner.
+
 ## Codex Session Verification Rule
 
 For Godotwind work, do not stop at static inspection. Before calling a gameplay,

@@ -585,7 +585,7 @@ func _update_exterior(player_pos: Vector3, _delta: float) -> void:
 
 	# Update portal state
 	if best_portal_door and not (_active_portal and _active_portal.is_active):
-		Log.info("streaming", "Portal candidate: '%s' (dist=%.1fm)" % [
+		Log.debug("streaming", "Portal candidate: '%s' (dist=%.1fm)" % [
 			best_portal_door.target_cell_name, sqrt(best_portal_dist_sq)])
 	elif not best_portal_door and Engine.get_frames_drawn() % 300 == 0:
 		# Periodic debug: why no portal candidate? (every ~5 seconds)

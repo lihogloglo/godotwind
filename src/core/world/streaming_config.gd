@@ -43,7 +43,7 @@ const MAX_SCENE_LOAD_RADIUS_CELLS := 4
 ## load distance of 1 cell: current cell plus immediate neighbors. MID disabled
 ## must not keep loading the 300m bridge ring.
 const NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS := 1
-const NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP := DU.NEAR_END + DU.HALF_CELL_SIZE
+const NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP := DU.NEAR_END
 
 
 static func clamp_view_distance_meters(value: int) -> int:
@@ -57,8 +57,8 @@ static func scene_load_radius_cells_for_view_distance_meters(value: int, cell_si
 	return clampi(ceili(scene_distance / cell_size_meters), 1, MAX_SCENE_LOAD_RADIUS_CELLS)
 
 
-static func scene_load_distance_cap_for_view_distance_meters(value: int, cell_size_meters: float = DU.CELL_SIZE_METERS) -> float:
-	return minf(float(clamp_view_distance_meters(value)), DU.HLOD_START) + cell_size_meters
+static func scene_load_distance_cap_for_view_distance_meters(value: int, _cell_size_meters: float = DU.CELL_SIZE_METERS) -> float:
+	return minf(float(clamp_view_distance_meters(value)), DU.HLOD_START)
 
 
 static func distant_stream_radius_cells_for_view_distance_meters(value: int, max_radius_cells: int, cell_size_meters: float = DU.CELL_SIZE_METERS) -> int:

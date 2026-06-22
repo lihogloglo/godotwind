@@ -446,6 +446,45 @@ func test_cell_manager_exterior_async_prefers_world_manifest_without_legacy_cell
 	assert_int(int(payload.stats.get("light_refs", 0))).is_equal(1)
 
 
+func test_cell_manager_static_visual_profile_excludes_gameplay_records() -> void:
+	var source := FakeWorldSource.new()
+	var manager: Variant = CellManagerScript.new()
+	manager.set_world_source(source)
+	manager.set_background_processor(FakeBackgroundProcessor.new())
+
+	var request_id: int = manager.request_world_cell_async(
+		Vector2i.ZERO,
+		CellManagerScript.LoadProfile.exterior_static_visuals_only()
+	)
+
+	assert_int(request_id).is_greater(0)
+	manager._process_request_classification_queue(100000, 10)
+	var payload: Variant = manager.get_async_payload(request_id)
+	assert_object(payload).is_not_null()
+	assert_int(int(payload.stats.get("interactive_refs", 0))).is_equal(0)
+	assert_int(int(payload.stats.get("light_refs", 0))).is_equal(0)
+	assert_int(manager.get_instantiation_queue_size()).is_equal(0)
+
+
+func test_cell_manager_gameplay_profile_excludes_static_only_records() -> void:
+	var source := FakeWorldSource.new()
+	var manager: Variant = CellManagerScript.new()
+	manager.set_world_source(source)
+	manager.set_background_processor(FakeBackgroundProcessor.new())
+
+	var request_id: int = manager.request_world_cell_async(
+		Vector2i.ZERO,
+		CellManagerScript.LoadProfile.exterior_gameplay_only()
+	)
+
+	assert_int(request_id).is_greater(0)
+	manager._process_request_classification_queue(100000, 10)
+	var payload: Variant = manager.get_async_payload(request_id)
+	assert_object(payload).is_not_null()
+	assert_int(int(payload.stats.get("interactive_refs", 0))).is_equal(2)
+	assert_int(int(payload.stats.get("light_refs", 0))).is_equal(1)
+
+
 func test_cell_manager_sync_exterior_uses_world_manifest_without_legacy_cell() -> void:
 	var source := FakeWorldSource.new()
 	var object_source: FakeObjectSource = source.get_object_source() as FakeObjectSource

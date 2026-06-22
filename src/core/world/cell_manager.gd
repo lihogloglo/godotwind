@@ -897,6 +897,8 @@ class LoadProfile:
 	## Must be OFF for interior pockets — RS instances render at ESM world
 	## position and ignore the pocket Y=-500 offset + INTERIOR_RENDER_LAYERS.
 	var use_static_renderer: bool = true
+	var include_gameplay: bool = true
+	var include_static_visuals: bool = true
 	## NPC/creature distance cull from camera. 0.0 disables the check — needed
 	## for interior pockets because the camera is at the exterior position
 	## during pocket load but interior actors use small cell-local coordinates.
@@ -909,6 +911,18 @@ class LoadProfile:
 
 	static func exterior_default() -> LoadProfile:
 		return LoadProfile.new()
+
+	static func exterior_static_visuals_only() -> LoadProfile:
+		var p := LoadProfile.new()
+		p.include_gameplay = false
+		p.include_static_visuals = true
+		return p
+
+	static func exterior_gameplay_only() -> LoadProfile:
+		var p := LoadProfile.new()
+		p.include_gameplay = true
+		p.include_static_visuals = false
+		return p
 
 	static func interior_pocket() -> LoadProfile:
 		var p := LoadProfile.new()
@@ -1052,6 +1066,24 @@ var _frame_inst_light_modelload_us: int = 0
 var _frame_inst_container_us: int = 0
 var _frame_inst_activator_us: int = 0
 var _frame_inst_static_us: int = 0
+var _frame_inst_total_us: int = 0
+var _frame_inst_collision_dispatch_us: int = 0
+var _frame_inst_classify_us: int = 0
+var _frame_inst_model_request_start_us: int = 0
+var _frame_inst_disk_us: int = 0
+var _frame_inst_model_loader_total_us: int = 0
+var _frame_inst_model_loader_phase_a_us: int = 0
+var _frame_inst_model_loader_phase_b_us: int = 0
+var _frame_inst_model_loader_get_us: int = 0
+var _frame_inst_model_loader_deferred_us: int = 0
+var _frame_inst_model_loader_completed: int = 0
+var _frame_inst_model_loader_get_count: int = 0
+var _frame_inst_model_loader_status_polls: int = 0
+var _frame_inst_conversion_us: int = 0
+var _frame_inst_prewarm_us: int = 0
+var _frame_inst_attach_us: int = 0
+var _frame_inst_loop_us: int = 0
+var _frame_inst_collision_finalize_us: int = 0
 
 ## Camera position for distance-based prioritization
 var _camera_position: Vector3 = Vector3.ZERO
@@ -1198,7 +1230,9 @@ func _should_prepare_static_ref(
 	match type_name:
 		"door", "activator", "container", "light":
 			return false
-	if type_name != "static" and not _instantiator._is_static_render_model(model_path):
+	if type_name == "static":
+		return true
+	if not _instantiator._is_static_render_model(model_path):
 		return false
 	var cached_max_dim := _get_cached_model_max_dimension(model_path, item_id)
 	if cached_max_dim > 0.0:
@@ -1232,14 +1266,17 @@ func _should_prepare_static_record(record: RefCounted, model_path: String, profi
 		effective_use_static = profile.use_static_renderer
 	if not effective_use_static:
 		return false
+	var source_type := str(record.get("source_type"))
+	if source_type.is_empty():
+		source_type = _type_name_for_record(record)
+	var spawn_route := int(record.get("spawn_route"))
+	if source_type == "static" or spawn_route == WorldObjectRecordScript.SpawnRoute.STATIC_BATCH:
+		return true
 	if not _instantiator._is_static_render_model(model_path):
 		return false
 	var cached_max_dim := _get_cached_model_max_dimension(model_path, item_id)
 	if cached_max_dim > 0.0:
 		return _is_model_dimension_mid_worthy_for_record(cached_max_dim, record)
-	var source_type := str(record.get("source_type"))
-	if source_type.is_empty():
-		source_type = _type_name_for_record(record)
 	return StreamingPolicyScript.is_mid_worthy(source_type, model_path)
 
 
@@ -1380,18 +1417,17 @@ func _pin_payload_cached_scene(request: AsyncCellRequest, model_path: String, it
 		return
 	var key := CellPayloadScript.make_model_key(model_path, item_id)
 	var already_pinned := request.payload.resource_refs_by_key.has(key)
-	if _model_loader.has_method("get_cached_resource_handle"):
-		var handle: RefCounted = _model_loader.call("get_cached_resource_handle", model_path, item_id) as RefCounted
-		if handle != null:
-			request.payload.pin_model_handle(model_path, item_id, handle)
-			if not already_pinned and _model_loader.has_method("pin_cached_model"):
-				_model_loader.call("pin_cached_model", model_path, item_id, _cache_pin_owner_for_request(request.request_id))
-			return
+	var handle := _model_loader.get_cached_resource_handle(model_path, item_id)
+	if handle != null:
+		request.payload.pin_model_handle(model_path, item_id, handle)
+		if not already_pinned:
+			_model_loader.pin_cached_model(model_path, item_id, _cache_pin_owner_for_request(request.request_id))
+		return
 	var packed_scene: PackedScene = _model_loader.get_cached_packed_scene(model_path, item_id)
 	if packed_scene != null:
 		request.payload.pin_model_resource(model_path, item_id, packed_scene)
-		if not already_pinned and _model_loader.has_method("pin_cached_model"):
-			_model_loader.call("pin_cached_model", model_path, item_id, _cache_pin_owner_for_request(request.request_id))
+		if not already_pinned:
+			_model_loader.pin_cached_model(model_path, item_id, _cache_pin_owner_for_request(request.request_id))
 
 
 func _cache_pin_owner_for_request(request_id: int) -> String:
@@ -1401,8 +1437,7 @@ func _cache_pin_owner_for_request(request_id: int) -> String:
 func _unpin_payload_cached_scenes(request: AsyncCellRequest) -> void:
 	if request == null or _model_loader == null:
 		return
-	if _model_loader.has_method("unpin_cache_owner"):
-		_model_loader.call("unpin_cache_owner", _cache_pin_owner_for_request(request.request_id))
+	_model_loader.unpin_cache_owner(_cache_pin_owner_for_request(request.request_id))
 	if request.payload != null and request.payload.has_method("release_resource_handles"):
 		request.payload.release_resource_handles()
 
@@ -1623,12 +1658,9 @@ func _process_static_prepare_entry(entry: Dictionary, deadline_usec: int = 0) ->
 		if packed_scene == null:
 			_static_prepare_failed[type_name] = true
 			return STATIC_PREPARE_ENTRY_SKIPPED
-		if _model_loader.has_method("get_cached_resource_handle"):
-			var handle: RefCounted = _model_loader.call("get_cached_resource_handle", model_path, item_id) as RefCounted
-			if handle != null:
-				request.payload.pin_model_handle(model_path, item_id, handle)
-			else:
-				request.payload.pin_model_resource(model_path, item_id, packed_scene)
+		var handle := _model_loader.get_cached_resource_handle(model_path, item_id)
+		if handle != null:
+			request.payload.pin_model_handle(model_path, item_id, handle)
 		else:
 			request.payload.pin_model_resource(model_path, item_id, packed_scene)
 
@@ -1918,6 +1950,8 @@ func _classify_request_refs(
 				item_id,
 				ref,
 			)
+		if request.load_profile != null and not request.load_profile.include_gameplay and not static_route:
+			continue
 		var load_item_id := ""
 		if using_world_objects:
 			load_item_id = str(object_record.get("cache_item_id"))
@@ -2254,16 +2288,64 @@ func _static_entry_waiting_for_prepare(entry: InstantiationEntry) -> bool:
 	if not SC.STATIC_PREPARE_ENABLED:
 		return false
 	if entry.static_prepare_key.is_empty():
-		return false
+		entry.static_prepare_key = _static_prepare_key_for_entry(entry)
+		if entry.static_prepare_key.is_empty():
+			return false
 	if bool(_static_prepare_failed.get(entry.static_prepare_key, false)):
 		entry.static_prepare_failed = true
 		return false
 	if _static_renderer == null:
 		return false
-	if _static_renderer.call("has_type", entry.static_prepare_key):
+	var expected_count := _get_static_expected_count_for_request(entry.request_id, entry.model_path, entry.cache_item_id)
+	if _static_renderer.call("has_type", entry.static_prepare_key) and expected_count <= 0:
 		return false
 	_enqueue_static_prepare(entry.request_id, entry.model_path, entry.cache_item_id)
 	return true
+
+
+func _static_entry_bucket_ready(entry: InstantiationEntry, request: AsyncCellRequest) -> bool:
+	if entry == null or request == null or request.payload == null:
+		return false
+	if entry.static_prepare_key.is_empty():
+		entry.static_prepare_key = _static_prepare_key_for_entry(entry)
+		if entry.static_prepare_key.is_empty():
+			return false
+	var payload_key := CellPayloadScript.make_model_key(entry.model_path, entry.cache_item_id)
+	return request.payload.has_static_bucket(payload_key)
+
+
+func _static_prepare_key_for_entry(entry: InstantiationEntry) -> String:
+	if entry == null or entry.model_path.is_empty():
+		return ""
+	var normalized := entry.model_path.to_lower().replace("/", "\\")
+	var profile: LoadProfile = entry.load_profile
+	if profile == null and entry.request_id in _async_requests:
+		var request: AsyncCellRequest = _async_requests[entry.request_id]
+		profile = request.load_profile if request != null else null
+
+	if entry.world_object_record != null:
+		var route := int(entry.world_object_record.get("spawn_route"))
+		if route == WorldObjectRecordScript.SpawnRoute.STATIC_BATCH:
+			return normalized
+		if _should_prepare_static_record(entry.world_object_record, entry.model_path, profile, entry.cache_item_id):
+			return normalized
+		return ""
+
+	if entry.ref == null:
+		return ""
+	var record_type: Array = [entry.type_name]
+	var base_record: Variant = _resolve_source_reference_base_record(entry.ref, record_type)
+	var type_name: String = record_type[0] if record_type.size() > 0 else entry.type_name
+	if base_record != null and _should_prepare_static_ref(
+		base_record,
+		type_name,
+		entry.model_path,
+		profile,
+		entry.cache_item_id,
+		entry.ref
+	):
+		return normalized
+	return ""
 
 
 ## Request async loading of an exterior cell
@@ -2290,16 +2372,10 @@ func request_world_cell_async(grid: Vector2i, profile: LoadProfile = null) -> in
 	if manifest == null:
 		return -1
 
-	var capability_mask: int = WorldObjectRecordScript.CAP_GAMEPLAY | WorldObjectRecordScript.CAP_STATIC_VISUAL
-	var objects: Array = []
-	if manifest.has_method("get_capable_objects"):
-		objects = manifest.call("get_capable_objects", capability_mask)
-	else:
-		for record: RefCounted in manifest.objects:
-			if (int(record.get("capability_flags")) & capability_mask) != 0:
-				objects.append(record)
+	var effective_profile := profile if profile else LoadProfile.exterior_default()
+	var objects := _get_manifest_objects_for_profile(manifest, effective_profile)
 
-	var request_id := _start_async_request(null, grid, false, profile, objects, true)
+	var request_id := _start_async_request(null, grid, false, effective_profile, objects, true)
 	if request_id > 0:
 		_increment_route_usage_stat("async_world_manifest_requests")
 	return request_id
@@ -2321,24 +2397,50 @@ func request_world_space_async(space_handle: RefCounted, profile: LoadProfile = 
 	if manifest == null:
 		return -1
 
-	var capability_mask: int = WorldObjectRecordScript.CAP_GAMEPLAY | WorldObjectRecordScript.CAP_STATIC_VISUAL
-	var objects: Array = []
-	if manifest.has_method("get_capable_objects"):
-		objects = manifest.call("get_capable_objects", capability_mask)
-	else:
-		for record: RefCounted in manifest.objects:
-			if (int(record.get("capability_flags")) & capability_mask) != 0:
-				objects.append(record)
+	var effective_profile := profile if profile else LoadProfile.exterior_default()
+	var objects := _get_manifest_objects_for_profile(manifest, effective_profile)
 
 	var grid: Vector2i = manifest.get("cell_grid") if manifest is Object else Vector2i.ZERO
 	var is_interior := bool(space_handle.call("is_interior")) if space_handle.has_method("is_interior") else false
-	var request_id := _start_async_request(null, grid, is_interior, profile, objects, true, str(space_handle.get("key")))
+	var request_id := _start_async_request(null, grid, is_interior, effective_profile, objects, true, str(space_handle.get("key")))
 	if request_id > 0:
 		if is_interior:
 			_increment_route_usage_stat("async_world_manifest_interior_requests")
 		else:
 			_increment_route_usage_stat("async_world_manifest_requests")
 	return request_id
+
+
+func _get_manifest_objects_for_profile(manifest: Variant, profile: LoadProfile) -> Array:
+	var capability_mask := _capability_mask_for_profile(profile)
+	if capability_mask == 0:
+		return []
+	var raw_objects: Array = []
+	if manifest.has_method("get_capable_objects"):
+		raw_objects = manifest.call("get_capable_objects", capability_mask)
+	else:
+		for record: RefCounted in manifest.objects:
+			if (int(record.get("capability_flags")) & capability_mask) != 0:
+				raw_objects.append(record)
+	if profile == null or profile.include_gameplay:
+		return raw_objects
+	var objects: Array = []
+	for record: RefCounted in raw_objects:
+		if record == null:
+			continue
+		if bool(record.get("static_batch_allowed")) \
+				or int(record.get("spawn_route")) == WorldObjectRecordScript.SpawnRoute.STATIC_BATCH:
+			objects.append(record)
+	return objects
+
+
+func _capability_mask_for_profile(profile: LoadProfile) -> int:
+	var mask := 0
+	if profile == null or profile.include_gameplay:
+		mask |= WorldObjectRecordScript.CAP_GAMEPLAY
+	if profile == null or profile.include_static_visuals:
+		mask |= WorldObjectRecordScript.CAP_STATIC_VISUAL
+	return mask
 
 
 ## Request async loading of an interior cell
@@ -2982,6 +3084,31 @@ func process_async_instantiation(
 	camera_fwd: Vector3 = Vector3.INF,
 	allow_collision_finalize: bool = true,
 ) -> int:
+	_frame_inst_door_us = 0
+	_frame_inst_light_us = 0
+	_frame_inst_light_modelload_us = 0
+	_frame_inst_container_us = 0
+	_frame_inst_activator_us = 0
+	_frame_inst_static_us = 0
+	_frame_inst_total_us = 0
+	_frame_inst_collision_dispatch_us = 0
+	_frame_inst_classify_us = 0
+	_frame_inst_model_request_start_us = 0
+	_frame_inst_disk_us = 0
+	_frame_inst_model_loader_total_us = 0
+	_frame_inst_model_loader_phase_a_us = 0
+	_frame_inst_model_loader_phase_b_us = 0
+	_frame_inst_model_loader_get_us = 0
+	_frame_inst_model_loader_deferred_us = 0
+	_frame_inst_model_loader_completed = 0
+	_frame_inst_model_loader_get_count = 0
+	_frame_inst_model_loader_status_polls = 0
+	_frame_inst_conversion_us = 0
+	_frame_inst_prewarm_us = 0
+	_frame_inst_attach_us = 0
+	_frame_inst_loop_us = 0
+	_frame_inst_collision_finalize_us = 0
+
 	# Update camera position/forward if provided
 	if camera_pos != Vector3.INF:
 		_camera_position = camera_pos
@@ -3010,6 +3137,7 @@ func process_async_instantiation(
 			SC.CELL_STATIC_COLLISION_DISPATCH_MAX_PER_FRAME,
 		)
 	var t_pre_collision := Time.get_ticks_usec()
+	_frame_inst_collision_dispatch_us = t_pre_collision - t_pre0
 
 	# Start budget clock BEFORE pre-loop work — collision dispatch, disk loads,
 	# conversions, and pool prewarm all consume frame time that must count
@@ -3027,6 +3155,7 @@ func process_async_instantiation(
 	var classify_budget_us: int = mini(int(classify_cap_ms * 1000.0), budget_usec_total)
 	var classified_refs := _process_request_classification_queue(classify_budget_us, classify_max_refs)
 	var t_pre_classify := Time.get_ticks_usec()
+	_frame_inst_classify_us = t_pre_classify - t_pre_collision
 
 	var request_start_elapsed_us := Time.get_ticks_usec() - start_time
 	var request_start_remaining_us: int = maxi(0, budget_usec_total - int(request_start_elapsed_us))
@@ -3038,6 +3167,7 @@ func process_async_instantiation(
 	var request_start_budget_us: int = mini(int(request_start_cap_ms * 1000.0), request_start_remaining_us)
 	var model_request_starts := _process_model_request_start_queue(request_start_budget_us, request_start_max)
 	var t_pre_request_start := Time.get_ticks_usec()
+	_frame_inst_model_request_start_us = t_pre_request_start - t_pre_classify
 
 	var disk_elapsed_us := Time.get_ticks_usec() - start_time
 	var disk_remaining_us: int = maxi(0, budget_usec_total - int(disk_elapsed_us))
@@ -3047,6 +3177,16 @@ func process_async_instantiation(
 	var disk_budget_us: int = mini(int(disk_cap_ms * 1000.0), disk_remaining_us)
 	process_async_disk_loads(disk_budget_us)
 	var t_pre_disk := Time.get_ticks_usec()
+	_frame_inst_disk_us = t_pre_disk - t_pre_request_start
+	var model_loader_times: Dictionary = _model_loader.get_last_async_load_times()
+	_frame_inst_model_loader_total_us = int(model_loader_times.get("total", 0))
+	_frame_inst_model_loader_phase_a_us = int(model_loader_times.get("phase_a", 0))
+	_frame_inst_model_loader_phase_b_us = int(model_loader_times.get("phase_b", 0))
+	_frame_inst_model_loader_get_us = int(model_loader_times.get("phase_b_get", 0))
+	_frame_inst_model_loader_deferred_us = int(model_loader_times.get("deferred", 0))
+	_frame_inst_model_loader_completed = int(model_loader_times.get("completed", 0))
+	_frame_inst_model_loader_get_count = int(model_loader_times.get("phase_b_get_count", 0))
+	_frame_inst_model_loader_status_polls = int(model_loader_times.get("status_polls", 0))
 
 	# Then process any pending conversions to feed the cache
 	# Runtime mode no-ops here, but keep the prebake path inside remaining time.
@@ -3054,12 +3194,14 @@ func process_async_instantiation(
 	var conversion_budget_ms := minf(budget_ms * 0.25, conv_remaining_ms)
 	process_pending_conversions(conversion_budget_ms)
 	var t_pre_conv := Time.get_ticks_usec()
+	_frame_inst_conversion_us = t_pre_conv - t_pre_disk
 
 	# Process pool pre-warming in background (only if budget permits)
 	var pre_loop_elapsed := float(Time.get_ticks_usec() - start_time) / 1000.0
 	if pool_prewarm_enabled and pre_loop_elapsed < budget_ms * 0.7:
 		_process_pool_prewarm()
 	var t_pre_prewarm := Time.get_ticks_usec()
+	_frame_inst_prewarm_us = t_pre_prewarm - t_pre_conv
 	var static_prepare_count := 0
 	var t_pre_static_prepare := Time.get_ticks_usec()
 
@@ -3090,13 +3232,16 @@ func process_async_instantiation(
 	)
 	var pre_attached_children := _drain_pending_child_attaches(SC.CHILD_ATTACH_MAX_PER_FRAME, attach_budget_pre)
 	attach_time_us += Time.get_ticks_usec() - attach_start
+	_frame_inst_attach_us = attach_time_us
 	if pre_attached_children > 0:
 		_finalize_requests_completed_by_child_attaches()
 
 	if _instantiation_queue.is_empty():
 		if not allow_collision_finalize:
+			_frame_inst_total_us = Time.get_ticks_usec() - t_pre0
 			return 0
-		_maybe_finalize_static_collision_when_idle(start_time, budget_usec)
+		_frame_inst_collision_finalize_us = _maybe_finalize_static_collision_when_idle(start_time, budget_usec)
+		_frame_inst_total_us = Time.get_ticks_usec() - t_pre0
 		return 0
 
 	# Sort queue by priority periodically (not every frame - too expensive)
@@ -3158,6 +3303,7 @@ func process_async_instantiation(
 	# and re-appended to the queue after the loop exits, so they get another
 	# chance next frame without spin-waiting. See phase_a_offthread_instantiate.md §3.3.
 	var phase_a_deferred: Array[InstantiationEntry] = []
+	var loop_start_us := Time.get_ticks_usec()
 
 	while not _instantiation_queue.is_empty():
 		# Check time budget
@@ -3218,6 +3364,11 @@ func process_async_instantiation(
 			route_deferred_count += 1
 			continue
 
+		if _static_entry_bucket_ready(entry, request):
+			request.pending_instantiations -= 1
+			if _is_request_complete(request):
+				_finalize_request(request)
+			continue
 		if _static_entry_waiting_for_prepare(entry):
 			phase_a_deferred.append(entry)
 			continue
@@ -3423,6 +3574,9 @@ func process_async_instantiation(
 	# back (ready for the next pop_back). _sort_queue_by_priority will
 	# re-sort on QUEUE_SORT_INTERVAL anyway, but this keeps the priority
 	# invariant between sorts.
+	var loop_end_us := Time.get_ticks_usec()
+	_frame_inst_loop_us = loop_end_us - loop_start_us
+
 	if not phase_a_deferred.is_empty():
 		for i in range(phase_a_deferred.size() - 1, -1, -1):
 			_instantiation_queue.push_back(phase_a_deferred[i])
@@ -3440,10 +3594,12 @@ func process_async_instantiation(
 		attach_budget_post
 	)
 	attach_time_us += Time.get_ticks_usec() - add_child_start
+	_frame_inst_attach_us = attach_time_us
 	if attached_children > 0:
 		_finalize_requests_completed_by_child_attaches()
 	if allow_collision_finalize:
 		collision_finalize_us = _maybe_finalize_static_collision_when_idle(start_time, budget_usec)
+	_frame_inst_collision_finalize_us = collision_finalize_us
 
 	# Fix B (streaming_stutter_2026_04_25 §11.4) — when this call exceeded a
 	# threshold, dump the pre-loop split so we can tell whether
@@ -3453,6 +3609,7 @@ func process_async_instantiation(
 	# not just the catastrophic class. 16 ms = one 60 fps frame.
 	var t_end_inst := Time.get_ticks_usec()
 	var total_inst_us := t_end_inst - t_pre0
+	_frame_inst_total_us = total_inst_us
 	if total_inst_us > 16_000:
 		Log.warn("streaming", "[inst-spike %.1fms] coll=%.1f class=%.1f/%d mreq=%.1f/%d disk=%.1f conv=%.1f prewarm=%.1f sprep=%.1f/%d dispatch=%.1f cfin=%.1f loop=%.1f addc=%.1f static=%.1f/%d light=%.1f/%d actor=%.1f/%d node=%.1f/%d wstatic=%.1f/%d wnode=%.1f/%d defer=%.1f/%d skip=%.1f/%d other=%.1f ml=%.1f sreg=%.1f sadd=%.1f wp=%d instantiated=%d queue=%d burst=%s" % [
 			total_inst_us / 1000.0,
@@ -4508,6 +4665,24 @@ func get_frame_inst_route_times() -> Dictionary:
 		"container": _frame_inst_container_us,
 		"activator": _frame_inst_activator_us,
 		"static": _frame_inst_static_us,
+		"total": _frame_inst_total_us,
+		"collision_dispatch": _frame_inst_collision_dispatch_us,
+		"classify": _frame_inst_classify_us,
+		"model_request_start": _frame_inst_model_request_start_us,
+		"disk": _frame_inst_disk_us,
+		"model_loader_total": _frame_inst_model_loader_total_us,
+		"model_loader_phase_a": _frame_inst_model_loader_phase_a_us,
+		"model_loader_phase_b": _frame_inst_model_loader_phase_b_us,
+		"model_loader_get": _frame_inst_model_loader_get_us,
+		"model_loader_deferred": _frame_inst_model_loader_deferred_us,
+		"model_loader_completed": _frame_inst_model_loader_completed,
+		"model_loader_get_count": _frame_inst_model_loader_get_count,
+		"model_loader_status_polls": _frame_inst_model_loader_status_polls,
+		"conversion": _frame_inst_conversion_us,
+		"prewarm": _frame_inst_prewarm_us,
+		"attach": _frame_inst_attach_us,
+		"loop": _frame_inst_loop_us,
+		"collision_finalize": _frame_inst_collision_finalize_us,
 	}
 
 

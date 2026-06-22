@@ -100,6 +100,9 @@ const RUNTIME_PROTOTYPE_WARMUP: bool = true
 ## reduction remains the production optimization path after correctness.
 const RUNTIME_FORCE_MERGE_ELIGIBLE_REFS: bool = true
 
+const MID_REPLACEMENT_MIN_BENEFIT_RATIO: float = 2.0
+const MID_REPLACEMENT_MIN_DRAW_GROUP_GAIN: int = 16
+
 ## Predictive paging queues the next HLOD ring in the movement direction so
 ## normal traversal does not discover cold chunks exactly at the tier boundary.
 const PREDICTIVE_STREAMING_ENABLED: bool = true
@@ -135,6 +138,7 @@ class PagingChunkData:
 	var refs_size_rejected: int = 0
 	var refs_surface_rejected: int = 0
 	var refs_type_rejected: int = 0
+	var refs_no_bucket_rejected: int = 0
 
 
 class MergePrepState:
@@ -148,11 +152,14 @@ class MergePrepState:
 	var source_object_ids: Dictionary = {}
 	var source_bucket_counts: Dictionary = {}
 	var bucket_total_counts: Dictionary = {}
+	var bucket_draw_group_counts: Dictionary = {}
 	var surface_estimate: int = 0
+	var suppressed_draw_group_estimate: int = 0
 	var refs_skipped: int = 0
 	var refs_size_rejected: int = 0
 	var refs_surface_rejected: int = 0
 	var refs_type_rejected: int = 0
+	var refs_no_bucket_rejected: int = 0
 	var refs_partial_bucket_rejected: int = 0
 	var size_cache_hits: int = 0
 	var cx: int = 0
@@ -182,6 +189,7 @@ var _globally_visible: bool = true
 var _visual_begin_floor: float = DEFAULT_VISUAL_BEGIN_FLOOR
 var _visual_end_cap: float = DU.HLOD_END
 var _visibility_fade_enabled: bool = false
+var _mid_replacement_cost_gate_enabled: bool = false
 
 ## Scenario RID for creating RS instances
 var _scenario: RID = RID()
@@ -287,6 +295,7 @@ var _stats: Dictionary = {
 	"refs_size_rejected": 0,   # Phase 2 — below projected-size threshold
 	"refs_surface_rejected": 0,
 	"refs_partial_bucket_rejected": 0,
+	"refs_no_bucket_rejected": 0,
 	"size_cache_hits": 0,      # Phase 2 — short-circuit AABB lookups
 	"size_cache_size": 0,      # Phase 2 — SizeCache entry count
 	"refs_type_rejected": 0,   # Phase 3a — rejected by record-type table
@@ -331,6 +340,14 @@ var _stats: Dictionary = {
 	"visual_begin_floor": DEFAULT_VISUAL_BEGIN_FLOOR,
 	"visual_end_cap": DU.HLOD_END,
 	"visibility_fade_enabled": false,
+	"mid_replacement_cost_gate_enabled": false,
+	"mid_object_paging_accepted_chunks": 0,
+	"mid_object_paging_rejected_chunks_cost": 0,
+	"mid_object_paging_rejected_chunks_partial": 0,
+	"mid_object_paging_rejected_chunks_missing_bucket": 0,
+	"mid_object_paging_suppressed_draw_groups": 0,
+	"mid_object_paging_proxy_surface_estimate": 0,
+	"mid_object_paging_refs_no_bucket_rejected": 0,
 	"mid_hlod_overlap_chunks": 0,
 	"nonvisual_chunks_suppressed": 0,
 	"active_covered_refs": 0,
@@ -454,7 +471,9 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 	# Plan §4.3 — top-down anti-overlap walk. Larger tiers claim their cells
 	# first; smaller tiers skip any chunk whose 1×1 sub-cells are covered.
 	var desired_chunks: Dictionary = _compute_desired_chunks(camera_cell, _camera_world_pos_cached)
-	var prefetch_chunks: Dictionary = _compute_predictive_prefetch_chunks(desired_chunks)
+	var prefetch_chunks: Dictionary = {}
+	if not _mid_replacement_cost_gate_enabled:
+		prefetch_chunks = _compute_predictive_prefetch_chunks(desired_chunks)
 	var combined_chunks: Dictionary = desired_chunks.duplicate()
 	for key: Vector3i in prefetch_chunks:
 		combined_chunks[key] = true
@@ -466,9 +485,9 @@ func update_for_camera(camera_cell: Vector2i, camera_world_pos: Vector3 = Vector
 		combined_chunks.size(), _active_chunks.size(), _pending_merges.size(), _merge_queue.size(), camera_cell])
 
 	# Phase 4d — on teleport, enqueue unregistered prototypes for the new ring.
-	if is_teleport:
+	if is_teleport and not _mid_replacement_cost_gate_enabled:
 		_prime_warmup_queue(desired_chunks)
-	elif not prefetch_chunks.is_empty():
+	elif not _mid_replacement_cost_gate_enabled and not prefetch_chunks.is_empty():
 		_prime_warmup_queue(prefetch_chunks)
 
 	var changed := 0
@@ -972,6 +991,11 @@ func set_visual_end_cap(distance_m: float) -> void:
 	_refresh_stats()
 
 
+func set_mid_replacement_cost_gate_enabled(enabled_value: bool) -> void:
+	_mid_replacement_cost_gate_enabled = enabled_value
+	_stats["mid_replacement_cost_gate_enabled"] = enabled_value
+
+
 func set_visibility_fade_enabled(enabled_value: bool) -> void:
 	_visibility_fade_enabled = enabled_value
 	for key: Vector3i in _active_chunks.keys():
@@ -1091,6 +1115,8 @@ func _compute_predictive_prefetch_chunks(current_desired: Dictionary) -> Diction
 ## desired chunk. Skips paths already enqueued in the current burst. Called
 ## exactly once per teleport event, from `update_for_camera`.
 func _prime_warmup_queue(desired_chunks: Dictionary) -> void:
+	if _mid_replacement_cost_gate_enabled:
+		return
 	if not RUNTIME_PROTOTYPE_WARMUP:
 		return
 	if not _static_renderer or _world_object_source == null:
@@ -1476,7 +1502,32 @@ func _process_merge_prepare(state: MergePrepState, start_usec: int, deadline_use
 		var payload_key := _make_static_payload_key(model_path)
 		var cell_grid := Vector2i(state.center_cell.x + state.cx, state.center_cell.y + state.cy)
 		var bucket_key := _make_bucket_key(cell_grid, payload_key)
-		state.bucket_total_counts[bucket_key] = int(state.bucket_total_counts.get(bucket_key, 0)) + 1
+		if _mid_replacement_cost_gate_enabled:
+			if state.size_level != 0 or not _static_renderer.has_method("get_cell_bucket_cost"):
+				state.refs_no_bucket_rejected += 1
+				_finish_merge_prepare(state)
+				return "done"
+			if not state.bucket_total_counts.has(bucket_key):
+				var bucket_cost: Dictionary = _static_renderer.call("get_cell_bucket_cost", bucket_key)
+				var bucket_exists := bool(bucket_cost.get("exists", false))
+				var bucket_pending := bool(bucket_cost.get("build_pending", false))
+				var bucket_instance_count := int(bucket_cost.get("instance_count", 0))
+				var bucket_draw_groups := int(bucket_cost.get("draw_group_count", 0))
+				var bucket_visibility_end := float(bucket_cost.get("effective_visibility_end", 0.0))
+				if (
+					not bucket_exists
+					or bucket_pending
+					or bucket_instance_count <= 0
+					or bucket_draw_groups <= 0
+					or bucket_visibility_end <= maxf(_visual_begin_floor, DU.NEAR_END)
+				):
+					state.refs_no_bucket_rejected += 1
+					_finish_merge_prepare(state)
+					return "done"
+				state.bucket_total_counts[bucket_key] = bucket_instance_count
+				state.bucket_draw_group_counts[bucket_key] = bucket_draw_groups
+		else:
+			state.bucket_total_counts[bucket_key] = int(state.bucket_total_counts.get(bucket_key, 0)) + 1
 		var cache_key: StringName = record.object_id
 		var scale_f: float = record.scale_scalar
 		var dist_sq: float = pos.distance_squared_to(state.camera_world_pos)
@@ -1515,6 +1566,10 @@ func _process_merge_prepare(state: MergePrepState, start_usec: int, deadline_use
 
 		var sub_meshes: Array = _static_renderer.get_sub_meshes(mesh_type_name)
 		if sub_meshes.is_empty():
+			if _mid_replacement_cost_gate_enabled:
+				state.refs_skipped += 1
+				state.ref_index += 1
+				continue
 			if _queue_warmup_model(model_path):
 				return "warmup"
 			state.refs_skipped += 1
@@ -1588,12 +1643,14 @@ func _build_manifest_for_state(state: MergePrepState) -> Dictionary:
 			and state.refs_surface_rejected == 0
 			and state.refs_partial_bucket_rejected == 0
 			and state.refs_type_rejected == 0
+			and state.refs_no_bucket_rejected == 0
 		),
 		"refs_accepted": state.inputs.size(),
 		"refs_skipped": state.refs_skipped,
 		"refs_size_rejected": state.refs_size_rejected,
 		"refs_surface_rejected": state.refs_surface_rejected,
 		"refs_partial_bucket_rejected": state.refs_partial_bucket_rejected,
+		"refs_no_bucket_rejected": state.refs_no_bucket_rejected,
 		"refs_type_rejected": state.refs_type_rejected,
 	}
 
@@ -1635,16 +1692,68 @@ func _apply_surface_budget(state: MergePrepState) -> void:
 	state.surface_estimate = surface_total
 
 
+func _estimate_mid_replacement_suppressed_draw_groups(state: MergePrepState) -> int:
+	var suppressed := 0
+	for bucket_key_value: Variant in state.source_bucket_counts.keys():
+		var bucket_key := str(bucket_key_value)
+		if not state.bucket_draw_group_counts.has(bucket_key):
+			return -1
+		var draw_groups := int(state.bucket_draw_group_counts.get(bucket_key, 0))
+		if draw_groups <= 0:
+			return -1
+		suppressed += draw_groups
+	return suppressed
+
+
+func _evaluate_mid_replacement_cost_gate(state: MergePrepState) -> String:
+	if not _mid_replacement_cost_gate_enabled:
+		return ""
+	if state.size_level != 0:
+		return "cost_gate"
+	if state.refs_no_bucket_rejected > 0:
+		return "cost_gate"
+	if state.refs_partial_bucket_rejected > 0:
+		return "partial_bucket"
+	if state.source_bucket_counts.is_empty():
+		return "cost_gate"
+
+	var suppressed := _estimate_mid_replacement_suppressed_draw_groups(state)
+	state.suppressed_draw_group_estimate = maxi(0, suppressed)
+	if suppressed <= 0:
+		return "cost_gate"
+
+	var proxy_surfaces := maxi(1, state.surface_estimate)
+	if float(suppressed) < float(proxy_surfaces) * MID_REPLACEMENT_MIN_BENEFIT_RATIO:
+		return "cost_gate"
+	if suppressed - proxy_surfaces < MID_REPLACEMENT_MIN_DRAW_GROUP_GAIN:
+		return "cost_gate"
+	return ""
+
+
 func _finish_merge_prepare(state: MergePrepState) -> void:
 	var key := state.key
 	_stats["total_refs_skipped"] += state.refs_skipped
 	_stats["refs_type_rejected"] += state.refs_type_rejected
 	_stats["size_cache_hits"] += state.size_cache_hits
+	_stats["refs_no_bucket_rejected"] += state.refs_no_bucket_rejected
+	_stats["mid_object_paging_refs_no_bucket_rejected"] = int(_stats.get("mid_object_paging_refs_no_bucket_rejected", 0)) + state.refs_no_bucket_rejected
 	_apply_surface_budget(state)
 	_stats["refs_size_rejected"] += state.refs_size_rejected
 	_stats["refs_surface_rejected"] += state.refs_surface_rejected
 	_update_complete_bucket_counts(state)
 	_stats["refs_partial_bucket_rejected"] += state.refs_partial_bucket_rejected
+
+	var cost_gate_rejection := _evaluate_mid_replacement_cost_gate(state)
+	if cost_gate_rejection == "partial_bucket":
+		_negative_chunks[key] = "partial_bucket"
+		_stats["mid_object_paging_rejected_chunks_partial"] = int(_stats.get("mid_object_paging_rejected_chunks_partial", 0)) + 1
+		return
+	if cost_gate_rejection == "cost_gate":
+		_negative_chunks[key] = "cost_gate"
+		_stats["mid_object_paging_rejected_chunks_cost"] = int(_stats.get("mid_object_paging_rejected_chunks_cost", 0)) + 1
+		if state.refs_no_bucket_rejected > 0 and state.inputs.is_empty():
+			_stats["mid_object_paging_rejected_chunks_missing_bucket"] = int(_stats.get("mid_object_paging_rejected_chunks_missing_bucket", 0)) + 1
+		return
 
 	# Cost-benefit minimum — sparse chunks aren't worth merging
 	if state.inputs.size() < MIN_REFS_TO_MERGE:
@@ -1668,6 +1777,10 @@ func _finish_merge_prepare(state: MergePrepState) -> void:
 	_next_generation += 1
 	_chunk_generations[key] = generation
 	_pending_manifests[key] = _build_manifest_for_state(state)
+	if _mid_replacement_cost_gate_enabled:
+		_stats["mid_object_paging_accepted_chunks"] = int(_stats.get("mid_object_paging_accepted_chunks", 0)) + 1
+		_stats["mid_object_paging_suppressed_draw_groups"] = int(_stats.get("mid_object_paging_suppressed_draw_groups", 0)) + state.suppressed_draw_group_estimate
+		_stats["mid_object_paging_proxy_surface_estimate"] = int(_stats.get("mid_object_paging_proxy_surface_estimate", 0)) + maxi(1, state.surface_estimate)
 	var task_id := _bg_processor.submit_task(
 		_merge_chunk_worker.bind(key, generation, state.inputs, chunk_origin),
 		priority_sq
@@ -1678,6 +1791,8 @@ func _finish_merge_prepare(state: MergePrepState) -> void:
 
 
 func _negative_reason_for_state(state: MergePrepState) -> String:
+	if _mid_replacement_cost_gate_enabled and state.refs_no_bucket_rejected > 0:
+		return "cost_gate"
 	if state.bucket_total_counts.is_empty():
 		return "empty"
 	if state.inputs.size() > 0:
@@ -1771,6 +1886,7 @@ func _create_rs_instance(key: Vector3i, mesh: ArrayMesh, estimated_bytes: int, m
 		data.refs_size_rejected = int(manifest.get("refs_size_rejected", 0))
 		data.refs_surface_rejected = int(manifest.get("refs_surface_rejected", 0))
 		data.refs_type_rejected = int(manifest.get("refs_type_rejected", 0))
+		data.refs_no_bucket_rejected = int(manifest.get("refs_no_bucket_rejected", 0))
 	_active_chunks[key] = data
 	_coverage_revision += 1
 	return true
@@ -2048,7 +2164,7 @@ func _refresh_stats() -> void:
 				negative_empty += 1
 			"sparse":
 				negative_sparse += 1
-			"filtered", "partial_bucket":
+			"filtered", "partial_bucket", "cost_gate":
 				negative_filtered += 1
 			"surface_cap":
 				negative_surface += 1
@@ -2063,6 +2179,7 @@ func _refresh_stats() -> void:
 	_stats["visual_begin_floor"] = _visual_begin_floor
 	_stats["visual_end_cap"] = _visual_end_cap
 	_stats["visibility_fade_enabled"] = _visibility_fade_enabled
+	_stats["mid_replacement_cost_gate_enabled"] = _mid_replacement_cost_gate_enabled
 
 #endregion
 

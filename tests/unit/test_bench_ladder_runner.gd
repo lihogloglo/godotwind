@@ -1,9 +1,9 @@
 ## Smoke tests for BenchLadderRunner — scenario-independent helpers.
 ##
 ## The full rung loop is a Godot _process behaviour driven by SubsystemToggles
-## + Performance monitors — exercised only at runtime via --bench-ladder. This
+## + StreamingBenchmark — exercised only at runtime via --bench-ladder. This
 ## suite guards the pure functions: rung labeling, cumulative flag derivation,
-## sample aggregation, JSON serialisation shape.
+## flyby summary normalization, JSON serialisation shape.
 extends GdUnitTestSuite
 
 const BenchLadderRunnerScript := preload("res://src/tools/bench_ladder_runner.gd")
@@ -58,57 +58,103 @@ func test_rung_beyond_ladder_label() -> void:
 	runner.free()
 
 
-func test_summarize_empty_samples() -> void:
+func test_summary_from_empty_flyby() -> void:
 	var runner := BenchLadderRunnerScript.new()
-	var summary: Dictionary = runner._summarize([])
-	assert_dict(summary).contains_key_value("samples", 0)
-	assert_int(summary.size()).is_equal(1)
+	var summary: Dictionary = runner._summary_from_flyby({})
+	assert_int(summary["samples"]).is_equal(0)
+	assert_float(summary["fps_avg"]).is_equal(0.0)
+	assert_float(summary["draws_avg"]).is_equal(0.0)
 	runner.free()
 
 
-func test_summarize_aggregates_and_maxes() -> void:
+func test_summary_from_flyby_preserves_streaming_results() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	var results := {
+		"total_frames": 1234,
+		"avg_fps": 72.5,
+		"avg_draw_calls": 345,
+		"p95_ms": 18.25,
+		"pub_static_visuals_spent_us_avg": 1200.0,
+		"segments": {"walk": {"avg": 14.0}},
+	}
+	var summary: Dictionary = runner._summary_from_flyby(results)
+	assert_int(summary["samples"]).is_equal(1234)
+	assert_float(summary["fps_avg"]).is_equal(72.5)
+	assert_float(summary["draws_avg"]).is_equal(345.0)
+	assert_float(summary["p95_ms"]).is_equal(18.25)
+	assert_float(summary["pub_static_visuals_spent_us_avg"]).is_equal(1200.0)
+	assert_bool((summary["segments"] as Dictionary).has("walk")).is_true()
+	runner.free()
+
+
+func test_summarize_publication_samples_reports_avg_and_max() -> void:
 	var runner := BenchLadderRunnerScript.new()
 	var samples: Array[Dictionary] = [
-		{
-			"fps": 55.0, "draws": 6000, "objs": 9000, "prims": 1_500_000,
-			"vram_mb": 2000.0, "mid_visible": 4000,
-			"hlod_cells": 8, "total_impostors": 40_000,
-		},
-		{
-			"fps": 65.0, "draws": 7000, "objs": 11_000, "prims": 2_500_000,
-			"vram_mb": 2100.0, "mid_visible": 5000,
-			"hlod_cells": 12, "total_impostors": 51_000,
-		},
+		{"pub_static_visuals_spent_us": 100.0, "pub_static_visuals_overrun_us": 0.0},
+		{"pub_static_visuals_spent_us": 300.0, "pub_static_visuals_overrun_us": 75.0},
 	]
-	var summary: Dictionary = runner._summarize(samples)
-	assert_int(summary["samples"]).is_equal(2)
-	assert_float(summary["fps_min"]).is_equal(55.0)
-	assert_float(summary["fps_max"]).is_equal(65.0)
-	assert_float(summary["fps_avg"]).is_equal_approx(60.0, 0.001)
-	assert_float(summary["draws_avg"]).is_equal_approx(6500.0, 0.001)
-	assert_float(summary["objs_avg"]).is_equal_approx(10_000.0, 0.001)
-	# _max fields pick the highest across samples regardless of ordering.
-	assert_float(summary["vram_mb_max"]).is_equal(2100.0)
-	assert_int(summary["mid_visible_max"]).is_equal(5000)
-	assert_bool(summary.has("registry_" + "slots_max")).is_false()
-	assert_bool(summary.has("registry_" + "batches_max")).is_false()
-	assert_int(summary["hlod_cells_max"]).is_equal(12)
-	assert_int(summary["impostors_max"]).is_equal(51_000)
+	var summary: Dictionary = runner._summarize_publication_samples(samples)
+	assert_int(summary["publication_samples"]).is_equal(2)
+	assert_float(summary["pub_static_visuals_spent_us_avg"]).is_equal(200.0)
+	assert_float(summary["pub_static_visuals_spent_us_max"]).is_equal(300.0)
+	assert_float(summary["pub_static_visuals_overrun_us_max"]).is_equal(75.0)
 	runner.free()
 
 
-func test_sample_once_per_second_dedup() -> void:
+func test_final_summary_rows_include_toggle_snapshot_and_publication_metrics() -> void:
 	var runner := BenchLadderRunnerScript.new()
-	var out: Array[Dictionary] = []
-	runner._sample_once_per_second(0.1, out)
-	runner._sample_once_per_second(0.5, out)
-	runner._sample_once_per_second(0.9, out)
-	assert_int(out.size()).is_equal(1)
-	runner._sample_once_per_second(1.0, out)
-	runner._sample_once_per_second(1.4, out)
-	assert_int(out.size()).is_equal(2)
-	runner._sample_once_per_second(14.9, out)
-	assert_int(out.size()).is_equal(3)
+	runner._rungs = [{
+		"rung": 3,
+		"label": "+static_visuals",
+		"enabled": ["terrain", "near_gameplay", "static_visuals"],
+		"toggle_state": {"terrain": true, "near_gameplay": true, "static_visuals": true, "hlod": false},
+		"summary": {
+			"fps_avg": 34.0,
+			"final_mid_stats": {
+				"cell_buckets": 80,
+				"bucket_draw_groups": 1200,
+				"bucket_rs_instances": 1200,
+			},
+			"final_mid_bucket_census": {
+				"singleton_draw_groups": 900,
+				"multimesh_draw_groups": 300,
+				"direct_rs_instances": 14,
+				"top_bucket_contributors_by_draw_groups": [{"bucket_key": "0,0:a", "draw_group_count": 5}],
+				"top_singleton_heavy_bucket_contributors": [{"bucket_key": "0,0:b", "singleton_draw_groups": 4}],
+				"direct_static_duplicate_candidate_count": 2,
+				"direct_static_duplicate_candidate_rs_instances": 3,
+				"top_direct_static_duplicate_candidates": [{"cell": "0,0", "type_name": "a", "rs_instances": 3}],
+				"per_cell_mid_hotspots": [{"cell": "0,0", "bucket_draw_groups": 5, "direct_rs_instances": 3}],
+			},
+			"final_streaming_stats": {
+				"desired_cell_count": 45,
+				"static_visual_only_cells": 32,
+				"gameplay_upgrade_requests": 4,
+			},
+			"pub_static_visuals_spent_us_avg": 2400.0,
+			"pub_static_visuals_overrun_us_max": 900.0,
+		},
+	}]
+	var final_summary: Dictionary = runner._build_final_summary()
+	var row: Dictionary = final_summary["rows"][0]
+	assert_bool((row["enabled"] as Array).has("static_visuals")).is_true()
+	assert_dict(row["toggle_state"]).contains_key_value("hlod", false)
+	assert_int(int(row["mid_cell_buckets"])).is_equal(80)
+	assert_int(int(row["mid_bucket_draw_groups"])).is_equal(1200)
+	assert_int(int(row["mid_singleton_draw_groups"])).is_equal(900)
+	assert_int(int(row["mid_direct_rs_instances"])).is_equal(14)
+	assert_int((row["mid_top_bucket_contributors_by_draw_groups"] as Array).size()).is_equal(1)
+	assert_str(str((row["mid_top_bucket_contributors_by_draw_groups"] as Array)[0]["bucket_key"])).is_equal("0,0:a")
+	assert_int((row["mid_top_singleton_heavy_bucket_contributors"] as Array).size()).is_equal(1)
+	assert_int(int(row["mid_direct_static_duplicate_candidate_count"])).is_equal(2)
+	assert_int(int(row["mid_direct_static_duplicate_candidate_rs_instances"])).is_equal(3)
+	assert_int((row["mid_top_direct_static_duplicate_candidates"] as Array).size()).is_equal(1)
+	assert_int((row["mid_per_cell_hotspots"] as Array).size()).is_equal(1)
+	assert_int(int(row["desired_cell_count"])).is_equal(45)
+	assert_int(int(row["static_visual_only_cells"])).is_equal(32)
+	assert_int(int(row["gameplay_upgrade_requests"])).is_equal(4)
+	assert_float(row["pub_static_visuals_spent_us_avg"]).is_equal(2400.0)
+	assert_float(row["pub_static_visuals_overrun_us_max"]).is_equal(900.0)
 	runner.free()
 
 
@@ -130,21 +176,83 @@ func test_ladder_add_order_covers_all_toggle_names() -> void:
 		).is_true()
 
 
+func test_max_rungs_parser_accepts_equals_form() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	var max_rungs: int = runner._parse_max_rungs(PackedStringArray([
+		"--bench-ladder",
+		"stamp",
+		"--bench-ladder-max-rungs=4",
+	]))
+	assert_int(max_rungs).is_equal(4)
+	runner.free()
+
+
+func test_max_rungs_parser_accepts_space_form() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	var max_rungs: int = runner._parse_max_rungs(PackedStringArray([
+		"--bench-ladder-max-rungs",
+		"3",
+	]))
+	assert_int(max_rungs).is_equal(3)
+	runner.free()
+
+
+func test_start_rung_parser_accepts_equals_form() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	var start_rung: int = runner._parse_start_rung(PackedStringArray([
+		"--bench-ladder",
+		"stamp",
+		"--bench-ladder-start-rung=3",
+	]))
+	assert_int(start_rung).is_equal(3)
+	runner.free()
+
+
+func test_start_rung_parser_accepts_space_form() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	var start_rung: int = runner._parse_start_rung(PackedStringArray([
+		"--bench-ladder-start-rung",
+		"2",
+	]))
+	assert_int(start_rung).is_equal(2)
+	runner.free()
+
+
+func test_effective_rung_count_clamps_to_ladder_bounds() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	var full_count: int = BenchLadderRunnerScript.LADDER_ADD_ORDER.size() + 1
+	assert_int(runner._effective_rung_count()).is_equal(full_count)
+	runner._max_rungs = 4
+	assert_int(runner._effective_rung_count()).is_equal(4)
+	runner._max_rungs = 999
+	assert_int(runner._effective_rung_count()).is_equal(full_count)
+	runner.free()
+
+
+func test_effective_start_rung_clamps_to_effective_rungs() -> void:
+	var runner := BenchLadderRunnerScript.new()
+	runner._max_rungs = 4
+	runner._start_rung = 3
+	assert_int(runner._effective_start_rung()).is_equal(3)
+	runner._start_rung = 99
+	assert_int(runner._effective_start_rung()).is_equal(3)
+	runner._start_rung = -2
+	assert_int(runner._effective_start_rung()).is_equal(0)
+	runner.free()
+
+
 func test_summary_round_trips_through_json() -> void:
 	var runner := BenchLadderRunnerScript.new()
-	var samples: Array[Dictionary] = [
-		{
-			"fps": 60.0, "draws": 6500, "objs": 9500, "prims": 2_000_000,
-			"vram_mb": 2050.0, "mid_visible": 4500,
-			"hlod_cells": 10, "total_impostors": 45_000,
-		},
-	]
-	var summary: Dictionary = runner._summarize(samples)
+	var summary: Dictionary = runner._summary_from_flyby({
+		"total_frames": 900,
+		"avg_fps": 60.0,
+		"avg_draw_calls": 6500,
+	})
 	var text: String = JSON.stringify(summary)
 	assert_str(text).is_not_empty()
 	var parsed: Variant = JSON.parse_string(text)
 	assert_bool(parsed is Dictionary).is_true()
 	var pd: Dictionary = parsed as Dictionary
-	assert_int(int(pd["samples"])).is_equal(1)
+	assert_int(int(pd["samples"])).is_equal(900)
 	assert_float(float(pd["fps_avg"])).is_equal(60.0)
 	runner.free()

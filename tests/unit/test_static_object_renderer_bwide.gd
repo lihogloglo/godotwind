@@ -146,6 +146,22 @@ func test_packed_scene_registration_keeps_instance_material_override_on_submesh(
 	assert_int(sub.surface_materials.size()).is_equal(0)
 
 
+func test_packed_scene_single_visible_mesh_registers_non_empty_descriptor() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var packed := _build_packed_scene(mesh)
+	var status := renderer.request_register_from_packed_scene("test_single_visible_descriptor", packed)
+	assert_str(status).is_equal("ready")
+
+	var sub_meshes := renderer.get_sub_meshes("test_single_visible_descriptor")
+	assert_int(sub_meshes.size()).is_equal(1)
+	var sub: SOR.SubMeshEntry = sub_meshes[0]
+	assert_int(sub.mesh_resource.get_instance_id()).is_equal(mesh.get_instance_id())
+
+
 func test_packed_scene_surface_overrides_materialize_into_owned_mesh_copy() -> void:
 	var renderer := SOR.new()
 	auto_free(renderer)
@@ -236,6 +252,41 @@ func test_cell_spatial_index() -> void:
 	assert_that(far_promotable.size()).is_equal(0)
 
 
+func test_bucket_census_reports_direct_instance_breakdown() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_lod_mesh()
+	renderer.register_mesh_type("test_direct_a", mesh)
+	renderer.register_mesh_type("test_direct_b", mesh)
+
+	var _id_a0 := renderer.add_instance("test_direct_a", Transform3D.IDENTITY, Vector2i(0, 0))
+	var _id_a1 := renderer.add_instance("test_direct_a", Transform3D.IDENTITY, Vector2i(0, 0))
+	var _id_b0 := renderer.add_instance("test_direct_b", Transform3D.IDENTITY, Vector2i(1, 0))
+	var proxy_id := renderer.add_visual_proxy("container:test_proxy", "test_direct_a", Transform3D.IDENTITY, Vector2i(0, 0))
+	assert_that(proxy_id).is_greater_equal(0)
+
+	var census: Dictionary = renderer.get_bucket_census()
+	assert_int(int(census["direct_instances"])).is_equal(4)
+	assert_int(int(census["direct_rs_instances"])).is_equal(4)
+	assert_int(int(census["direct_visual_proxy_instances"])).is_equal(1)
+	assert_int(int(census["direct_visible_instances"])).is_equal(4)
+	assert_float(float(census["direct_visibility_range_begin"])).is_equal(0.0)
+	assert_float(float(census["direct_visibility_range_end"])).is_equal(DU.MID_END)
+
+	var top_types: Array = census["top_direct_types_by_instances"]
+	assert_int(top_types.size()).is_greater_equal(2)
+	assert_str(str(top_types[0].get("type"))).is_equal("test_direct_a")
+	assert_int(int(top_types[0].get("instances"))).is_equal(3)
+	assert_int(int(top_types[0].get("visual_proxy_instances"))).is_equal(1)
+
+	var top_cells: Array = census["top_direct_cells_by_instances"]
+	assert_int(top_cells.size()).is_greater_equal(2)
+	assert_str(str(top_cells[0].get("cell"))).is_equal("0,0")
+	assert_int(int(top_cells[0].get("instances"))).is_equal(3)
+
+
 func test_register_lod_from_prototype_compat() -> void:
 	var renderer := SOR.new()
 	auto_free(renderer)
@@ -272,7 +323,7 @@ func test_hlod_covered_bucket_caps_mid_range() -> void:
 	auto_free(renderer)
 	add_child(renderer)
 
-	var mesh := _build_simple_mesh()
+	var mesh := _build_lod_mesh()
 	var proto := _build_prototype(mesh)
 	auto_free(proto)
 	add_child(proto)
@@ -293,9 +344,152 @@ func test_hlod_covered_bucket_caps_mid_range() -> void:
 
 	renderer.set_hlod_covered_bucket_counts({}, DU.HLOD_START)
 	stats = renderer.get_stats()
-	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.HLOD_START)
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.MID_END)
 	assert_int(int(stats["hlod_bucket_overrides"])).is_equal(0)
 	assert_int(int(stats["hlod_bucket_override_refs"])).is_equal(0)
+
+
+func test_cell_bucket_cost_reports_existing_bucket_draw_groups() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("test_cost_bucket", proto)
+	var bucket := renderer.create_cell_bucket(
+		"test_cost_bucket",
+		"meshes\\cost_bucket.nif",
+		[Transform3D.IDENTITY, Transform3D(Basis.IDENTITY, Vector3(2.0, 0.0, 0.0))],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+
+	var cost: Dictionary = renderer.get_cell_bucket_cost("0,0:meshes\\cost_bucket.nif")
+
+	assert_bool(bool(cost.get("exists", false))).is_true()
+	assert_bool(bool(cost.get("build_pending", true))).is_false()
+	assert_int(int(cost.get("instance_count", 0))).is_equal(2)
+	assert_int(int(cost.get("draw_group_count", 0))).is_equal(int(bucket.call("get_draw_group_count")))
+	assert_float(float(cost.get("effective_visibility_end", 0.0))).is_equal(DU.MID_END)
+	assert_str(str(cost.get("type_name", ""))).is_equal("test_cost_bucket")
+
+
+func test_cell_bucket_cost_reports_missing_bucket_without_creating() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var cost: Dictionary = renderer.get_cell_bucket_cost("9,9:missing.nif")
+	var stats: Dictionary = renderer.get_stats()
+
+	assert_bool(bool(cost.get("exists", true))).is_false()
+	assert_bool(bool(cost.get("build_pending", true))).is_false()
+	assert_int(int(cost.get("instance_count", -1))).is_equal(0)
+	assert_int(int(cost.get("draw_group_count", -1))).is_equal(0)
+	assert_int(int(stats.get("cell_buckets", -1))).is_equal(0)
+
+
+func test_clutter_cell_bucket_uses_screen_size_visibility_cutoff() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("flora_test_detail_cutoff", proto)
+	var bucket := renderer.create_cell_bucket(
+		"flora_test_detail_cutoff",
+		"meshes\\flora_detail_cutoff.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.SCREEN_SIZE_CUTOFF_RATIO)
+
+
+func test_architecture_cell_bucket_keeps_mid_visibility_range() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_simple_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("ex_hlaalu_bldg_01", proto)
+	var bucket := renderer.create_cell_bucket(
+		"ex_hlaalu_bldg_01",
+		"meshes\\x\\ex_hlaalu_bldg_01.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.MID_END)
+
+
+func test_large_ground_flora_cell_bucket_uses_detail_family_cutoff() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_lod_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("flora_bc_fern_02", proto)
+	var bucket := renderer.create_cell_bucket(
+		"flora_bc_fern_02",
+		"meshes\\f\\flora_bc_fern_02.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(SOR.DETAIL_CULL_FAMILY_MAX_CUTOFF)
+
+
+func test_flora_tree_cell_bucket_keeps_mid_visibility_range() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_lod_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("flora_tree_ai_06", proto)
+	var bucket := renderer.create_cell_bucket(
+		"flora_tree_ai_06",
+		"meshes\\f\\flora_tree_ai_06.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(DU.MID_END)
+
+
+func test_terrain_rock_cell_bucket_uses_detail_family_cutoff() -> void:
+	var renderer := SOR.new()
+	auto_free(renderer)
+	add_child(renderer)
+
+	var mesh := _build_lod_mesh()
+	var proto := _build_prototype(mesh)
+	auto_free(proto)
+	add_child(proto)
+	renderer.register_lod_from_prototype("terrain_rock_bc_18", proto)
+	var bucket := renderer.create_cell_bucket(
+		"terrain_rock_bc_18",
+		"meshes\\f\\terrain_rock_bc_18.nif",
+		[Transform3D.IDENTITY],
+		Vector2i(0, 0)
+	)
+	assert_that(bucket).is_not_null()
+	assert_float(float(bucket.get("visibility_range_end"))).is_equal(SOR.DETAIL_CULL_FAMILY_MAX_CUTOFF)
 
 
 func test_cell_bucket_uses_direct_rs_for_singleton_group() -> void:
@@ -322,6 +516,10 @@ func test_cell_bucket_uses_direct_rs_for_singleton_group() -> void:
 	assert_that(group.multimesh).is_null()
 	assert_that(group.instance_rid.is_valid()).is_true()
 	assert_int(int(group.instance_count)).is_equal(1)
+	var census: Dictionary = bucket.call("get_draw_group_census")
+	assert_int(int(census["singleton_draw_groups"])).is_equal(1)
+	assert_int(int(census["multimesh_draw_groups"])).is_equal(0)
+	assert_int(int(census["max_draw_group_instances"])).is_equal(1)
 
 
 func test_partial_hlod_bucket_coverage_keeps_mid_fallback() -> void:
@@ -374,6 +572,10 @@ func test_cell_bucket_uses_local_multimesh_for_close_repeated_group() -> void:
 	var group: Variant = groups[0]
 	assert_that(group.multimesh).is_not_null()
 	assert_int(int(group.instance_count)).is_equal(2)
+	var census: Dictionary = bucket.call("get_draw_group_census")
+	assert_int(int(census["singleton_draw_groups"])).is_equal(0)
+	assert_int(int(census["multimesh_draw_groups"])).is_equal(1)
+	assert_int(int(census["multimesh_instances"])).is_equal(2)
 
 
 func test_cell_bucket_multimesh_pack_buffer_matches_godot_transform3d_stride() -> void:
@@ -505,6 +707,12 @@ func test_cell_bucket_splits_repeated_groups_into_spatial_clusters() -> void:
 	var stats := renderer.get_stats()
 	assert_int(int(stats["bucket_draw_groups"])).is_equal(2)
 	assert_int(int(stats["bucket_rs_instances"])).is_equal(2)
+	var census: Dictionary = renderer.get_bucket_census()
+	assert_int(int(census["bucket_count"])).is_equal(1)
+	assert_int(int(census["singleton_draw_groups"])).is_equal(2)
+	assert_int(int(census["multimesh_draw_groups"])).is_equal(0)
+	assert_int(int(census["max_draw_group_instances"])).is_equal(1)
+	assert_int((census["top_cells_by_draw_groups"] as Array).size()).is_equal(1)
 
 	var groups: Array = bucket.get("draw_groups")
 	for group: Variant in groups:

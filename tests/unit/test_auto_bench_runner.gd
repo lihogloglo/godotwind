@@ -11,6 +11,12 @@ extends GdUnitTestSuite
 const AutoBenchRunnerScript := preload("res://src/tools/auto_bench_runner.gd")
 
 
+func test_settle_gate_is_bounded_for_moving_camera_benchmarks() -> void:
+	assert_float(AutoBenchRunnerScript.SETTLE_FPS_TARGET).is_equal(50.0)
+	assert_float(AutoBenchRunnerScript.SETTLE_WINDOW_SEC).is_equal(3.0)
+	assert_float(AutoBenchRunnerScript.SETTLE_FALLBACK_SEC).is_less_equal(60.0)
+
+
 func test_summarize_empty_samples() -> void:
 	var runner := AutoBenchRunnerScript.new()
 	var summary: Dictionary = runner._summarize([])
@@ -28,6 +34,12 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 		"chunks_tier_1": 4, "chunks_tier_2": 1,
 		"pub_static_visuals_spent_us": 1200,
 		"pub_near_gameplay_spent_us": 3400,
+		"inst_classify_us": 900,
+		"inst_model_loader_phase_a_us": 600,
+		"inst_model_loader_phase_b_us": 250,
+		"inst_model_loader_get_us": 200,
+		"inst_model_loader_completed": 2,
+		"inst_loop_us": 1700,
 	}]
 	var summary: Dictionary = runner._summarize(samples)
 	assert_int(summary["samples"]).is_equal(1)
@@ -44,6 +56,11 @@ func test_summarize_single_sample_reports_min_equals_max() -> void:
 	assert_float(summary["pub_static_visuals_spent_us_max"]).is_equal(1200.0)
 	assert_float(summary["pub_static_visuals_spent_us_avg"]).is_equal(1200.0)
 	assert_float(summary["pub_near_gameplay_spent_us_max"]).is_equal(3400.0)
+	assert_float(summary["inst_classify_us_max"]).is_equal(900.0)
+	assert_float(summary["inst_model_loader_phase_a_us_avg"]).is_equal(600.0)
+	assert_float(summary["inst_model_loader_get_us_max"]).is_equal(200.0)
+	assert_float(summary["inst_model_loader_completed_avg"]).is_equal(2.0)
+	assert_float(summary["inst_loop_us_avg"]).is_equal(1700.0)
 	runner.free()
 
 

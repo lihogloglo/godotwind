@@ -1,0 +1,4 @@
+interface:
+  display_name: "Fastospeedo"
+  short_description: "Continue measured FPS and stutter work"
+  default_prompt: "Use $fastospeedo to continue Godotwind FPS and cell-boundary stutter optimization."

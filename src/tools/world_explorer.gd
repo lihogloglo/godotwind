@@ -907,7 +907,8 @@ func _on_teleport_happened(_from_pos: Vector3, _to_pos: Vector3, distance: float
 	# perf-audit runs (we want to see the raw teleport-burst FPS trace,
 	# not 30 s of gated black screen).
 	for a in _runtime_cmdline_args():
-		if a == "--bench-auto" or a.begins_with("--bench-auto="):
+		if a == "--bench-auto" or a.begins_with("--bench-auto=") \
+				or a == "--bench-ladder" or a.begins_with("--bench-ladder="):
 			return
 	var predicate := Callable(native_streaming_manager, "is_inner_ring_ready")
 	var progress_fn := Callable(self, "_format_boot_progress")
@@ -981,7 +982,7 @@ func _maybe_start_bench_ladder() -> void:
 	runner.name = "BenchLadderRunner"
 	get_tree().root.add_child(runner)
 	runner.configure(
-		native_streaming_manager, cell_manager, camera, self, _subsystem_toggles, stamp
+		native_streaming_manager, cell_manager, camera, self, _subsystem_toggles, stamp, args
 	)
 	_log("[LADDER] started with stamp: %s" % (stamp if not stamp.is_empty() else "<auto>"))
 
@@ -2085,6 +2086,8 @@ func _setup_visibility_toggles() -> void:
 		"update_stats": _update_stats,
 	}
 	_ocean_controls = OceanControlsScript.new(ocean_callbacks)
+	_ocean_controls.show_ocean = false
+	_ocean_controls.set_all_water_enabled(false)
 
 	# Create weather controls
 	var weather_callbacks := {
@@ -2595,6 +2598,11 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("ocean", false)
 			_subsystem_toggles.set_flag("characters", false)
 			_log("[color=yellow]--hlod-only: visible HLOD + terrain isolation; FAR/environment OFF[/color]")
+		elif a == "--dev-mid-object-paging":
+			_subsystem_toggles.set_flag("hlod", false)
+			if native_streaming_manager and native_streaming_manager.has_method("set_dev_mid_object_paging_visible"):
+				native_streaming_manager.call("set_dev_mid_object_paging_visible", true)
+			_log("[color=yellow]--dev-mid-object-paging: ObjectPaging tier-0 covers MID 150-%dm; full HLOD OFF[/color]" % int(StreamingConfig.DU.HLOD_START))
 		elif a == "--far-only":
 			_subsystem_toggles.set_flag("terrain", true)
 			_subsystem_toggles.set_flag("near_gameplay", false)

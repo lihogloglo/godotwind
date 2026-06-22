@@ -545,6 +545,21 @@ func _get_async_requests() -> int:
 	return 0
 
 
+func _get_final_streaming_stats() -> Dictionary:
+	if not _streaming_manager:
+		return {}
+	var stats: Dictionary = _streaming_manager.get_stats()
+	return {
+		"loaded_cells": stats.get("loaded_cells", 0),
+		"desired_cell_count": stats.get("desired_cell_count", 0),
+		"resident_cell_containers": stats.get("resident_cell_containers", 0),
+		"effective_load_radius_cells": stats.get("effective_load_radius_cells", 0),
+		"target_cell_count": stats.get("target_cell_count", 0),
+		"static_visual_only_cells": stats.get("static_visual_only_cells", 0),
+		"gameplay_upgrade_requests": stats.get("gameplay_upgrade_requests", 0),
+	}
+
+
 func _get_mid_tier_stats() -> Dictionary:
 	if _streaming_manager and _streaming_manager.has_method("get_static_renderer_stats"):
 		return _streaming_manager.get_static_renderer_stats()
@@ -553,6 +568,18 @@ func _get_mid_tier_stats() -> Dictionary:
 		for child in _streaming_manager.get_children():
 			if child.has_method("get_stats"):
 				return child.get_stats()
+	return {}
+
+
+func _get_mid_tier_census() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_static_renderer_census"):
+		return _streaming_manager.call("get_static_renderer_census", 10)
+	return {}
+
+
+func _get_hlod_stats() -> Dictionary:
+	if _streaming_manager and _streaming_manager.has_method("get_hlod_stats"):
+		return _streaming_manager.call("get_hlod_stats")
 	return {}
 
 
@@ -782,6 +809,10 @@ func _calculate_results() -> Dictionary:
 		var seg_p99 := seg_times[int(seg_times.size() * 0.99)] if seg_times.size() > 1 else seg_times[0]
 		segment_data[SEGMENT_NAMES[seg_idx]] = {"avg": seg_avg, "p99": seg_p99, "frames": seg_times.size()}
 
+	var final_mid_stats := _get_mid_tier_stats()
+	var final_mid_bucket_census := _get_mid_tier_census()
+	var final_streaming_stats := _get_final_streaming_stats()
+	var final_hlod_stats := _get_hlod_stats()
 	return {
 		"total_frames": total_frames,
 		"total_time_s": total_time / 1000.0,
@@ -807,6 +838,17 @@ func _calculate_results() -> Dictionary:
 		"peak_vram_mb": peak_vram_mb,
 		"peak_texture_mb": peak_texture_mb,
 		"segments": segment_data,
+		"final_mid_stats": final_mid_stats,
+		"final_mid_bucket_census": final_mid_bucket_census,
+		"final_streaming_stats": final_streaming_stats,
+		"final_hlod_stats": final_hlod_stats,
+		"mid_object_paging_accepted_chunks": final_hlod_stats.get("mid_object_paging_accepted_chunks", 0),
+		"mid_object_paging_rejected_chunks_cost": final_hlod_stats.get("mid_object_paging_rejected_chunks_cost", 0),
+		"mid_object_paging_rejected_chunks_partial": final_hlod_stats.get("mid_object_paging_rejected_chunks_partial", 0),
+		"mid_object_paging_rejected_chunks_missing_bucket": final_hlod_stats.get("mid_object_paging_rejected_chunks_missing_bucket", 0),
+		"mid_object_paging_suppressed_draw_groups": final_hlod_stats.get("mid_object_paging_suppressed_draw_groups", 0),
+		"mid_object_paging_proxy_surface_estimate": final_hlod_stats.get("mid_object_paging_proxy_surface_estimate", 0),
+		"mid_object_paging_refs_no_bucket_rejected": final_hlod_stats.get("mid_object_paging_refs_no_bucket_rejected", 0),
 		"benchmark_mode_metadata": _get_benchmark_mode_metadata_snapshot(),
 	}
 
@@ -1099,6 +1141,13 @@ func _save_json_summary(results: Dictionary, toggle_state: Dictionary = {}) -> S
 		"avg_draw_calls": results.get("avg_draw_calls", 0),
 		"peak_draw_calls": results.get("peak_draw_calls", 0),
 		"peak_vram_mb": results.get("peak_vram_mb", 0.0),
+		"mid_object_paging_accepted_chunks": results.get("mid_object_paging_accepted_chunks", 0),
+		"mid_object_paging_rejected_chunks_cost": results.get("mid_object_paging_rejected_chunks_cost", 0),
+		"mid_object_paging_rejected_chunks_partial": results.get("mid_object_paging_rejected_chunks_partial", 0),
+		"mid_object_paging_rejected_chunks_missing_bucket": results.get("mid_object_paging_rejected_chunks_missing_bucket", 0),
+		"mid_object_paging_suppressed_draw_groups": results.get("mid_object_paging_suppressed_draw_groups", 0),
+		"mid_object_paging_proxy_surface_estimate": results.get("mid_object_paging_proxy_surface_estimate", 0),
+		"mid_object_paging_refs_no_bucket_rejected": results.get("mid_object_paging_refs_no_bucket_rejected", 0),
 		"total_frames": results.get("total_frames", 0),
 		"total_time_s": results.get("total_time_s", 0.0),
 		"benchmark_mode_metadata": results.get("benchmark_mode_metadata", _get_benchmark_mode_metadata_snapshot()),

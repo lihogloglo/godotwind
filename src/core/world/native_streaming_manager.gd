@@ -172,6 +172,7 @@ var _sync_fallback_frames: int = 0
 var _sync_fallback_cells_loaded: int = 0
 var _sync_fallback_last_frame: int = -1
 var _mid_tier_visible: bool = true
+var _dev_mid_object_paging_visible: bool = false
 var _world_source: RefCounted = null
 var _world_object_source: RefCounted = null
 var _world_object_spawn_adapter: RefCounted = null
@@ -186,6 +187,10 @@ var _loading_cells: Dictionary = {}
 
 ## Async request tracking: grid -> request_id
 var _async_requests: Dictionary[Vector2i, int] = {}
+var _loaded_cell_has_gameplay: Dictionary[Vector2i, bool] = {}
+var _gameplay_upgrade_requests: Dictionary[Vector2i, int] = {}
+var _pending_gameplay_upgrade_merges: Array[Dictionary] = []
+var _pending_gameplay_upgrade_merge_cells: Dictionary[Vector2i, bool] = {}
 
 ## Pending cells to load (priority queue, sorted farthest-first so pop_back gets nearest)
 var _pending_load_queue: Array[Vector2i] = []
@@ -891,13 +896,32 @@ func _effective_scene_load_distance_cap() -> float:
 	return max_load_distance if _mid_tier_visible else SC.NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP
 
 
+func _is_near_scene_cell(grid: Vector2i) -> bool:
+	if not _near_tier_visible:
+		return false
+	if absi(grid.x - _camera_cell.x) > SC.NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS:
+		return false
+	if absi(grid.y - _camera_cell.y) > SC.NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS:
+		return false
+	var near_cap := SC.NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP
+	return _cell_bounds_distance_squared_to_position(grid, _camera_position) <= near_cap * near_cap
+
+
+func _load_profile_for_cell(grid: Vector2i) -> Variant:
+	if _is_near_scene_cell(grid):
+		return CellManagerScript.LoadProfile.exterior_default()
+	if _mid_tier_visible:
+		return CellManagerScript.LoadProfile.exterior_static_visuals_only()
+	return CellManagerScript.LoadProfile.exterior_default()
+
+
 func _reconcile_distant_tier_loading() -> void:
 	if not _camera:
 		return
 	var tracking_frozen := _world_tracking_frozen
 	_camera_position = _frozen_camera_position if tracking_frozen else _camera.global_position
 	_camera_cell = _world_to_cell(_camera_position)
-	if _hlod_requested_visible and _hlod_merger:
+	if _object_paging_requested_visible() and _hlod_merger:
 		_hlod_merger.call("update_for_camera", _camera_cell, _camera_position, _camera_velocity_xz)
 		_hlod_needs_initial_update = false
 		_hlod_last_update_position = _camera_position
@@ -1227,7 +1251,7 @@ func _process(delta: float) -> void:
 	# Phase 2 stutter diag — bracket each unbracketed _process subsystem so the
 	# autopsy can attribute the BIG unattributed spikes (1.7s+) to whichever
 	# of these is actually responsible. Plan §11.4.
-	if _hlod_requested_visible and _hlod_merger:
+	if _object_paging_requested_visible() and _hlod_merger:
 		if prof: prof.begin_section("hlod_merger")
 		var hlod_slice := _claim_publication_slice(PUBLICATION_LANE_HLOD, HLOD_PUBLICATION_BUDGET_USEC)
 		var hlod_start := Time.get_ticks_usec()
@@ -1470,7 +1494,7 @@ func _process(delta: float) -> void:
 					_last_hlod_merger_usec / 1000.0,
 					_last_distant_light_usec / 1000.0
 				])
-				if _hlod_requested_visible and _hlod_merger:
+				if _object_paging_requested_visible() and _hlod_merger:
 					var hs: Dictionary = get_hlod_stats()
 					Log.info("streaming", "[audit HLOD +%.0fs] visual=%d desired=%d queued=%d preparing=%d pending=%d negative=%d warmup=%d warmup_async=%d warmup_pending=%d warmup_failed=%d merged=%d surfaces=%d refs=%d" % [
 						elapsed_s,
@@ -1589,26 +1613,26 @@ func _update_loaded_cells() -> void:
 
 	for grid: Vector2i in cells_to_load:
 		_cancel_pending_unload_cell(grid)
+	_queue_near_gameplay_upgrades(cells_to_load)
 
-	# Unload cells that are too far (with hysteresis)
-	# Load uses Chebyshev grid (square), so max Euclidean distance is the diagonal:
-	# sqrt(2) * radius * cell_size. Unload threshold must exceed this to prevent
-	# corner cells from oscillating between load/unload on each camera cell change.
+	# Unload cells that are too far, using the same cell-bounds distance as
+	# load selection plus hysteresis so MID corners do not linger as a square ring.
 	var cells_to_unload: Array[Vector2i] = []
-	var max_load_euclidean := float(load_radius_cells) * _cell_size_meters() * sqrt(2.0)
-	var unload_threshold_sq := (max_load_euclidean + SC.HYSTERESIS_MID) * (max_load_euclidean + SC.HYSTERESIS_MID)
+	var unload_hysteresis := SC.HYSTERESIS_MID if _mid_tier_visible else SC.HYSTERESIS_NEAR
+	var unload_distance := _effective_scene_load_distance_cap() + unload_hysteresis
+	var unload_threshold_sq := unload_distance * unload_distance
 
 	for grid: Vector2i in _loaded_cells:
 		if grid not in cells_to_load:
 			# Only unload if beyond hysteresis distance
-			if _cell_distance_squared(_camera_cell, grid) > unload_threshold_sq:
+			if _cell_bounds_distance_squared_to_position(grid, _camera_position) > unload_threshold_sq:
 				cells_to_unload.append(grid)
 
 	if debug_enabled and not cells_to_unload.is_empty():
 		_debug("Unloading %d cells" % cells_to_unload.size())
 
 	cells_to_unload.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return _cell_distance_squared(_camera_cell, a) < _cell_distance_squared(_camera_cell, b)
+		return _cell_bounds_distance_squared_to_position(a, _camera_position) < _cell_bounds_distance_squared_to_position(b, _camera_position)
 	)
 	for grid: Vector2i in cells_to_unload:
 		_queue_unload_cell(grid)
@@ -1679,17 +1703,36 @@ func _get_cells_in_radius(center: Vector2i, radius: int) -> Array[Vector2i]:
 		for dx in range(-effective_radius, effective_radius + 1):
 			var grid := Vector2i(center.x + dx, center.y + dy)
 			
-			# Check distance
-			var dist_sq := _cell_distance_squared(center, grid)
+			var dist_sq := _cell_bounds_distance_squared_to_position(grid, _camera_position)
 			if dist_sq <= max_dist_sq:
 				cells.append(grid)
 	
 	# Sort by distance (closest first)
 	cells.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
-		return _cell_distance_squared(center, a) < _cell_distance_squared(center, b)
+		return _cell_bounds_distance_squared_to_position(a, _camera_position) < _cell_bounds_distance_squared_to_position(b, _camera_position)
 	)
 	
 	return cells
+
+
+func _cell_bounds_distance_squared_to_position(grid: Vector2i, position: Vector3) -> float:
+	var cell_size := _cell_size_meters()
+	var origin := DU.cell_to_world_origin(grid)
+	var min_x := origin.x
+	var max_x := origin.x + cell_size
+	var min_z := origin.z - cell_size
+	var max_z := origin.z
+	var dx := 0.0
+	if position.x < min_x:
+		dx = min_x - position.x
+	elif position.x > max_x:
+		dx = position.x - max_x
+	var dz := 0.0
+	if position.z < min_z:
+		dz = min_z - position.z
+	elif position.z > max_z:
+		dz = position.z - max_z
+	return dx * dx + dz * dz
 
 #endregion
 
@@ -1703,7 +1746,8 @@ func _request_cell_async(grid: Vector2i) -> bool:
 		return false
 
 	# Submit async request
-	var request_id := _cell_manager.request_world_cell_async(grid) if _cell_manager.has_method("request_world_cell_async") else _cell_manager.request_exterior_cell_async(grid.x, grid.y)
+	var profile: Variant = _load_profile_for_cell(grid)
+	var request_id := _cell_manager.request_world_cell_async(grid, profile) if _cell_manager.has_method("request_world_cell_async") else _cell_manager.request_exterior_cell_async(grid.x, grid.y, profile)
 
 	if request_id < 0:
 		# Async not available (no background processor) or at capacity
@@ -1716,6 +1760,7 @@ func _request_cell_async(grid: Vector2i) -> bool:
 	# Track the request
 	_async_requests[grid] = request_id
 	_loading_cells[grid] = true
+	_loaded_cell_has_gameplay[grid] = bool(profile.get("include_gameplay"))
 
 	# Get the in-progress cell node and add it to scene immediately
 	# Objects will appear progressively as they are instantiated
@@ -1729,6 +1774,42 @@ func _request_cell_async(grid: Vector2i) -> bool:
 	cell_loading.emit(grid)
 	_debug("Async request %d submitted for cell %s" % [request_id, grid])
 	return true
+
+
+func _request_cell_gameplay_upgrade_async(grid: Vector2i) -> bool:
+	if grid in _gameplay_upgrade_requests:
+		return false
+	if bool(_pending_gameplay_upgrade_merge_cells.get(grid, false)):
+		return false
+	if grid not in _loaded_cells:
+		return false
+	if grid in _async_requests:
+		return false
+	var profile: Variant = CellManagerScript.LoadProfile.exterior_gameplay_only()
+	var request_id := _cell_manager.request_world_cell_async(grid, profile) if _cell_manager.has_method("request_world_cell_async") else _cell_manager.request_exterior_cell_async(grid.x, grid.y, profile)
+	if request_id < 0:
+		return false
+	_async_requests[grid] = request_id
+	_loading_cells[grid] = true
+	_gameplay_upgrade_requests[grid] = request_id
+	var cell_node := _cell_manager.get_async_cell_node(request_id)
+	if cell_node:
+		cell_node.visible = _near_tier_visible
+		_set_near_gameplay_active(cell_node, _near_tier_visible)
+	return true
+
+
+func _queue_near_gameplay_upgrades(cells_to_load: Array[Vector2i]) -> void:
+	if not _near_tier_visible:
+		return
+	for grid: Vector2i in cells_to_load:
+		if not _is_near_scene_cell(grid):
+			continue
+		if grid not in _loaded_cells:
+			continue
+		if bool(_loaded_cell_has_gameplay.get(grid, true)):
+			continue
+		_request_cell_gameplay_upgrade_async(grid)
 
 
 ## Load a cell synchronously (blocking - used as fallback)
@@ -1751,6 +1832,7 @@ func _load_cell_sync(grid: Vector2i) -> void:
 		# I.6 Phase 2 — re-home any orphans whose origin grid matches.
 		_rehome_persistent_nodes_for_cell(cell_node, grid)
 
+		_loaded_cell_has_gameplay[grid] = true
 		var object_count := _count_mesh_instances(cell_node)
 		_stats["loaded_cells"] = _loaded_cells.size()
 		_stats["total_objects"] += object_count
@@ -1854,6 +1936,8 @@ func _unload_cell(grid: Vector2i) -> void:
 
 	var cell_node: Node3D = _loaded_cells[grid]
 	_loaded_cells.erase(grid)
+	_loaded_cell_has_gameplay.erase(grid)
+	_gameplay_upgrade_requests.erase(grid)
 	_stats["loaded_cells"] = _loaded_cells.size()
 	var t_req := Time.get_ticks_usec()
 
@@ -2249,6 +2333,7 @@ func _process_payload_publish_steps(budget_usec: int) -> int:
 func _process_async_completions() -> void:
 	var completed_grids: Array[Vector2i] = []
 	var max_completions_per_frame := 1
+	_drain_pending_gameplay_upgrade_merges(SC.CHILD_ATTACH_MAX_PER_FRAME)
 
 	for grid: Vector2i in _async_requests:
 		if completed_grids.size() >= max_completions_per_frame:
@@ -2258,8 +2343,12 @@ func _process_async_completions() -> void:
 		if _cell_manager.is_async_complete(request_id):
 			# Request is complete - finalize
 			var cell_node := _cell_manager.get_async_result(request_id)
+			var is_gameplay_upgrade := int(_gameplay_upgrade_requests.get(grid, -1)) == request_id
 
 			if cell_node:
+				if is_gameplay_upgrade and grid in _loaded_cells:
+					_queue_gameplay_upgrade_merge(grid, cell_node)
+					cell_node = _loaded_cells[grid]
 				_configure_cell_visibility(cell_node)
 				cell_node.visible = _near_tier_visible
 				_set_near_gameplay_active(cell_node, _near_tier_visible)
@@ -2278,17 +2367,23 @@ func _process_async_completions() -> void:
 				var object_count := _count_mesh_instances(cell_node)
 				_stats["loaded_cells"] = _loaded_cells.size()
 				_stats["total_objects"] += object_count
+				var completed_has_gameplay := is_gameplay_upgrade or bool(_loaded_cell_has_gameplay.get(grid, true))
 
 				# Check for failed models
 				if _cell_manager.has_async_failed(request_id):
 					var failed_count := _cell_manager.get_async_failed_count(request_id)
 					_debug("Cell %s completed with %d failed models" % [grid, failed_count])
 
-				_log_pipeline_compile_for_cell_load(grid, object_count, "async")
-				cell_loaded.emit(grid, object_count)
-				if _cell_preloader != null:
-					_cell_preloader.notify_activated(grid)
-				_debug("Async cell %s completed with %d objects" % [grid, object_count])
+				if is_gameplay_upgrade:
+					_debug("Gameplay upgrade for cell %s completed with %d objects" % [grid, object_count])
+				elif completed_has_gameplay:
+					_log_pipeline_compile_for_cell_load(grid, object_count, "async")
+					cell_loaded.emit(grid, object_count)
+					if _cell_preloader != null:
+						_cell_preloader.notify_activated(grid)
+					_debug("Async cell %s completed with %d objects" % [grid, object_count])
+				else:
+					_debug("Static visuals for cell %s completed" % grid)
 			else:
 				_debug("Async cell %s returned null" % grid)
 
@@ -2298,9 +2393,63 @@ func _process_async_completions() -> void:
 	for grid in completed_grids:
 		_async_requests.erase(grid)
 		_loading_cells.erase(grid)
+		_gameplay_upgrade_requests.erase(grid)
 
 	if not completed_grids.is_empty():
 		stats_updated.emit(_stats)
+
+
+func _queue_gameplay_upgrade_merge(grid: Vector2i, upgrade_node: Node3D) -> void:
+	if upgrade_node == null:
+		return
+	var target: Node3D = _loaded_cells.get(grid, null)
+	if not is_instance_valid(target):
+		_loaded_cells[grid] = upgrade_node
+		_loaded_cell_has_gameplay[grid] = true
+		if upgrade_node.get_parent() != _world_container:
+			_world_container.add_child(upgrade_node)
+		return
+	_pending_gameplay_upgrade_merges.append({
+		"grid": grid,
+		"target": target,
+		"upgrade": upgrade_node,
+	})
+	_pending_gameplay_upgrade_merge_cells[grid] = true
+
+
+func _drain_pending_gameplay_upgrade_merges(max_children: int) -> int:
+	if _pending_gameplay_upgrade_merges.is_empty() or max_children <= 0:
+		return 0
+	var merged := 0
+	var kept: Array[Dictionary] = []
+	while not _pending_gameplay_upgrade_merges.is_empty() and merged < max_children:
+		var entry: Dictionary = _pending_gameplay_upgrade_merges.pop_front()
+		var grid: Vector2i = entry.get("grid", Vector2i.ZERO)
+		var target: Node3D = entry.get("target", null) as Node3D
+		var upgrade_node: Node3D = entry.get("upgrade", null) as Node3D
+		if not is_instance_valid(target) or not is_instance_valid(upgrade_node):
+			_pending_gameplay_upgrade_merge_cells.erase(grid)
+			continue
+		if upgrade_node.get_child_count() <= 0:
+			_set_near_gameplay_active(target, _near_tier_visible)
+			_loaded_cell_has_gameplay[grid] = true
+			_pending_gameplay_upgrade_merge_cells.erase(grid)
+			upgrade_node.queue_free()
+			continue
+		var child := upgrade_node.get_child(0)
+		upgrade_node.remove_child(child)
+		target.add_child(child)
+		merged += 1
+		if upgrade_node.get_child_count() > 0:
+			kept.append(entry)
+		else:
+			_set_near_gameplay_active(target, _near_tier_visible)
+			_loaded_cell_has_gameplay[grid] = true
+			_pending_gameplay_upgrade_merge_cells.erase(grid)
+			upgrade_node.queue_free()
+	for i in range(kept.size() - 1, -1, -1):
+		_pending_gameplay_upgrade_merges.push_front(kept[i])
+	return merged
 
 
 ## Process pending cell loads synchronously (blocking fallback)
@@ -2374,6 +2523,12 @@ func get_stats() -> Dictionary:
 	s["unload_queue_size"] = _pending_unload_queue.size()
 	s["unloading_cells"] = _unloading_cells.size()
 	s["async_requests"] = _async_requests.size()
+	s["gameplay_upgrade_requests"] = _gameplay_upgrade_requests.size()
+	var static_visual_only_cells := 0
+	for grid: Vector2i in _loaded_cell_has_gameplay:
+		if not bool(_loaded_cell_has_gameplay[grid]):
+			static_visual_only_cells += 1
+	s["static_visual_only_cells"] = static_visual_only_cells
 	s["loading_cells"] = _loading_cells.size()
 	s["async_loading_enabled"] = async_loading_enabled
 	s["sync_fallback_frames"] = _sync_fallback_frames
@@ -2491,6 +2646,13 @@ func get_stats() -> Dictionary:
 	s["hlod_far_page_overrides"] = hlod_stats.get("far_hlod_page_overrides", 0)
 	s["hlod_runtime_lod_generation_enabled"] = hlod_stats.get("runtime_lod_generation_enabled", false)
 	s["hlod_runtime_force_merge_eligible_refs"] = hlod_stats.get("runtime_force_merge_eligible_refs", false)
+	s["mid_object_paging_accepted_chunks"] = hlod_stats.get("mid_object_paging_accepted_chunks", 0)
+	s["mid_object_paging_rejected_chunks_cost"] = hlod_stats.get("mid_object_paging_rejected_chunks_cost", 0)
+	s["mid_object_paging_rejected_chunks_partial"] = hlod_stats.get("mid_object_paging_rejected_chunks_partial", 0)
+	s["mid_object_paging_rejected_chunks_missing_bucket"] = hlod_stats.get("mid_object_paging_rejected_chunks_missing_bucket", 0)
+	s["mid_object_paging_suppressed_draw_groups"] = hlod_stats.get("mid_object_paging_suppressed_draw_groups", 0)
+	s["mid_object_paging_proxy_surface_estimate"] = hlod_stats.get("mid_object_paging_proxy_surface_estimate", 0)
+	s["mid_object_paging_refs_no_bucket_rejected"] = hlod_stats.get("mid_object_paging_refs_no_bucket_rejected", 0)
 
 	return s
 
@@ -2514,10 +2676,14 @@ func get_benchmark_mode_metadata() -> Dictionary:
 	var hlod_active := is_hlod_active()
 	if hlod_requested:
 		parked_modes.append("runtime_hlod")
+	if _dev_mid_object_paging_visible:
+		parked_modes.append("dev_mid_object_paging")
+		invalid_reasons.append("dev_mid_object_paging_experiment")
 
 	var near_only := (
 		_near_tier_visible
 		and not _mid_tier_visible
+		and not _dev_mid_object_paging_visible
 		and not _impostors_requested_visible
 		and not hlod_requested
 		and not _distant_lights_requested_visible
@@ -2525,6 +2691,15 @@ func get_benchmark_mode_metadata() -> Dictionary:
 	var near_mid_only := (
 		_near_tier_visible
 		and _mid_tier_visible
+		and not _dev_mid_object_paging_visible
+		and not _impostors_requested_visible
+		and not hlod_requested
+		and not _distant_lights_requested_visible
+	)
+	var near_mid_dev_object_paging := (
+		_near_tier_visible
+		and _mid_tier_visible
+		and _dev_mid_object_paging_visible
 		and not _impostors_requested_visible
 		and not hlod_requested
 		and not _distant_lights_requested_visible
@@ -2547,6 +2722,8 @@ func get_benchmark_mode_metadata() -> Dictionary:
 	var mode_name := "custom"
 	if near_only:
 		mode_name = "near_only"
+	elif near_mid_dev_object_paging:
+		mode_name = "near_mid_dev_object_paging"
 	elif near_mid_only:
 		mode_name = "near_mid_only"
 	elif far_only:
@@ -2566,6 +2743,7 @@ func get_benchmark_mode_metadata() -> Dictionary:
 		"sync_fallback_last_frame": _sync_fallback_last_frame,
 		"near_gameplay": _near_tier_visible,
 		"static_visuals": _mid_tier_visible,
+		"dev_mid_object_paging": _dev_mid_object_paging_visible,
 		"hlod_requested": hlod_requested,
 		"hlod_active": hlod_active,
 		"far_impostors_requested": _impostors_requested_visible,
@@ -2574,6 +2752,7 @@ func get_benchmark_mode_metadata() -> Dictionary:
 		"distant_lights_active": distant_lights_active,
 		"near_only": near_only,
 		"near_mid_only": near_mid_only,
+		"near_mid_dev_object_paging": near_mid_dev_object_paging,
 		"far_only": far_only,
 		"hlod_only": hlod_only,
 	}
@@ -2701,6 +2880,12 @@ func get_profiler() -> StreamingProfilerScript:
 func get_static_renderer_stats() -> Dictionary:
 	if _static_renderer:
 		return _static_renderer.get_stats()
+	return {}
+
+
+func get_static_renderer_census(max_top_cells: int = 12) -> Dictionary:
+	if _static_renderer and _static_renderer.has_method("get_bucket_census"):
+		return _static_renderer.call("get_bucket_census", max_top_cells)
 	return {}
 
 
@@ -2931,6 +3116,7 @@ func is_cell_loaded(grid: Vector2i) -> bool:
 func set_mid_tier_visible(visible: bool) -> void:
 	_mid_tier_visible = visible
 	_apply_static_renderer_tier_visibility()
+	_apply_hlod_request()
 	if _initialized and _camera:
 		_update_loaded_cells()
 
@@ -3009,15 +3195,46 @@ func set_hlod_visible(visible: bool) -> void:
 	_apply_hlod_request()
 
 
+func set_dev_mid_object_paging_visible(visible: bool) -> void:
+	_dev_mid_object_paging_visible = visible
+	_apply_hlod_request()
+
+
+func _object_paging_requested_visible() -> bool:
+	return _hlod_requested_visible or (_dev_mid_object_paging_visible and _mid_tier_visible)
+
+
+func _object_paging_mid_replacement_active() -> bool:
+	return _dev_mid_object_paging_visible and not _hlod_requested_visible
+
+
+func _configure_object_paging_visual_range() -> void:
+	if not _hlod_merger:
+		return
+	if _object_paging_mid_replacement_active():
+		if _hlod_merger.has_method("set_mid_replacement_cost_gate_enabled"):
+			_hlod_merger.call("set_mid_replacement_cost_gate_enabled", true)
+		if _hlod_merger.has_method("set_visual_begin_floor"):
+			_hlod_merger.call("set_visual_begin_floor", DU.NEAR_END)
+		if _hlod_merger.has_method("set_visual_end_cap"):
+			_hlod_merger.call("set_visual_end_cap", DU.HLOD_START)
+		return
+	if _hlod_merger.has_method("set_mid_replacement_cost_gate_enabled"):
+		_hlod_merger.call("set_mid_replacement_cost_gate_enabled", false)
+	if _hlod_merger.has_method("set_visual_begin_floor"):
+		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
+	if _hlod_merger.has_method("set_visual_end_cap"):
+		_hlod_merger.call("set_visual_end_cap", minf(_distant_render_end_m, DU.HLOD_END))
+
+
 func _apply_hlod_request() -> void:
 	var effective_visible := false
-	if _hlod_requested_visible and _distant_render_end_m > DU.HLOD_START:
+	if _object_paging_requested_visible() and (_object_paging_mid_replacement_active() or _distant_render_end_m > DU.HLOD_START):
 		effective_visible = _ensure_hlod_merger()
 		if _hlod_merger:
 			_hlod_merger.set("enabled", effective_visible)
 			_hlod_merger.call("set_all_visible", effective_visible)
-			if _hlod_merger.has_method("set_visual_end_cap"):
-				_hlod_merger.call("set_visual_end_cap", minf(_distant_render_end_m, DU.HLOD_END))
+			_configure_object_paging_visual_range()
 	else:
 		_teardown_hlod_merger()
 		_sync_hlod_far_coverage(true)
@@ -3099,11 +3316,21 @@ func get_hlod_stats() -> Dictionary:
 			"total_teleports": 0,
 			"runtime_lod_generation_enabled": false,
 			"runtime_force_merge_eligible_refs": false,
+			"mid_replacement_cost_gate_enabled": false,
+			"mid_object_paging_accepted_chunks": 0,
+			"mid_object_paging_rejected_chunks_cost": 0,
+			"mid_object_paging_rejected_chunks_partial": 0,
+			"mid_object_paging_rejected_chunks_missing_bucket": 0,
+			"mid_object_paging_suppressed_draw_groups": 0,
+			"mid_object_paging_proxy_surface_estimate": 0,
+			"mid_object_paging_refs_no_bucket_rejected": 0,
+			"dev_mid_object_paging": _dev_mid_object_paging_visible,
 		}
 	var stats: Dictionary = _hlod_merger.call("get_stats")
 	stats["enabled"] = bool(_hlod_merger.get("enabled"))
 	stats["runtime_lod_generation_enabled"] = bool(stats.get("runtime_lod_generation_enabled", false))
 	stats["runtime_force_merge_eligible_refs"] = bool(stats.get("runtime_force_merge_eligible_refs", false))
+	stats["dev_mid_object_paging"] = _dev_mid_object_paging_visible
 	var far_begin := DU.FAR_START
 	var far_enabled := false
 	if _impostor_renderer and _impostor_renderer.has_method("get_stats"):
@@ -3135,19 +3362,19 @@ func get_hlod_chunk_debug_data() -> Array[Dictionary]:
 
 
 func _sync_hlod_far_coverage(force: bool = false) -> void:
-	var can_sync_far := _impostors_requested_visible and _impostor_renderer != null and (
+	var can_sync_far := not _object_paging_mid_replacement_active() and _impostors_requested_visible and _impostor_renderer != null and (
 		_impostor_renderer.has_method("set_hlod_covered_object_ids")
 	)
 	var can_sync_mid := _mid_tier_visible and _static_renderer != null and _static_renderer.has_method("set_hlod_covered_bucket_counts")
 	if not can_sync_far and not can_sync_mid:
 		_hlod_far_coverage_revision = -1
 		return
-	if not _hlod_requested_visible or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
+	if not _object_paging_requested_visible() or not _hlod_merger or not _hlod_merger.has_method("get_active_coverage_manifest"):
 		if force or _hlod_far_coverage_revision != -1:
 			if can_sync_far:
 				_impostor_renderer.call("set_hlod_covered_object_ids", {})
 			if can_sync_mid:
-				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.HLOD_START)
+				_static_renderer.call("set_hlod_covered_bucket_counts", {}, DU.NEAR_END if _object_paging_mid_replacement_active() else DU.HLOD_START)
 			_hlod_far_coverage_revision = -1
 		return
 
@@ -3165,7 +3392,11 @@ func _sync_hlod_far_coverage(force: bool = false) -> void:
 		var covered_objects: Dictionary = manifest.get("source_object_ids", {})
 		_impostor_renderer.call("set_hlod_covered_object_ids", covered_objects)
 	if can_sync_mid:
-		_static_renderer.call("set_hlod_covered_bucket_counts", manifest.get("complete_bucket_counts", manifest.get("source_bucket_counts", {})), DU.HLOD_START)
+		_static_renderer.call(
+			"set_hlod_covered_bucket_counts",
+			manifest.get("complete_bucket_counts", manifest.get("source_bucket_counts", {})),
+			DU.NEAR_END if _object_paging_mid_replacement_active() else DU.HLOD_START
+		)
 
 
 func _should_update_hlod() -> bool:
@@ -3202,6 +3433,7 @@ func _ensure_hlod_merger() -> bool:
 		_hlod_merger.call("set_coordinate_mapper", _coordinate_mapper)
 	if _hlod_merger.has_method("set_visual_begin_floor"):
 		_hlod_merger.call("set_visual_begin_floor", DU.HLOD_START)
+	_configure_object_paging_visual_range()
 	Log.info("streaming", "Runtime HLOD merger initialized lazily - MID bridge 150-%dm, HLOD visible %d-%dm, FAR starts at %dm, view cap=%dm" % [
 		int(DU.MID_END), int(DU.HLOD_START), int(minf(_distant_render_end_m, DU.HLOD_END)), int(DU.FAR_START), int(_distant_render_end_m)])
 	return true

@@ -129,6 +129,8 @@ func configure_step(deadline_usec: int) -> String:
 		return CONFIGURE_READY if not draw_groups.is_empty() else CONFIGURE_FAILED
 	var processed_clusters := 0
 	while _pending_sub_mesh_index < _pending_sub_meshes.size():
+		if Time.get_ticks_usec() >= deadline_usec:
+			return CONFIGURE_PENDING
 		if _pending_current_sub_mesh == null:
 			_pending_current_sub_mesh = _pending_sub_meshes[_pending_sub_mesh_index]
 			if _pending_current_sub_mesh == null or _pending_current_sub_mesh.mesh_resource == null:
@@ -189,6 +191,66 @@ func _clear_configure_state() -> void:
 
 func get_draw_group_count() -> int:
 	return draw_groups.size()
+
+
+func get_draw_group_census() -> Dictionary:
+	var singleton_draw_groups := 0
+	var singleton_instances := 0
+	var multimesh_draw_groups := 0
+	var multimesh_instances := 0
+	var max_draw_group_instances := 0
+	var contributors: Dictionary = {}
+	for group: DrawGroup in draw_groups:
+		var count := int(group.instance_count)
+		max_draw_group_instances = maxi(max_draw_group_instances, count)
+		var material_key := _draw_group_material_key(group)
+		var contributor_key := "%s|%s" % [type_name, material_key]
+		var contributor: Dictionary = contributors.get(contributor_key, {})
+		if contributor.is_empty():
+			contributor = {
+				"type": type_name,
+				"model": payload_key,
+				"material": material_key,
+				"instances": 0,
+				"draw_groups": 0,
+				"singleton_draw_groups": 0,
+				"singleton_instances": 0,
+				"multimesh_draw_groups": 0,
+				"multimesh_instances": 0,
+				"max_aabb_dimension": 0.0,
+			}
+		contributor["instances"] = int(contributor.get("instances", 0)) + count
+		contributor["draw_groups"] = int(contributor.get("draw_groups", 0)) + 1
+		contributor["max_aabb_dimension"] = maxf(
+			float(contributor.get("max_aabb_dimension", 0.0)),
+			_aabb_max_dimension(group.local_aabb)
+		)
+		if group.multimesh == null:
+			singleton_draw_groups += 1
+			singleton_instances += count
+			contributor["singleton_draw_groups"] = int(contributor.get("singleton_draw_groups", 0)) + 1
+			contributor["singleton_instances"] = int(contributor.get("singleton_instances", 0)) + count
+		else:
+			multimesh_draw_groups += 1
+			multimesh_instances += count
+			contributor["multimesh_draw_groups"] = int(contributor.get("multimesh_draw_groups", 0)) + 1
+			contributor["multimesh_instances"] = int(contributor.get("multimesh_instances", 0)) + count
+		contributors[contributor_key] = contributor
+	var contributor_rows: Array[Dictionary] = []
+	for contributor_value: Variant in contributors.values():
+		contributor_rows.append(contributor_value as Dictionary)
+	contributor_rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("draw_groups", 0)) > int(b.get("draw_groups", 0))
+	)
+	return {
+		"draw_groups": draw_groups.size(),
+		"singleton_draw_groups": singleton_draw_groups,
+		"singleton_instances": singleton_instances,
+		"multimesh_draw_groups": multimesh_draw_groups,
+		"multimesh_instances": multimesh_instances,
+		"max_draw_group_instances": max_draw_group_instances,
+		"contributors": contributor_rows,
+	}
 
 
 func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_end: float) -> void:
@@ -373,6 +435,36 @@ static func _get_valid_material_rid(material: Material) -> RID:
 	if material == null or not is_instance_valid(material):
 		return RID()
 	return material.get_rid()
+
+
+static func _draw_group_material_key(group: DrawGroup) -> String:
+	if group.material_resource != null and is_instance_valid(group.material_resource):
+		return _material_resource_key(group.material_resource)
+	var keys := PackedStringArray()
+	for material: Material in group.surface_materials:
+		if material != null and is_instance_valid(material):
+			keys.append(_material_resource_key(material))
+	if keys.is_empty() and group.mesh_resource != null and is_instance_valid(group.mesh_resource):
+		for surface_index in range(group.mesh_resource.get_surface_count()):
+			var material := group.mesh_resource.surface_get_material(surface_index)
+			if material != null and is_instance_valid(material):
+				keys.append(_material_resource_key(material))
+	if keys.is_empty():
+		return "<none>"
+	keys.sort()
+	return "|".join(keys)
+
+
+static func _material_resource_key(material: Material) -> String:
+	if not material.resource_path.is_empty():
+		return material.resource_path.to_lower()
+	if not material.resource_name.is_empty():
+		return material.resource_name
+	return "material#%d" % material.get_instance_id()
+
+
+static func _aabb_max_dimension(aabb: AABB) -> float:
+	return maxf(aabb.size.x, maxf(aabb.size.y, aabb.size.z))
 
 
 func _release_resource_owner() -> void:

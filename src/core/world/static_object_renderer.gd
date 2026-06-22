@@ -13,9 +13,9 @@
 ## + `lod_bias` - no sibling LOD nodes, no manual distance cascade, no
 ## per-LOD RS instances.
 ##
-## Buckets/direct fallback instances carry a hard-cull `visibility_range` at
-## MID_END for the default MID->FAR tier handoff; sub-LOD selection is fully
-## engine-driven.
+## Buckets carry the MID hard-cull range. Direct per-ref fallback instances
+## stay NEAR-bounded so MID buckets, not one-RID-per-ref statics, own the
+## 150m-400m band. Sub-LOD selection is fully engine-driven.
 ##
 ## Usage:
 ##   var renderer := StaticObjectRenderer.new()
@@ -31,6 +31,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 const SC := preload("res://src/core/world/streaming_config.gd")
 const CellStaticBucketScript := preload("res://src/core/world/cell_static_bucket.gd")
 const EXTERIOR_RENDER_LAYER_MASK := 1
+const DETAIL_CULL_FAMILY_MAX_CUTOFF: float = 320.0
 
 ## Registered mesh types: type_name -> MeshType
 var _mesh_types: Dictionary[String, MeshType] = {}
@@ -962,7 +963,7 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 		mesh_type.sub_meshes,
 		transforms,
 		_scenario,
-		_get_bucket_visibility_range_end(bucket_key, transforms.size()),
+		_get_bucket_visibility_range_end(bucket_key, transforms.size(), type_name),
 		_globally_visible,
 		resource_handle,
 		visibility_range_begin
@@ -1012,7 +1013,7 @@ func create_cell_bucket_budgeted(
 			mesh_type.sub_meshes,
 			transforms,
 			_scenario,
-			_get_bucket_visibility_range_end(bucket_key, transforms.size()),
+			_get_bucket_visibility_range_end(bucket_key, transforms.size(), type_name),
 			_globally_visible,
 			resource_handle,
 			visibility_range_begin
@@ -1060,13 +1061,16 @@ func _finalize_cell_bucket(bucket: RefCounted, type_name: String, _payload_key: 
 func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_end: float) -> void:
 	visibility_range_begin = maxf(0.0, p_visibility_range_begin)
 	visibility_range_end = p_visibility_range_end
+	var direct_begin := _get_direct_visibility_range_begin()
+	var direct_end := _get_direct_visibility_range_end()
 	for buckets: Array in _cell_buckets.values():
 		for bucket_value: Variant in buckets:
 			var bucket: RefCounted = bucket_value as RefCounted
 			if bucket != null and not bool(bucket.get("frozen")):
 				var bucket_key := str(bucket.get("bucket_key"))
 				var bucket_count := int(bucket.get("instance_count"))
-				var bucket_end := _get_bucket_visibility_range_end(bucket_key, bucket_count)
+				var bucket_type := str(bucket.get("type_name"))
+				var bucket_end := _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
 				if bucket.has_method("set_visibility_range"):
 					bucket.call("set_visibility_range", visibility_range_begin, bucket_end)
 				elif bucket.has_method("set_visibility_range_end"):
@@ -1077,8 +1081,8 @@ func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_en
 			if rid.is_valid():
 				RenderingServer.instance_geometry_set_visibility_range(
 					rid,
-					visibility_range_begin,
-					visibility_range_end,
+					direct_begin,
+					direct_end,
 					0.0,
 					DU.FADE_MARGIN_LOD3_FAR,
 					SC.MID_VISIBILITY_FADE_MODE
@@ -1110,7 +1114,8 @@ func _apply_bucket_visibility_ranges() -> void:
 				continue
 			var bucket_key := str(bucket.get("bucket_key"))
 			var bucket_count := int(bucket.get("instance_count"))
-			var target_end := _get_bucket_visibility_range_end(bucket_key, bucket_count)
+			var bucket_type := str(bucket.get("type_name"))
+			var target_end := _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
 			if bucket.has_method("set_visibility_range"):
 				bucket.call("set_visibility_range", visibility_range_begin, target_end)
 			elif bucket.has_method("set_visibility_range_end"):
@@ -1135,9 +1140,61 @@ func _refresh_hlod_bucket_override_stats() -> void:
 	_stats["hlod_bucket_override_refs"] = override_refs
 
 
-func _get_bucket_visibility_range_end(bucket_key: String, bucket_count: int) -> float:
+func _get_bucket_visibility_range_end(bucket_key: String, bucket_count: int, type_name: String = "") -> float:
+	var end := visibility_range_end
 	if bucket_count > 0 and int(_hlod_covered_bucket_counts.get(bucket_key, 0)) >= bucket_count:
-		return minf(visibility_range_end, _hlod_bucket_visibility_end)
+		end = minf(end, _hlod_bucket_visibility_end)
+	if not type_name.is_empty() and _allows_detail_visibility_cull(type_name):
+		end = minf(end, _get_type_detail_visibility_range_end(type_name))
+	return end
+
+
+func _allows_detail_visibility_cull(type_name: String) -> bool:
+	var lower := type_name.to_lower()
+	if _is_detail_vegetation_type(lower):
+		return true
+	return "terrain_rock_" in lower or "terrain_rocks_" in lower or ("rock_" in lower and "_small" in lower)
+
+
+func _get_type_detail_visibility_range_end(type_name: String) -> float:
+	if type_name not in _mesh_types:
+		return visibility_range_end
+	var mesh_type: MeshType = _mesh_types[type_name]
+	var size := mesh_type.aabb.size
+	var max_dim := maxf(size.x, maxf(size.y, size.z))
+	if max_dim <= 0.0:
+		return visibility_range_end
+	var cutoff := clampf(
+		max_dim * DU.SCREEN_SIZE_CUTOFF_RATIO,
+		DU.SCREEN_SIZE_MIN_CUTOFF,
+		DU.SCREEN_SIZE_MAX_CUTOFF
+	)
+	if _uses_detail_family_cutoff(type_name):
+		cutoff = minf(cutoff, DETAIL_CULL_FAMILY_MAX_CUTOFF)
+	return cutoff
+
+
+func _uses_detail_family_cutoff(type_name: String) -> bool:
+	var lower := type_name.to_lower()
+	return _is_detail_vegetation_type(lower) or "terrain_rock_" in lower or "terrain_rocks_" in lower
+
+
+func _is_detail_vegetation_type(lower_type_name: String) -> bool:
+	if not "flora_" in lower_type_name:
+		return false
+	return not (
+		"flora_tree" in lower_type_name
+		or "flora_ashtree" in lower_type_name
+		or "flora_emp_tree" in lower_type_name
+		or "flora_bc_tree" in lower_type_name
+	)
+
+
+func _get_direct_visibility_range_begin() -> float:
+	return visibility_range_begin
+
+
+func _get_direct_visibility_range_end() -> float:
 	return visibility_range_end
 
 
@@ -1160,11 +1217,36 @@ func get_cell_bucket_debug_info(bucket_key: String) -> Dictionary:
 		return result
 	result["exists"] = true
 	var bucket_count := int(bucket.get("instance_count"))
+	var bucket_type := str(bucket.get("type_name"))
 	var covered_count := int(_hlod_covered_bucket_counts.get(bucket_key, 0))
 	result["hlod_capped"] = bucket_count > 0 and covered_count >= bucket_count
-	result["target_visibility_range_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count)
+	result["target_visibility_range_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
 	if bucket.has_method("get_debug_info"):
 		result["bucket"] = bucket.call("get_debug_info")
+	return result
+
+
+func get_cell_bucket_cost(bucket_key: String) -> Dictionary:
+	var result: Dictionary = {
+		"bucket_key": bucket_key,
+		"exists": false,
+		"build_pending": _cell_bucket_build_tasks.has(bucket_key),
+		"instance_count": 0,
+		"draw_group_count": 0,
+		"effective_visibility_end": 0.0,
+		"type_name": "",
+	}
+	var bucket: RefCounted = _cell_bucket_key_index.get(bucket_key) as RefCounted
+	if bucket == null:
+		return result
+
+	var bucket_count := int(bucket.get("instance_count"))
+	var bucket_type := str(bucket.get("type_name"))
+	result["exists"] = true
+	result["instance_count"] = bucket_count
+	result["type_name"] = bucket_type
+	result["draw_group_count"] = int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
+	result["effective_visibility_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
 	return result
 
 
@@ -1279,7 +1361,7 @@ func _create_rs_instance(mesh_rid: RID, material_rid: RID,
 	# detail culling needs a coverage-aware replacement tier before it can ship.
 	rs.instance_geometry_set_visibility_range(
 		instance_rid,
-		visibility_range_begin, visibility_range_end,
+		_get_direct_visibility_range_begin(), _get_direct_visibility_range_end(),
 		0.0, DU.FADE_MARGIN_LOD3_FAR,
 		SC.MID_VISIBILITY_FADE_MODE
 	)
@@ -1738,6 +1820,436 @@ func get_stats() -> Dictionary:
 	result["mm_slots"] = 0
 	result["mm_cells"] = 0
 	return result
+
+
+func get_bucket_census(max_top_cells: int = 12) -> Dictionary:
+	var result: Dictionary = {
+		"cell_count": _cell_buckets.size(),
+		"bucket_count": int(_stats.get("cell_buckets", 0)),
+		"bucket_instances": int(_stats.get("bucket_instances", 0)),
+		"bucket_draw_groups": int(_stats.get("bucket_draw_groups", 0)),
+		"bucket_rs_instances": int(_stats.get("bucket_rs_instances", 0)),
+		"direct_instances": _instances.size(),
+		"direct_rs_instances": 0,
+		"direct_visible_instances": 0,
+		"direct_visual_proxy_instances": 0,
+		"direct_visibility_range_begin": _get_direct_visibility_range_begin(),
+		"direct_visibility_range_end": _get_direct_visibility_range_end(),
+		"max_direct_rs_instances_per_ref": 0,
+		"singleton_draw_groups": 0,
+		"singleton_instances": 0,
+		"multimesh_draw_groups": 0,
+		"multimesh_instances": 0,
+		"max_draw_group_instances": 0,
+		"avg_draw_groups_per_bucket": 0.0,
+		"avg_instances_per_bucket": 0.0,
+		"top_direct_types_by_instances": [] as Array[Dictionary],
+		"top_direct_cells_by_instances": [] as Array[Dictionary],
+		"top_cells_by_draw_groups": [] as Array[Dictionary],
+		"top_bucket_contributors_by_draw_groups": [] as Array[Dictionary],
+		"top_singleton_heavy_bucket_contributors": [] as Array[Dictionary],
+		"direct_static_duplicate_candidate_count": 0,
+		"direct_static_duplicate_candidate_rs_instances": 0,
+		"top_direct_static_duplicate_candidates": [] as Array[Dictionary],
+		"per_cell_mid_hotspots": [] as Array[Dictionary],
+		"source_ref_coverage_available": not _hlod_covered_bucket_counts.is_empty(),
+		"model_material_contributors": [] as Array[Dictionary],
+		"top_model_material_contributors": [] as Array[Dictionary],
+	}
+	var complete_bucket_keys := _complete_bucket_key_set()
+	var direct_rs_instances := 0
+	var direct_visible_instances := 0
+	var direct_visual_proxy_instances := 0
+	var max_direct_rs_instances_per_ref := 0
+	var direct_type_counts: Dictionary = {}
+	var direct_cell_counts: Dictionary = {}
+	var direct_contributor_counts: Dictionary = {}
+	var direct_duplicate_counts: Dictionary = {}
+	var cell_hotspots: Dictionary = {}
+	var direct_duplicate_candidate_count := 0
+	var direct_duplicate_candidate_rs_instances := 0
+	for data_value: Variant in _instances.values():
+		var data: InstanceData = data_value as InstanceData
+		if data != null:
+			var rs_count := data.sub_rids.size()
+			direct_rs_instances += rs_count
+			max_direct_rs_instances_per_ref = maxi(max_direct_rs_instances_per_ref, rs_count)
+			if data.visible:
+				direct_visible_instances += 1
+			if data.visual_proxy:
+				direct_visual_proxy_instances += 1
+
+			var type_key := data.type_name if not data.type_name.is_empty() else "<empty>"
+			var type_info: Dictionary = direct_type_counts.get(type_key, {})
+			if type_info.is_empty():
+				type_info = {
+					"type": type_key,
+					"instances": 0,
+					"rs_instances": 0,
+					"visual_proxy_instances": 0,
+				}
+			type_info["instances"] = int(type_info.get("instances", 0)) + 1
+			type_info["rs_instances"] = int(type_info.get("rs_instances", 0)) + rs_count
+			if data.visual_proxy:
+				type_info["visual_proxy_instances"] = int(type_info.get("visual_proxy_instances", 0)) + 1
+			direct_type_counts[type_key] = type_info
+			for material_key: String in _material_keys_for_type(type_key):
+				var contributor_key := _make_contributor_key(type_key, material_key)
+				direct_contributor_counts[contributor_key] = int(direct_contributor_counts.get(contributor_key, 0)) + 1
+
+			var cell_key := "%d,%d" % [data.cell_grid.x, data.cell_grid.y]
+			var cell_info: Dictionary = direct_cell_counts.get(cell_key, {})
+			if cell_info.is_empty():
+				cell_info = {
+					"cell": cell_key,
+					"instances": 0,
+					"rs_instances": 0,
+					"visual_proxy_instances": 0,
+				}
+			cell_info["instances"] = int(cell_info.get("instances", 0)) + 1
+			cell_info["rs_instances"] = int(cell_info.get("rs_instances", 0)) + rs_count
+			if data.visual_proxy:
+				cell_info["visual_proxy_instances"] = int(cell_info.get("visual_proxy_instances", 0)) + 1
+			direct_cell_counts[cell_key] = cell_info
+			var hotspot: Dictionary = cell_hotspots.get(cell_key, _empty_cell_hotspot(cell_key))
+			hotspot["direct_rs_instances"] = int(hotspot.get("direct_rs_instances", 0)) + rs_count
+			if data.visual_proxy:
+				hotspot["visual_proxy_instances"] = int(hotspot.get("visual_proxy_instances", 0)) + 1
+			cell_hotspots[cell_key] = hotspot
+
+			if not data.visual_proxy:
+				var bucket_key := _make_cell_bucket_key(data.cell_grid, _instance_payload_key(data))
+				if complete_bucket_keys.has(bucket_key):
+					direct_duplicate_candidate_count += 1
+					direct_duplicate_candidate_rs_instances += rs_count
+					var dupe_key := "%s|%s" % [cell_key, type_key]
+					var dupe: Dictionary = direct_duplicate_counts.get(dupe_key, {})
+					if dupe.is_empty():
+						dupe = {
+							"cell": cell_key,
+							"type_name": type_key,
+							"bucket_key": bucket_key,
+							"instance_count": 0,
+							"rs_instances": 0,
+						}
+					dupe["instance_count"] = int(dupe.get("instance_count", 0)) + 1
+					dupe["rs_instances"] = int(dupe.get("rs_instances", 0)) + rs_count
+					direct_duplicate_counts[dupe_key] = dupe
+	result["direct_rs_instances"] = direct_rs_instances
+	result["direct_visible_instances"] = direct_visible_instances
+	result["direct_visual_proxy_instances"] = direct_visual_proxy_instances
+	result["max_direct_rs_instances_per_ref"] = max_direct_rs_instances_per_ref
+	result["direct_static_duplicate_candidate_count"] = direct_duplicate_candidate_count
+	result["direct_static_duplicate_candidate_rs_instances"] = direct_duplicate_candidate_rs_instances
+
+	var top_direct_types: Array[Dictionary] = []
+	for info_value: Variant in direct_type_counts.values():
+		top_direct_types.append(info_value as Dictionary)
+	top_direct_types.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("rs_instances", 0)) > int(b.get("rs_instances", 0))
+	)
+	if max_top_cells > 0 and top_direct_types.size() > max_top_cells:
+		top_direct_types.resize(max_top_cells)
+	result["top_direct_types_by_instances"] = top_direct_types
+
+	var top_direct_cells: Array[Dictionary] = []
+	for info_value: Variant in direct_cell_counts.values():
+		top_direct_cells.append(info_value as Dictionary)
+	top_direct_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("rs_instances", 0)) > int(b.get("rs_instances", 0))
+	)
+	if max_top_cells > 0 and top_direct_cells.size() > max_top_cells:
+		top_direct_cells.resize(max_top_cells)
+	result["top_direct_cells_by_instances"] = top_direct_cells
+
+	var top_cells: Array[Dictionary] = []
+	var bucket_contributors: Array[Dictionary] = []
+	var contributor_counts: Dictionary = {}
+	for cell_grid: Vector2i in _cell_buckets.keys():
+		var buckets: Array = _cell_buckets[cell_grid]
+		var cell_key := "%d,%d" % [cell_grid.x, cell_grid.y]
+		var cell_bucket_count := 0
+		var cell_instances := 0
+		var cell_draw_groups := 0
+		for bucket_value: Variant in buckets:
+			var bucket: RefCounted = bucket_value as RefCounted
+			if bucket == null:
+				continue
+			cell_bucket_count += 1
+			cell_instances += int(bucket.get("instance_count"))
+			var census: Dictionary = {}
+			if bucket.has_method("get_draw_group_census"):
+				census = bucket.call("get_draw_group_census")
+			else:
+				census = {"draw_groups": int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0}
+			cell_draw_groups += int(census.get("draw_groups", 0))
+			result["singleton_draw_groups"] = int(result["singleton_draw_groups"]) + int(census.get("singleton_draw_groups", 0))
+			result["singleton_instances"] = int(result["singleton_instances"]) + int(census.get("singleton_instances", 0))
+			result["multimesh_draw_groups"] = int(result["multimesh_draw_groups"]) + int(census.get("multimesh_draw_groups", 0))
+			result["multimesh_instances"] = int(result["multimesh_instances"]) + int(census.get("multimesh_instances", 0))
+			result["max_draw_group_instances"] = maxi(
+				int(result["max_draw_group_instances"]),
+				int(census.get("max_draw_group_instances", 0))
+			)
+			var bucket_row := {
+				"bucket_key": str(bucket.get("bucket_key")),
+				"cell": cell_key,
+				"type_name": str(bucket.get("type_name")),
+				"instance_count": int(bucket.get("instance_count")),
+				"draw_group_count": int(census.get("draw_groups", 0)),
+				"singleton_draw_groups": int(census.get("singleton_draw_groups", 0)),
+				"multimesh_draw_groups": int(census.get("multimesh_draw_groups", 0)),
+			}
+			bucket_contributors.append(bucket_row)
+			_merge_bucket_contributors(contributor_counts, bucket, census)
+		if cell_bucket_count > 0:
+			top_cells.append({
+				"cell": cell_key,
+				"buckets": cell_bucket_count,
+				"instances": cell_instances,
+				"draw_groups": cell_draw_groups,
+			})
+			var hotspot: Dictionary = cell_hotspots.get(cell_key, _empty_cell_hotspot(cell_key))
+			hotspot["bucket_count"] = int(hotspot.get("bucket_count", 0)) + cell_bucket_count
+			hotspot["bucket_draw_groups"] = int(hotspot.get("bucket_draw_groups", 0)) + cell_draw_groups
+			cell_hotspots[cell_key] = hotspot
+
+	var bucket_count := int(result["bucket_count"])
+	if bucket_count > 0:
+		result["avg_draw_groups_per_bucket"] = float(result["bucket_draw_groups"]) / float(bucket_count)
+		result["avg_instances_per_bucket"] = float(result["bucket_instances"]) / float(bucket_count)
+	top_cells.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("draw_groups", 0)) > int(b.get("draw_groups", 0))
+	)
+	if max_top_cells > 0 and top_cells.size() > max_top_cells:
+		top_cells.resize(max_top_cells)
+	result["top_cells_by_draw_groups"] = top_cells
+	bucket_contributors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var draw_delta := int(a.get("draw_group_count", 0)) - int(b.get("draw_group_count", 0))
+		if draw_delta != 0:
+			return draw_delta > 0
+		return int(a.get("singleton_draw_groups", 0)) > int(b.get("singleton_draw_groups", 0))
+	)
+	var top_bucket_contributors := bucket_contributors.duplicate()
+	if max_top_cells > 0 and top_bucket_contributors.size() > max_top_cells:
+		top_bucket_contributors.resize(max_top_cells)
+	result["top_bucket_contributors_by_draw_groups"] = top_bucket_contributors
+	var top_singleton_contributors := bucket_contributors.duplicate()
+	top_singleton_contributors.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var singleton_delta := int(a.get("singleton_draw_groups", 0)) - int(b.get("singleton_draw_groups", 0))
+		if singleton_delta != 0:
+			return singleton_delta > 0
+		return int(a.get("draw_group_count", 0)) > int(b.get("draw_group_count", 0))
+	)
+	if max_top_cells > 0 and top_singleton_contributors.size() > max_top_cells:
+		top_singleton_contributors.resize(max_top_cells)
+	result["top_singleton_heavy_bucket_contributors"] = top_singleton_contributors
+	var top_direct_duplicates: Array[Dictionary] = []
+	for dupe_value: Variant in direct_duplicate_counts.values():
+		top_direct_duplicates.append(dupe_value as Dictionary)
+	top_direct_duplicates.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		return int(a.get("rs_instances", 0)) > int(b.get("rs_instances", 0))
+	)
+	if max_top_cells > 0 and top_direct_duplicates.size() > max_top_cells:
+		top_direct_duplicates.resize(max_top_cells)
+	result["top_direct_static_duplicate_candidates"] = top_direct_duplicates
+	var per_cell_hotspots: Array[Dictionary] = []
+	for hotspot_value: Variant in cell_hotspots.values():
+		per_cell_hotspots.append(hotspot_value as Dictionary)
+	per_cell_hotspots.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var draw_delta := int(a.get("bucket_draw_groups", 0)) - int(b.get("bucket_draw_groups", 0))
+		if draw_delta != 0:
+			return draw_delta > 0
+		return int(a.get("direct_rs_instances", 0)) > int(b.get("direct_rs_instances", 0))
+	)
+	if max_top_cells > 0 and per_cell_hotspots.size() > max_top_cells:
+		per_cell_hotspots.resize(max_top_cells)
+	result["per_cell_mid_hotspots"] = per_cell_hotspots
+	var model_material_contributors := _model_material_contributors(
+		contributor_counts,
+		direct_contributor_counts
+	)
+	result["model_material_contributors"] = model_material_contributors
+	var top_model_material_contributors := model_material_contributors.duplicate()
+	if max_top_cells > 0 and top_model_material_contributors.size() > max_top_cells:
+		top_model_material_contributors.resize(max_top_cells)
+	result["top_model_material_contributors"] = top_model_material_contributors
+	return result
+
+
+func _complete_bucket_key_set() -> Dictionary:
+	var keys: Dictionary = {}
+	for bucket_key: String in _cell_bucket_key_index.keys():
+		var bucket: RefCounted = _cell_bucket_key_index.get(bucket_key) as RefCounted
+		if bucket == null or bool(bucket.get("frozen")):
+			continue
+		var draw_group_count := int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
+		if draw_group_count > 0:
+			keys[bucket_key] = true
+	return keys
+
+
+func _instance_payload_key(data: InstanceData) -> String:
+	if data == null:
+		return ""
+	var model_path := data.model_path
+	if model_path.is_empty():
+		return data.type_name
+	var key := model_path.to_lower().replace("/", "\\")
+	if not data.item_id.is_empty():
+		key += ":" + data.item_id.to_lower()
+	return key
+
+
+func _empty_cell_hotspot(cell_key: String) -> Dictionary:
+	return {
+		"cell": cell_key,
+		"bucket_count": 0,
+		"bucket_draw_groups": 0,
+		"direct_rs_instances": 0,
+		"visual_proxy_instances": 0,
+	}
+
+
+func _merge_bucket_contributors(contributor_counts: Dictionary, bucket: RefCounted, census: Dictionary) -> void:
+	var bucket_type := str(bucket.get("type_name"))
+	var bucket_key := str(bucket.get("bucket_key"))
+	var bucket_count := int(bucket.get("instance_count"))
+	var covered_count := int(_hlod_covered_bucket_counts.get(bucket_key, 0))
+	var detail_cutoff := _get_type_detail_visibility_range_end(bucket_type)
+	var visibility_end := float(bucket.get("visibility_range_end"))
+	for contributor_value: Variant in census.get("contributors", []):
+		var contributor: Dictionary = contributor_value
+		var material_key := str(contributor.get("material", "<none>"))
+		var contributor_key := _make_contributor_key(bucket_type, material_key)
+		var row: Dictionary = contributor_counts.get(contributor_key, {})
+		if row.is_empty():
+			row = {
+				"type": bucket_type,
+				"model": str(contributor.get("model", bucket_type)),
+				"material": material_key,
+				"instances": 0,
+				"draw_groups": 0,
+				"singleton_draw_groups": 0,
+				"singleton_instances": 0,
+				"multimesh_draw_groups": 0,
+				"multimesh_instances": 0,
+				"max_aabb_dimension": _get_type_max_aabb_dimension(bucket_type),
+				"detail_visibility_cutoff": detail_cutoff,
+				"visibility_range_end": visibility_end,
+				"direct_duplicate_count": 0,
+				"bucket_covered_duplicate_count": 0,
+			}
+		row["instances"] = int(row.get("instances", 0)) + int(contributor.get("instances", 0))
+		row["draw_groups"] = int(row.get("draw_groups", 0)) + int(contributor.get("draw_groups", 0))
+		row["singleton_draw_groups"] = int(row.get("singleton_draw_groups", 0)) + int(contributor.get("singleton_draw_groups", 0))
+		row["singleton_instances"] = int(row.get("singleton_instances", 0)) + int(contributor.get("singleton_instances", 0))
+		row["multimesh_draw_groups"] = int(row.get("multimesh_draw_groups", 0)) + int(contributor.get("multimesh_draw_groups", 0))
+		row["multimesh_instances"] = int(row.get("multimesh_instances", 0)) + int(contributor.get("multimesh_instances", 0))
+		row["max_aabb_dimension"] = maxf(
+			float(row.get("max_aabb_dimension", 0.0)),
+			float(contributor.get("max_aabb_dimension", 0.0))
+		)
+		row["detail_visibility_cutoff"] = minf(float(row.get("detail_visibility_cutoff", detail_cutoff)), detail_cutoff)
+		row["visibility_range_end"] = minf(float(row.get("visibility_range_end", visibility_end)), visibility_end)
+		if covered_count > 0:
+			row["bucket_covered_duplicate_count"] = int(row.get("bucket_covered_duplicate_count", 0)) + mini(covered_count, bucket_count)
+		contributor_counts[contributor_key] = row
+
+
+func _model_material_contributors(
+	contributor_counts: Dictionary,
+	direct_contributor_counts: Dictionary
+) -> Array[Dictionary]:
+	for contributor_key: String in direct_contributor_counts.keys():
+		var row: Dictionary = contributor_counts.get(contributor_key, {})
+		var parts := contributor_key.split("|", true, 1)
+		var type_name := parts[0] if parts.size() > 0 else contributor_key
+		var material_key := parts[1] if parts.size() > 1 else "<none>"
+		if row.is_empty():
+			row = {
+				"type": type_name,
+				"model": type_name,
+				"material": material_key,
+				"instances": 0,
+				"draw_groups": 0,
+				"singleton_draw_groups": 0,
+				"singleton_instances": 0,
+				"multimesh_draw_groups": 0,
+				"multimesh_instances": 0,
+				"max_aabb_dimension": _get_type_max_aabb_dimension(type_name),
+				"detail_visibility_cutoff": _get_type_detail_visibility_range_end(type_name),
+				"visibility_range_end": _get_direct_visibility_range_end(),
+				"direct_duplicate_count": 0,
+				"bucket_covered_duplicate_count": 0,
+			}
+		row["direct_duplicate_count"] = int(direct_contributor_counts.get(contributor_key, 0))
+		contributor_counts[contributor_key] = row
+	var rows: Array[Dictionary] = []
+	for row_value: Variant in contributor_counts.values():
+		rows.append(row_value as Dictionary)
+	rows.sort_custom(func(a: Dictionary, b: Dictionary) -> bool:
+		var draw_delta := int(a.get("draw_groups", 0)) - int(b.get("draw_groups", 0))
+		if draw_delta != 0:
+			return draw_delta > 0
+		return int(a.get("direct_duplicate_count", 0)) > int(b.get("direct_duplicate_count", 0))
+	)
+	return rows
+
+
+func _material_keys_for_type(type_name: String) -> PackedStringArray:
+	var keys := PackedStringArray()
+	if type_name not in _mesh_types:
+		keys.append("<none>")
+		return keys
+	var mesh_type: MeshType = _mesh_types[type_name]
+	for sub_mesh: SubMeshEntry in mesh_type.sub_meshes:
+		_append_material_key(keys, sub_mesh.material_resource)
+		for material: Material in sub_mesh.surface_materials:
+			_append_material_key(keys, material)
+		if sub_mesh.mesh_resource != null and is_instance_valid(sub_mesh.mesh_resource):
+			_append_mesh_surface_material_keys(keys, sub_mesh.mesh_resource)
+	if mesh_type.sub_meshes.is_empty():
+		_append_material_key(keys, mesh_type.material_resource)
+		for material: Material in mesh_type.surface_materials:
+			_append_material_key(keys, material)
+		if mesh_type.mesh_resource != null and is_instance_valid(mesh_type.mesh_resource):
+			_append_mesh_surface_material_keys(keys, mesh_type.mesh_resource)
+	if keys.is_empty():
+		keys.append("<none>")
+	return keys
+
+
+func _append_mesh_surface_material_keys(keys: PackedStringArray, mesh: Mesh) -> void:
+	for surface_index in range(mesh.get_surface_count()):
+		_append_material_key(keys, mesh.surface_get_material(surface_index))
+
+
+func _append_material_key(keys: PackedStringArray, material: Material) -> void:
+	var key := _material_resource_key(material)
+	if key not in keys:
+		keys.append(key)
+
+
+func _material_resource_key(material: Material) -> String:
+	if material == null or not is_instance_valid(material):
+		return "<none>"
+	if not material.resource_path.is_empty():
+		return material.resource_path.to_lower()
+	if not material.resource_name.is_empty():
+		return material.resource_name
+	return "material#%d" % material.get_instance_id()
+
+
+func _make_contributor_key(type_name: String, material_key: String) -> String:
+	return "%s|%s" % [type_name, material_key]
+
+
+func _get_type_max_aabb_dimension(type_name: String) -> float:
+	if type_name not in _mesh_types:
+		return 0.0
+	var size := (_mesh_types[type_name] as MeshType).aabb.size
+	return maxf(size.x, maxf(size.y, size.z))
 
 
 
