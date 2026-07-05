@@ -382,9 +382,13 @@ func initialize(cell_manager: CellManagerScript,
 	if _sun:
 		_sun_original_cull_mask = _sun.light_cull_mask
 
-	# Cache exterior environment
+	# Reference (not duplicate) the exterior environment. A duplicate freezes
+	# init-time state — every later change (weather enabling fog, SSAO/SSR
+	# toggles) would be silently lost when the exit path restores it. The live
+	# reference is re-captured on each enter (see _do_transition) so exit
+	# always restores exactly what was active before the transition.
 	if _world_environment and _world_environment.environment:
-		_exterior_environment = _world_environment.environment.duplicate()
+		_exterior_environment = _world_environment.environment
 
 	# Create pocket container as child of this node's parent
 	_pocket_container = Node3D.new()
@@ -1561,6 +1565,11 @@ func _do_transition(target_slot: PocketSlot, dest_pos: Vector3,
 	# Swap environment
 	if _world_environment and is_instance_valid(_world_environment):
 		if entering_interior and target_slot and target_slot.interior_environment:
+			# Re-capture the live exterior environment on a real enter (not on
+			# interior->interior hops, where the current env is an interior one)
+			# so the exit path restores current state, not init-time state.
+			if not _is_inside and _world_environment.environment != null:
+				_exterior_environment = _world_environment.environment
 			_world_environment.environment = target_slot.interior_environment
 			Log.info("streaming", "[TRANSITION] Environment set to interior")
 		elif not entering_interior and _exterior_environment:
@@ -1603,6 +1612,12 @@ func _do_transition(target_slot: PocketSlot, dest_pos: Vector3,
 ##   - No teleport (player keeps walking)
 func _seamless_enter(door: DoorInfo, slot: PocketSlot, door_forward: Vector3) -> void:
 	Log.info("streaming", "Seamless enter: '%s' (slot %d)" % [door.target_cell_name, slot.slot_index])
+
+	# 0. Re-capture the live exterior environment (see _do_transition) BEFORE
+	#    _is_inside flips, so seamless exit blends back to current state.
+	if not _is_inside and _world_environment and is_instance_valid(_world_environment) \
+			and _world_environment.environment != null:
+		_exterior_environment = _world_environment.environment
 
 	# 1. Set active pocket FIRST (prevents eviction)
 	_active_pocket = slot

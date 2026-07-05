@@ -33,6 +33,7 @@ const CellManagerScript := preload("res://src/core/world/cell_manager.gd")
 const ModelLoaderScript := preload("res://src/core/world/model_loader.gd")
 const CrashBreadcrumb := preload("res://src/core/logging/crash_breadcrumb.gd")
 const NativeImpostorRendererScript := preload("res://src/core/world/native_impostor_renderer.gd")
+const ChunkProxyRendererScript := preload("res://src/core/world/chunk_proxy_renderer.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
 const CS := preload("res://src/core/coordinate_system.gd")
@@ -52,6 +53,8 @@ const PUBLICATION_LANE_UNLOAD := "unload"
 const HLOD_PUBLICATION_BUDGET_USEC: int = 1500
 const FAR_IMPOSTOR_PUBLICATION_BUDGET_USEC: int = 4000
 const DISTANT_LIGHT_PUBLICATION_BUDGET_USEC: int = 2400
+## CHUNK tier per-frame drive budget: one load poll + occasional rescan.
+const CHUNK_TIER_BUDGET_USEC: int = 1000
 const STREAMING_CUSTOM_PERFORMANCE_MONITORS := {
 	&"godotwind/streaming/queue_size": "queue_size",
 	&"godotwind/streaming/loaded_cells": "loaded_cells",
@@ -161,6 +164,9 @@ var _static_renderer: StaticObjectRendererScript = null
 
 ## Native Impostor Renderer
 var _impostor_renderer: Node3D = null
+
+## CHUNK tier renderer (offline-baked merged proxies, 400-1200m)
+var _chunk_renderer: Node3D = null
 
 ## Impostor candidates manager
 var _impostor_candidates: RefCounted = null
@@ -547,6 +553,15 @@ func _ready() -> void:
 	_impostor_renderer.name = "ImpostorManager"  # Use old name for backwards compatibility
 	add_child(_impostor_renderer)
 	_impostor_renderer.set_process(false)
+
+	# CHUNK tier (Phase 2 revised, 2026-07-05): offline-baked merged proxies
+	# for the 400-1200m ring. Dormant unless a bake exists on disk. When
+	# active, impostors retreat to CHUNK_END (see _apply_impostor_request).
+	_chunk_renderer = ChunkProxyRendererScript.new()
+	_chunk_renderer.name = "ChunkProxyRenderer"
+	add_child(_chunk_renderer)
+	var chunk_count: int = _chunk_renderer.initialize_from_cache()
+	_chunk_renderer.set_enabled(chunk_count > 0)
 
 	# Create fallback impostor candidates helper
 	if _impostor_candidates == null:
@@ -1275,6 +1290,13 @@ func _process(delta: float) -> void:
 			impostor_update_usec += float(far_elapsed)
 			_finish_publication_slice(PUBLICATION_LANE_FAR_IMPOSTORS, far_slice, int(far_elapsed))
 			if prof: prof.end_section("far_impostor_publish")
+
+	# CHUNK tier: poll the single in-flight load + rescan on camera travel.
+	# Cheap by design (server-direct, one threaded request at a time).
+	if _chunk_renderer and _chunk_renderer.call("is_enabled"):
+		if prof: prof.begin_section("chunk_tier")
+		_chunk_renderer.call("update", _camera_position, Time.get_ticks_usec() + CHUNK_TIER_BUDGET_USEC)
+		if prof: prof.end_section("chunk_tier")
 
 	# Runtime HLOD merger: process completed merges every frame, update on cell change
 	# Phase 2 stutter diag — bracket each unbracketed _process subsystem so the
@@ -3268,7 +3290,10 @@ func set_impostors_visible(visible: bool) -> void:
 
 func _apply_impostor_request() -> void:
 	if _impostor_renderer:
-		var far_begin := DU.FAR_START
+		# CHUNK tier active → impostors retreat to the chunk band's far edge
+		# (the 2026-07-05 decision: real geometry to 1.2km, billboards beyond).
+		var chunk_active: bool = _chunk_renderer != null and bool(_chunk_renderer.call("is_enabled"))
+		var far_begin := DU.CHUNK_END if chunk_active else DU.FAR_START
 		var effective_visible := _impostors_requested_visible and _distant_render_end_m > far_begin
 		if effective_visible and _impostor_renderer.has_method("set_visibility_range_begin"):
 			if _impostor_renderer.has_method("set_visibility_range"):
@@ -3278,6 +3303,23 @@ func _apply_impostor_request() -> void:
 		_impostor_renderer.set_enabled(effective_visible)
 		if effective_visible:
 			_impostor_update_pending = true
+
+## Toggle the CHUNK tier (offline-baked ring proxies). Returns the effective
+## state (false when no bake exists on disk). Re-applies the impostor range
+## so FAR_START flips between MID_END and CHUNK_END accordingly.
+func set_chunk_tier_enabled(enabled: bool) -> bool:
+	if _chunk_renderer == null:
+		return false
+	_chunk_renderer.call("set_enabled", enabled)
+	_apply_impostor_request()
+	return bool(_chunk_renderer.call("is_enabled"))
+
+
+func get_chunk_tier_stats() -> Dictionary:
+	if _chunk_renderer == null:
+		return {}
+	return _chunk_renderer.call("get_stats")
+
 
 ## Toggle NEAR-tier Node3D cells (loaded cell containers).
 ## Remembers state so cells loaded after the toggle respect it.

@@ -114,6 +114,11 @@ const DEFAULT_POOL_MAX_SIZE: int = 50
 # safe; production publishing stays on the main-thread path.
 const PHASE_A_OFFTHREAD_INSTANTIATE: bool = false
 
+## Wave 7 (2026-07-05): how long an instantiate entry may park waiting for
+## its async model load before falling back to the old blocking sync load.
+## Generous — loads land within frames; the cap only guards termination.
+const MODEL_WAIT_FALLBACK_MS: int = 5000
+
 
 ## Initialize instantiator with current configuration and dependencies
 func _init() -> void:
@@ -1026,6 +1031,14 @@ class InstantiationEntry:
 	var worker_static_precomp: Variant = null
 	var worker_static_dispatched: bool = false
 	var worker_static_task_id: int = -1
+
+	## Wave 7 (2026-07-05): set once when the drain requests this entry's
+	## model async on a cache miss. Entries park until the loader callback
+	## fires (model_wait_done) or the bounded wait expires (then the old sync
+	## path runs as fallback).
+	var model_async_requested: bool = false
+	var model_wait_done: bool = false
+	var model_wait_start_ms: int = 0
 
 
 ## BackgroundProcessor reference (must be set via set_background_processor)
@@ -3389,6 +3402,48 @@ func process_async_instantiation(
 			continue
 		if not model_path.is_empty():
 			_restore_payload_cached_scene(request, model_path, cache_item_id)
+
+		# Wave 7 (2026-07-05): never sync-load models in the instantiate lane.
+		# The sync branches (route=node_sync / static_cold / light) fall back
+		# to a blocking get_model on a cache miss — measured 102-119 ms per
+		# atom (ml=110.4 of 110.5 ms on f\Furn_rug_02.NIF: 100% load, zero
+		# node construction) because the sync load queues behind the
+		# single-flight loader. Park the entry, request the model async, retry
+		# next frame. The bounded wait falls back to the old sync path so
+		# termination is guaranteed even if the cache key resolved here ever
+		# disagrees with the instantiator's.
+		if not model_path.is_empty() \
+				and not entry.worker_dispatched and not entry.worker_static_dispatched:
+			var wait_item_id := cache_item_id
+			if wait_item_id.is_empty() and entry.world_object_record != null:
+				wait_item_id = str(entry.world_object_record.get("cache_item_id"))
+				if wait_item_id.is_empty():
+					wait_item_id = str(entry.world_object_record.get("record_id"))
+			# Item-variant cache keys (model + item_id) share one disk file,
+			# and the async pipeline dedups by disk path — only the FIRST
+			# requester's cache key gets filled. Two exits from the park:
+			# (a) any relevant cache key landed (item, or plain — a plain hit
+			# means the .res is alive in the engine ResourceCache and the sync
+			# path below is a fast cache hit); (b) the loader callback fired —
+			# callbacks run for EVERY joiner of a deduped disk-path load, so
+			# item-variant joiners unpark as soon as the shared load lands.
+			if not entry.model_wait_done \
+					and not _model_loader.has_model(model_path, wait_item_id) \
+					and (wait_item_id.is_empty() or not _model_loader.has_model(model_path)):
+				if not entry.model_async_requested:
+					entry.model_async_requested = true
+					entry.model_wait_start_ms = Time.get_ticks_msec()
+					var wait_entry := entry
+					_model_loader.request_model_async(model_path, wait_item_id,
+						func(_mp: String, _ii: String, _inst: Node3D) -> void:
+							wait_entry.model_wait_done = true,
+						false)
+				if Time.get_ticks_msec() - entry.model_wait_start_ms < MODEL_WAIT_FALLBACK_MS:
+					phase_a_deferred.append(entry)
+					route_deferred_count += 1
+					continue
+				Log.warn("streaming", "[inst-model-wait] sync fallback after %d ms: model='%s' item='%s' grid=%s" % [
+					Time.get_ticks_msec() - entry.model_wait_start_ms, model_path, wait_item_id, request.grid])
 
 		# Decrement pending count
 		request.pending_instantiations -= 1

@@ -71,6 +71,8 @@ func _adapt_materials(node: Node) -> void:
 
 func _adapt_mesh_instance(mesh_instance: MeshInstance3D) -> void:
 	if mesh_instance.material_override != null:
+		if not _mesh_has_tangents(mesh_instance.mesh):
+			return
 		var override_material := mesh_instance.material_override
 		var wet_override := _make_wet_material(override_material)
 		if wet_override != null:
@@ -87,6 +89,8 @@ func _adapt_mesh_instance(mesh_instance: MeshInstance3D) -> void:
 		return
 
 	for surface: int in mesh_instance.mesh.get_surface_count():
+		if not _surface_has_tangents(mesh_instance.mesh, surface):
+			continue
 		var material := mesh_instance.get_active_material(surface)
 		var wet_material := _make_wet_material(material)
 		if wet_material == null:
@@ -98,6 +102,27 @@ func _adapt_mesh_instance(mesh_instance: MeshInstance3D) -> void:
 		})
 		mesh_instance.set_surface_override_material(surface, wet_material)
 		_material_rids.append(wet_material.get_rid())
+
+
+## The wet shader requires tangent arrays (normal-mapped ripples). Binding it
+## to a tangent-less surface makes the renderer emit a warning on EVERY draw
+## of that surface (camera pass + each shadow pass) — measured at 15-25ms/frame
+## of render-thread stall on MW candle/lantern meshes. Surfaces the shader
+## cannot legally render must keep their original material.
+static func _surface_has_tangents(mesh: Mesh, surface: int) -> bool:
+	var array_mesh := mesh as ArrayMesh
+	if array_mesh == null:
+		return true  # PrimitiveMesh generates tangents
+	return (array_mesh.surface_get_format(surface) & Mesh.ARRAY_FORMAT_TANGENT) != 0
+
+
+static func _mesh_has_tangents(mesh: Mesh) -> bool:
+	if mesh == null:
+		return false
+	for surface: int in mesh.get_surface_count():
+		if not _surface_has_tangents(mesh, surface):
+			return false
+	return true
 
 
 func _make_wet_material(material: Material) -> ShaderMaterial:

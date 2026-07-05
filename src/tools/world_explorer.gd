@@ -3010,6 +3010,27 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 			"streaming"
 		)
 
+		console.register_command(
+			"chunks_enable",
+			_cmd_chunks_enable,
+			"Enable the CHUNK tier (offline-baked 400-1200m ring proxies; impostors retreat to 1.2km)",
+			"streaming"
+		)
+
+		console.register_command(
+			"chunks_disable",
+			_cmd_chunks_disable,
+			"Disable the CHUNK tier (impostors return to 400m)",
+			"streaming"
+		)
+
+		console.register_command(
+			"chunks_stats",
+			_cmd_chunks_stats,
+			"Show CHUNK tier stats (indexed/active/queue)",
+			"streaming"
+		)
+
 
 		# Register streaming benchmark commands
 		if not _StreamingBenchmarkScript:
@@ -3307,6 +3328,37 @@ func _cmd_prebake_animations(_args: Dictionary) -> String:
 	var elapsed := Time.get_ticks_msec() - t0
 	return "Prebaked %d animations in %d ms (%d failed)" % [
 		result.get("success", 0), elapsed, result.get("failed", 0)]
+
+
+func _cmd_chunks_enable(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not initialized"
+	var on: bool = native_streaming_manager.set_chunk_tier_enabled(true)
+	if not on:
+		return "CHUNK tier unavailable — no bake on disk (run chunk_proxy_bake_runner.tscn first)"
+	return "CHUNK tier ON: ring %d-%dm baked proxies, impostors start at %dm" % [
+		int(StreamingConfig.DU.CHUNK_START), int(StreamingConfig.DU.CHUNK_END), int(StreamingConfig.DU.CHUNK_END)]
+
+
+func _cmd_chunks_disable(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not initialized"
+	native_streaming_manager.set_chunk_tier_enabled(false)
+	return "CHUNK tier OFF: impostors return to %dm" % int(StreamingConfig.DU.FAR_START)
+
+
+func _cmd_chunks_stats(_args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Native streaming manager not initialized"
+	var stats: Dictionary = native_streaming_manager.get_chunk_tier_stats()
+	if stats.is_empty():
+		return "CHUNK tier renderer not created"
+	return "CHUNK tier: indexed=%d, active=%d, queue=%d, published_total=%d, evicted_total=%d" % [
+		stats.get("chunk_tier_indexed", 0),
+		stats.get("chunk_tier_active", 0),
+		stats.get("chunk_tier_queue", 0),
+		stats.get("chunk_tier_published_total", 0),
+		stats.get("chunk_tier_evicted_total", 0)]
 
 
 func _cmd_hlod_enable(_args: Dictionary) -> String:
@@ -4654,6 +4706,11 @@ var _sky_was_on_pre_interior: bool = false
 ## where sky was already off when we entered).
 var _fallback_light_was_visible_pre_interior: bool = false
 
+## Tracks whether the custom volumetric fog compositor effect was on before
+## interior entry. Compositor effects render regardless of camera cull mask,
+## so exterior atmospherics must be disabled explicitly for interiors.
+var _volumetric_fog_was_on_pre_interior: bool = false
+
 
 ## Hide Terrain3D when entering interior — camera at Y=-500 causes
 ## Terrain3D GDExtension to crash (clipmap generation at underground position).
@@ -4675,6 +4732,23 @@ func _on_interior_transition_started(_cell_name: String) -> void:
 		return
 	if _ocean_controls:
 		_ocean_controls.set_world_space_ocean_visible(false)
+
+	# Suspend outdoor weather visuals (fog writes, clouds compositor, rain/snow
+	# particles). Weather is an exterior-worldspace system — without this the
+	# WeatherRenderer keeps writing exterior fog into the interior Environment
+	# and the clouds CompositorEffect renders inside the interior (compositor
+	# effects ignore camera cull masks). Idempotent — this handler also fires
+	# on exit-start.
+	if _weather_controls:
+		_weather_controls.set_interior_suspended(true)
+
+	# Custom volumetric fog compositor effect is exterior atmosphere too.
+	# Capture-only-when-on so the exit-start firing of this handler doesn't
+	# clobber the saved state (same pattern as _sky_was_on_pre_interior).
+	if ShaderManager.is_effect_enabled("volumetric_fog"):
+		_volumetric_fog_was_on_pre_interior = true
+		ShaderManager.disable_effect("volumetric_fog", 0.0)
+
 	if _env_controls and _env_controls.show_sky:
 		_sky_was_on_pre_interior = true
 		_env_controls.on_show_sky_toggled(false)
@@ -4700,6 +4774,11 @@ func _on_interior_transition_completed(cell_name: String) -> void:
 			Log.info("streaming", "[TRANSITION] Terrain3D restored (exited to exterior)")
 		if _ocean_controls:
 			_ocean_controls.set_world_space_ocean_visible(true)
+		if _weather_controls:
+			_weather_controls.set_interior_suspended(false)
+		if _volumetric_fog_was_on_pre_interior:
+			_volumetric_fog_was_on_pre_interior = false
+			ShaderManager.enable_effect("volumetric_fog", 0.0)
 		if _sky_was_on_pre_interior:
 			# `on_show_sky_toggled(true)` handles fallback_light visibility
 			# (sets it false when sky comes back on) — don't double-manage it.

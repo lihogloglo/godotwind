@@ -28,10 +28,25 @@ const MID_END: float = 400.0
 
 ## Optional HLOD tier: runtime-merged chunk proxies.
 ## Normal gameplay currently parks HLOD and hands MID directly to FAR.
+## DEPRECATED by the CHUNK tier below (2026-07-05 decision) — delete with
+## object_paging.gd once offline chunks ship.
 const HLOD_START: float = MID_END
 const HLOD_END: float = 1000.0
 
+## CHUNK tier (decision 2026-07-05, user-approved): OFFLINE-baked merged +
+## simplified chunk proxies fill MID_END → CHUNK_END with real geometry —
+## the MGE XE / OpenMW pattern for this content (merged low-poly originals;
+## MW's bottleneck is draw count, not triangles). Impostors are the wrong
+## tool at this range (baked lighting vs dynamic sun, parallax flatness on
+## architecture); they retreat to CHUNK_END when this tier ships.
+## Plan: docs/plans/distant_rendering_recovery_2026_07.md Phase 2 (revised).
+const CHUNK_START: float = MID_END
+const CHUNK_END: float = 1200.0
+
 ## FAR tier: Impostors/billboards (FAR_START to FAR_END).
+## TRANSITION NOTE (2026-07-05): FAR_START stays at MID_END until the CHUNK
+## tier ships (moving it now would leave 400-1200m fully empty). When chunks
+## enable, FAR_START moves to CHUNK_END — impostors then serve ≥1.2km only.
 const FAR_END: float = 5000.0
 
 ## LEGACY: sub-LOD boundaries from the pre-B-wide 3-band MID scheme.

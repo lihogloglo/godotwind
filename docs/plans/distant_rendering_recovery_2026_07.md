@@ -342,18 +342,71 @@ complete too.
 band (rung 3: 95.9 / 96.3 / 93.2), no regression. Third consecutive
 completed ladder since single-flight loading.
 
-**Remaining named work (wave 7 candidates):**
-1. Phase 3 **M.1**: prebake-UI "cook manifests" batch + flag-gated runtime
-   consumption (see the Phase 3 implementation plan below). Target:
-   `[cell-request-start]` manifest cost 9-22 ms → ≤ 1 ms.
-2. **`Furn_rug_02.NIF` atoms DIAGNOSED (wave-6 ladder ml= data):
-   ml=110.4 of 110.5 ms — 100% model load, zero node construction.** The
-   NODE route's cache-miss fallback sync-loads on the main thread
-   (`route=node_sync` → `_load_packed_scene_from_disk`) and blocks behind
-   the loader queue (a 180 KB file cannot cost 110 ms of I/O). Fix: make
-   the NODE route's cache miss asynchronous — queue the model request and
-   park the entry (the proximity-deferred pattern already does exactly
-   this), never sync-load in the instantiate lane.
+**Wave 7a shipped (2026-07-05, session 4): no sync model loads in the
+instantiate lane.** The `Furn_rug_02.NIF` class of atoms (102-119 ms) was
+100% blocked model load (`ml=110.4` of 110.5 ms — zero node construction):
+the sync branches (node_sync / static_cold / light) fell back to a blocking
+`get_model` on a cache miss, queued behind the single-flight loader. Fix in
+`cell_manager.process_async_instantiation`: cache-miss entries park (the
+existing deferred-requeue mechanism), request their model via
+`request_model_async`, and unpark when (a) a relevant cache key lands
+(item key, or plain key — a plain hit makes the sync path an engine-cache
+hit) or (b) the loader callback fires — callbacks run for EVERY joiner of
+a deduped disk-path load, which covers item-variant keys (one disk file,
+many cache keys; only the first requester's key fills). A 5 s bounded wait
+falls back to the old sync path so termination is guaranteed
+(`[inst-model-wait]` warn names any entry that hits it). Verified across
+three smokes: zero [inst-atom], zero [inst-model-wait] in the final run,
+0 script errors, standing FPS 121-140.
+
+**Wave 7b: full-worldspace manifest cook SHIPPED + RUN (2026-07-05).**
+Standalone runner `src/tools/prebaking/cell_manifest_cook_runner.tscn`
+(hydrology-runner pattern; cooks through the existing runtime build so
+output equals it by construction). First full cook: **1,189 cells, 142,858
+records, 16.4 MB total, 24.5 s, 0 failures** (215 empty ocean cells
+skipped) → `<cache>/manifests/cell_<x>_<y>.gwm`. Inside the 15-20 MB
+target; the rejected naive geometry bake was ≈8 GB.
+
+**Wave 7 verification (ladder_phase1_wave7, sequence complete):** rung 2 =
+120.0 / p95 12.2 (rung-2 cold noise band), rung 3 = **93.8 / p95 14.5** —
+in band (93.2-96.3), no regression. Exterior [inst-atom] warns GONE.
+
+**Wave 8 M.1a shipped + MEASURED A WASH (2026-07-05, session 5).**
+Flag-gated cooked-manifest consumption landed in
+`morrowind_world_object_source.gd` (`use_cooked_manifests`): hydrates
+records from .gwm via the C# codec, preserves both runtime-build side
+effects (`_source_cell_cache` for door registration; `_spawn_payload_cache`
+via new lazy ESM resolution on first interactive use). Split measured with
+the new `[cooked-manifest]` warn: **binary load = 0.4-0.9 ms** (format
+vindicated) but **hydration = 8-50 ms per cell** — constructing ~300
+GDScript WorldObjectRecord objects (+ per-record Dictionary marshalling)
+IS the manifest cost; the classification work the cook removes was never
+dominant. Exactly what the wave-3 C# honesty note predicted. Flag default
+**OFF** (don't ship a wash); all infrastructure kept for M.1b.
+
+**Remaining named work (wave 8, revised by the M.1a measurement):**
+1. Phase 3 **M.1b — the real win**: streaming consumers read the C#-held
+   manifest data directly (packed arrays / indexed accessors), no
+   per-record GDScript objects in the streaming path. Scope: the
+   classification loop (`request.classify_index`), static-prepare counts,
+   and instantiation-entry queueing consume codec accessors; NODE-route
+   interactive spawns can still hydrate single records lazily (rare,
+   proximity-gated). First step: batch accessors on NativeCellManifest
+   (parallel packed arrays in one marshal) replacing per-record
+   GetRecordFields. This is the honest C# scope and a substantial,
+   session-sized refactor — start it fresh.
+2. **Item-variant model loads ~114 ms (interior pockets)** — wave-7
+   ladder data: the two surviving [inst-atom]s are
+   `f\Furn_rug_02.NIF grid=(0,0) (interior)`, ml=114.8/112.9 of ~115 ms.
+   The rug is carryable ⇒ item-keyed `get_model(path, item_id)` ignores
+   the plain-key cached PackedScene and pays the item-variant load/
+   post-process path. Suspect `_load_packed_scene_from_disk` + item
+   collision variant processing, not disk I/O (180 KB file). Fires during
+   pocket async loads (hidden latency, not a visible hitch unless
+   rushing). Investigate the item-variant path before fixing.
+3. "silver shortsword" 151 ms pocket attach (needs churny repro),
+   `light:` 3-15 ms startup sections, transition-frame 36-49 ms peaks
+   (fade-covered) — carried from wave 6.
 3. Pocket first-attach: worst child = "silver shortsword" 151.5 ms with
    ZERO pipe delta (**pipeline-compile hypothesis REFUTED**); did NOT
    reproduce in a quiet scene (walk/rush door tests: no pocket-attach warn
@@ -411,33 +464,122 @@ section > 4 ms in autopsy; p95 ≤ 12 ms; moving avg FPS within ~20% of
 standing FPS; heartbeat render split unchanged (proves we didn't shift cost
 into rendering).
 
-## Phase 2 — Fill the 400–1000 m ring (impostors first)
+## Phase 2 (REVISED 2026-07-05, user-approved) — Fill the 400–1200 m ring
+## with OFFLINE-baked merged chunk proxies; impostors retreat to ≥1.2 km
 
-Gate task (disk): impostor storage format —
-- normal atlas → compressed (PNG RG-packed or BasisU), not raw .res;
-- size-scaled atlas resolution (small flora doesn't need hero resolution);
-- target ≤ 1 MB/candidate average; regenerating existing 208 should shrink
-  905 MB → ~150 MB.
+**Course change after the strategic review (session 6).** The original
+impostors-first plan for the ring is reversed; the old "fallback" is now
+primary. Rationale (research-verified):
+- Both proven Morrowind distant-rendering solutions use REAL geometry in
+  this band: MGE XE bakes merged, polygon-reduced statics offline
+  (explicitly because MW's bottleneck is draw count, not triangles);
+  OpenMW's object paging merges real geometry. Neither uses billboards at
+  400 m.
+- Impostors of hard-edged architecture at 400 m read flat: baked lighting
+  fights the dynamic sun, parallax breaks under camera translation. They
+  are the right tool ≥1.2 km (where ours already work).
+- Storage/VRAM: Godot 4.x has NO texture/mesh streaming (verified — the
+  engine's own "missing for AAA" list); impostor atlases at ring quality
+  strain both disk (905 MB for 208 bakes already) and resident VRAM.
+  Merged low-poly MW geometry is cheap on both.
+- No engine rescue incoming: the GPU-driven renderer (reduz's design,
+  Vulkanised 2026) is explicitly deferred.
+- Our own data: draw calls are not the bottleneck at ~650-2k draws
+  (halving them changed FPS by 0.2), GPU render sits at 2-6 ms — but a
+  naive MID extension to 1.2 km would produce 5-9k draws; merging
+  (chunk = 1 draw) is what makes real geometry affordable. The RUNTIME
+  merger failed (861 ms stalls, no simplify, segfault class) — offline
+  baking removes every one of those failure modes.
 
-Then:
-1. Complete the bake for all 937 current candidates (v6 format).
-2. Replace name-pattern candidacy with the OpenMW size rule
-   (radius/distance ≥ 0.01 → billboard-worthy at 400 m ⇒ radius ≥ 4 m; tune
-   from there). Expect candidate count to grow into the low thousands —
-   disk stays ≤ ~2 GB with the new format, VRAM bounded by layer cap.
-3. Lift the 256-layer runtime cap (multiple texture arrays or paged arrays).
-4. Verify bake view coverage for aerial views (hemi vs full octahedral);
-   fix bake angles if top-down looks broken.
+**Constants:** `CHUNK_START = MID_END (400)`, `CHUNK_END = 1200` in
+distance_utils.gd. `FAR_START` stays at MID_END until the chunk tier
+ships (moving it early would empty the ring), then moves to CHUNK_END.
 
-Acceptance: user flyover — the 400–1000 m band reads as populated, no
-jarring cliff at the 400 m handoff at ground level either. Frame cost of
-FAR stays ≤ ~0.5 ms.
+**Baker STATUS (2026-07-05, session 6):** v2 verified on the Seyda Neen
+test region (7×7 cells → 16 chunks): **16/16 baked, 0 failures, 2,441 refs,
+14.0 MB total, 10.1 s single-threaded**. v1 measured 92.3 MB — diagnosed
+(headless inspect script): geometry was fine (~55k verts/chunk, compressed
+attributes active) but every chunk re-embedded its materials' RAW textures.
+v2 fix = shared material library: dedup by albedo-image hash BEFORE the
+merge (also collapses kernel surface groups), textures GPU-compressed once
+via PortableCompressedTexture2D S3TC, chunks reference materials
+EXTERNALLY. 184 shared materials for the region. Worldwide extrapolation:
+~350 chunks × ~0.7 MB + library ≈ **~250 MB** — inside the constraint
+BEFORE the decimation lever.
+**Bake-speed budget (user requirement):** whole-world chunk bake must stay
+≤ ~2 min for new players. Measured trajectory: ~3-4 min single-threaded →
+parallelize chunk merges across WorkerThreadPool (kernel is thread-safe by
+design) → well under budget. Texture compression is once-per-material
+(~1.4 s first material = encoder warmup, then fast).
+**Decimation lever (later, if size/quality warrants):** Godot bundles
+meshoptimizer (generate_lods IS meshoptimizer) but exposes no direct
+simplifier to scripts; the clean route is a small C# P/Invoke binding of
+the meshoptimizer C library to decimate stored LOD0 for ring-only meshes.
+**Lesson (runner scenes):** a GDScript parse error leaves the runner as a
+scriptless idle window — looks like a hang (cost one 19-min false hang).
+The visible symptom: autoload init lines then silence, zero output files.
+Check the launch log for "Parse Error" FIRST; `--check-only` is unusable
+here (headless autoload false-negatives).
 
-Fallback (only if visuals still insufficient): offline-baked simplified
-chunk proxies (merge + meshoptimizer simplify + optional atlas at bake
-time via prebake UI), 0.2–0.8 GB, published as 1 RS instance per chunk.
-This is also the moment runtime ObjectPaging (object_paging.gd + kernel)
-gets deleted — it stays parked and untouched until then.
+**Baker (offline, runner-scene pattern):**
+1. Group exterior cells into 2×2-cell chunks (single size to start —
+   measure before adding the adaptive 4×4 outer band).
+2. Per chunk, gather static records (world-object source manifests — the
+   Phase 3 cook infrastructure is the feedstock), min-size gate at the
+   OpenMW ratio 0.01 against CHUNK_START (radius ≥ ~4 m).
+3. Load each unique model's baked .res once, extract MeshInstance3D
+   surfaces (mesh arrays + resolved material + relative transform),
+   build ObjectPagingKernel.RefInput/SubMeshInput shapes.
+4. Merge via `ObjectPagingKernel.merge_refs(force_merge_all=true)` —
+   the existing C# kernel (material-grouped, ≤64 surfaces/chunk) — then
+   `ObjectPagingKernel.generate_lods()` for the embedded LOD chain.
+5. Save one ArrayMesh .res per chunk + an index; report totals.
+   Disk estimate 0.2–0.8 GB (within the no-multi-GB constraint).
+
+**Runtime consumer SHIPPED (2026-07-05, session 6):**
+`src/core/world/chunk_proxy_renderer.gd` — server-direct chunk pages:
+single-flight threaded loads (chunk files share the material library;
+≤4.6 loader race discipline), 1 RS instance per chunk, visibility band
+[CHUNK_START−radius, CHUNK_END+radius] with FADE margins, shadows OFF,
+distance eviction with hysteresis, rescan every 32 m of camera travel.
+Wired in native_streaming_manager (created at init, auto-enables when a
+bake exists, driven per-frame under a 1 ms budget with a `chunk_tier`
+profiler section); `_apply_impostor_request` flips impostor start
+MID_END ↔ CHUNK_END based on chunk-tier state. Console:
+`chunks_enable` / `chunks_disable` / `chunks_stats`.
+Smoke-verified: 16-chunk test bake indexed + rendering in-game (prims
+390k → 1,055k standing at Seyda Neen, +~480 draws, 128 FPS, 0 errors).
+
+**Full-world bake (2026-07-05):** 321 chunks, 58,522 refs, 18.8M verts,
+**391 MB** (373 geometry + 17 shared materials), 956 unique models, 503
+shared materials, **146.7 s serial, 0 failures**. Slightly over the 2-min
+budget → parallelize merges across WorkerThreadPool (kernel is
+thread-safe) when convenient. Size lever if wanted: meshoptimizer
+decimation of stored LOD0 via C# P/Invoke (~2× reduction expected).
+
+**Ladder with the FULL ring (ladder_chunk_tier_v1, sequence complete,
+0 errors):** rung 3 = 77.2 FPS / p95 16.8 / 1,607 draws (vs 93.8 / 14.5 /
+766 with the ring empty) — the populated ring costs ~2.3 ms/frame
+(~840 draw surfaces from ~30 in-range chunks × ≤64 material surfaces).
+Above the ≤1 ms acceptance — the named tuning lever is per-chunk surface
+reduction via bake-time texture ATLASING (the full MGE XE treatment),
+which would collapse most chunks to a handful of surfaces. Decide after
+the user's visual verdict on the ring. NOTE for ladder comparability:
+the chunk tier is NOT in the rung ablation toggles — rung 2 now includes
+the ring (draws 93 → 967); read historical rung deltas accordingly, or
+add a chunk toggle to the ladder rungs later.
+
+**Then:** delete runtime ObjectPaging (object_paging.gd stays parked and
+untouched until the chunk tier is verified; the kernel + kernel wrapper
+survive — the baker uses them).
+
+**Impostor work (demoted, when next touching FAR):** storage format fix
+(compressed normal atlases), candidacy retune against 0.01 at the new
+1.2 km start, aerial bake angles.
+
+Acceptance: user flyover — the 400–1200 m band reads as populated real
+geometry, no cliff at the MID→CHUNK handoff; frame cost of the chunk
+tier ≤ ~1 ms render_cpu at ~40-60 visible chunks; no multi-GB cache.
 
 ## Phase 3 — Cooked per-cell static manifests (structural)
 

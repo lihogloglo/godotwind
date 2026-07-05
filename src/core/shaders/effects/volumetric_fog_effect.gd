@@ -307,9 +307,12 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	push_constants.append(get_param("stamp_intensity"))
 	push_constants.append(get_param("stamp_contrast"))
 
-	# sun_direction (vec4) — try to find active sun, fall back to parameter
+	# sun_direction (vec4) — try to find active sun, fall back to parameter.
+	# The sun node leaves the tree when the sky is toggled off; reading
+	# global_basis then triggers an engine error print per view per frame
+	# (render-thread stall), so an out-of-tree sun falls back to the parameter.
 	var sun_dir: Vector3 = get_param("sun_direction")
-	if _active_sun and is_instance_valid(_active_sun):
+	if _active_sun and is_instance_valid(_active_sun) and _active_sun.is_inside_tree():
 		sun_dir = -_active_sun.global_basis.z
 	push_constants.append(sun_dir.x)
 	push_constants.append(sun_dir.y)

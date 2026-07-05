@@ -23,6 +23,24 @@ var _spawn_payload_cache: Dictionary[StringName, Dictionary] = {}
 var _source_cell_cache: Dictionary[Vector2i, Variant] = {}
 var _esm_manager: Variant = null
 
+## Phase 3 M.1 (2026-07-05): cooked-manifest path. When a cooked .gwm exists
+## (cell_manifest_cook_runner.tscn bakes the whole worldspace), records
+## hydrate from the C# binary codec instead of running the runtime build.
+## Exterior cells only — interiors keep the runtime build.
+##
+## DEFAULT OFF — measured a wash (2026-07-05): the C# binary load is
+## 0.4-0.9 ms, but hydrating GDScript WorldObjectRecord objects costs
+## 8-50 ms per cell (object construction + per-record Dictionary
+## marshalling), i.e. the runtime build's cost was never the classification
+## work — it's constructing 300 records. The win requires M.1b: streaming
+## consumers read the C#-held data directly (packed arrays, no per-record
+## objects). Keep this flag for M.1b development; [cooked-manifest] warn
+## logs the load/hydrate split when enabled.
+var use_cooked_manifests: bool = false
+var _cooked_codec: RefCounted = null
+var _cooked_codec_checked: bool = false
+var _cooked_dir: String = ""  # "" = unresolved, "-" = unavailable
+
 
 func clear_cache() -> void:
 	_manifest_cache.clear()
@@ -51,8 +69,15 @@ func get_cell_manifest(cell_grid: Vector2i) -> Variant:
 	if cell_record == null:
 		return null
 
+	# Both paths keep this side effect: get_source_exterior_cell (door
+	# registration) reads _source_cell_cache.
 	_source_cell_cache[cell_grid] = cell_record
-	var manifest: RefCounted = _make_manifest_from_cell(cell_record, cell_grid)
+
+	var manifest: RefCounted = null
+	if use_cooked_manifests:
+		manifest = _load_cooked_manifest(cell_grid)
+	if manifest == null:
+		manifest = _make_manifest_from_cell(cell_record, cell_grid)
 
 	_manifest_cache[cell_grid] = manifest
 	return manifest
@@ -79,7 +104,49 @@ func get_object_record(object_id: StringName) -> Variant:
 
 
 func get_spawn_adapter_payload(adapter_payload_id: StringName) -> Dictionary:
-	return _spawn_payload_cache.get(adapter_payload_id, {})
+	var payload: Dictionary = _spawn_payload_cache.get(adapter_payload_id, {})
+	if not payload.is_empty():
+		return payload
+	# Cooked-manifest cells skip the runtime build that fills this cache;
+	# resolve lazily from ESM on first interactive use (proximity-gated,
+	# rare). Interiors always run the runtime build, so only exterior
+	# object_ids ("x,y:refid:num") need resolving here.
+	return _resolve_spawn_payload_from_source(adapter_payload_id)
+
+
+func _resolve_spawn_payload_from_source(object_id: StringName) -> Dictionary:
+	var id := str(object_id)
+	var parts := id.split(":")
+	if parts.size() != 3:
+		return {}
+	var grid_parts := parts[0].split(",")
+	if grid_parts.size() != 2:
+		return {}
+	var cell_grid := Vector2i(int(grid_parts[0]), int(grid_parts[1]))
+	var ref_id := parts[1]
+	var ref_num := int(parts[2])
+	var esm: Variant = _get_esm_manager()
+	if esm == null:
+		return {}
+	var cell_record: Variant = esm.get_exterior_cell(cell_grid.x, cell_grid.y)
+	if cell_record == null:
+		return {}
+	for ref in cell_record.references:
+		if int(ref.ref_num) != ref_num or str(ref.ref_id).to_lower() != ref_id:
+			continue
+		var record_type: Array = [""]
+		var base_record: Variant = esm.get_any_record(str(ref.ref_id), record_type)
+		if base_record == null:
+			return {}
+		var payload := {
+			"ref": ref,
+			"base_record": base_record,
+			"type_name": str(record_type[0]),
+			"cell_grid": cell_grid,
+		}
+		_spawn_payload_cache[object_id] = payload
+		return payload
+	return {}
 
 
 func get_source_exterior_cell(cell_grid: Vector2i) -> Variant:
@@ -138,6 +205,85 @@ func _get_record_by_id(object_id: StringName) -> Variant:
 	if _object_cache.has(object_id):
 		return _object_cache[object_id]
 	return null
+
+
+## Hydrate a manifest from a cooked .gwm file (Phase 3 M.1). Returns null on
+## any miss/failure — the caller falls back to the runtime build.
+func _load_cooked_manifest(cell_grid: Vector2i) -> RefCounted:
+	var codec: RefCounted = _get_cooked_codec()
+	if codec == null:
+		return null
+	var path := _cooked_manifest_path(cell_grid)
+	if path.is_empty() or not FileAccess.file_exists(path):
+		return null
+	var t0 := Time.get_ticks_usec()
+	if int(codec.call("LoadFromFile", path)) != OK:
+		Log.warn("streaming", "Cooked manifest failed to load, falling back to runtime build: %s (%s)" % [
+			path, str(codec.get("LastError"))])
+		return null
+	var load_us := Time.get_ticks_usec() - t0
+
+	var manifest: RefCounted = ManifestScript.new(cell_grid)
+	var count := int(codec.call("GetRecordCount"))
+	for i in count:
+		var fields: Dictionary = codec.call("GetRecordFields", i)
+		var record: RefCounted = RecordScript.new()
+		record.object_id = StringName(str(fields["object_id"]))
+		record.record_id = StringName(str(fields["record_id"]))
+		record.source_ref_id = StringName(str(fields["source_ref_id"]))
+		record.source_key = str(fields["source_key"])
+		record.cell_grid = cell_grid
+		record.transform = fields["transform"]
+		record.model_path = str(fields["model_path"])
+		record.model_item_id = str(fields["model_item_id"])
+		record.cache_item_id = str(fields["cache_item_id"])
+		record.category = int(fields["category"])
+		record.capability_flags = int(fields["capability_flags"])
+		record.spawn_route = int(fields["spawn_route"])
+		record.static_batch_allowed = bool(fields["static_batch_allowed"])
+		record.proximity_radius_m = float(fields["proximity_radius_m"])
+		record.adapter_payload_id = StringName(str(fields["adapter_payload_id"]))
+		record.source_type = StringName(str(fields["source_type"]))
+		record.scale_scalar = float(fields["scale_scalar"])
+		record.light_color = fields["light_color"]
+		record.light_radius = float(fields["light_radius"])
+		record.light_animation = int(fields["light_animation"])
+		record.light_is_fire = bool(fields["light_is_fire"])
+		manifest.add_object(record)
+		_object_cache[record.object_id] = record
+	# Split attribution: C# binary read vs GDScript record hydration. The
+	# wave-3 note predicted hydration (object construction + per-record
+	# Dictionary marshalling) would dominate — this measures it.
+	var hydrate_us := Time.get_ticks_usec() - t0 - load_us
+	if load_us + hydrate_us > 8_000:
+		Log.warn("streaming", "[cooked-manifest %.1fms] grid=%s load=%.1fms hydrate=%.1fms records=%d" % [
+			float(load_us + hydrate_us) / 1000.0, cell_grid,
+			float(load_us) / 1000.0, float(hydrate_us) / 1000.0, count])
+	return manifest
+
+
+func _get_cooked_codec() -> RefCounted:
+	if _cooked_codec_checked:
+		return _cooked_codec
+	_cooked_codec_checked = true
+	var bridge := NativeBridge.new()
+	_cooked_codec = bridge.create_native_service("CreateCellManifest")
+	if _cooked_codec == null:
+		Log.info("streaming", "Cooked manifests unavailable (no native codec) — using runtime manifest builds")
+	return _cooked_codec
+
+
+func _cooked_manifest_path(cell_grid: Vector2i) -> String:
+	if _cooked_dir.is_empty():
+		var tree := Engine.get_main_loop() as SceneTree
+		var settings: Node = tree.root.get_node_or_null("/root/SettingsManager") if tree != null and tree.root != null else null
+		if settings == null:
+			_cooked_dir = "-"
+		else:
+			_cooked_dir = str(settings.call("get_cache_base_path")).path_join("manifests")
+	if _cooked_dir == "-":
+		return ""
+	return _cooked_dir.path_join("cell_%d_%d.gwm" % [cell_grid.x, cell_grid.y])
 
 
 func _make_manifest_from_cell(cell_record: Variant, cell_grid: Vector2i, cell_name: String = "") -> RefCounted:

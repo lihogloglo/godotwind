@@ -10,8 +10,9 @@ system docs linked below.
 | --- | --- | --- | --- | --- |
 | NEAR gameplay | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior. Toggle disables visibility, processing, and collision/area activation. | Working |
 | Static visuals | Fixed 150-400m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
-| FAR impostors | Fixed 400-5000m, capped by view distance | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages from generic impostor-capable records | Working |
-| HLOD | Optional 400-1000m overlap experiment, capped by view distance | `object_paging.gd` | Runtime ObjectPaging chunk proxies from generic world object records: static-capable objects are merged into chunk meshes and published as raw RS instances. | Working but default-off due FPS/stutter cost |
+| CHUNK | 400-1200m (target) | Baker: `src/tools/prebaking/` (runner); runtime consumer TBD | **OFFLINE-baked** merged + simplified chunk proxies (MGE XE / OpenMW pattern: merged low-poly real geometry, min-size 0.01 gate, meshoptimizer LOD chain at bake, 1 RS instance per chunk) | Decision locked 2026-07-05 (user); baker in development. Plan: `docs/plans/distant_rendering_recovery_2026_07.md` Phase 2 (revised) |
+| FAR impostors | Interim 400-5000m; retreats to **1200-5000m** when CHUNK ships | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages from generic impostor-capable records. Wrong tool below ~1.2km for architecture (baked lighting vs dynamic sun, parallax flatness) | Working |
+| ~~HLOD~~ | ~~Optional 400-1000m experiment~~ | `object_paging.gd` | Runtime merged chunk proxies — merge-without-simplify, stall + segfault class. Superseded by CHUNK; parked default-off; DELETE when CHUNK is verified (the merge kernel + `object_paging_kernel.gd` survive — the CHUNK baker uses them) | Deprecated |
 
 All tier modules are fed through `WorldObjectSource` manifests. The Morrowind
 implementation lives in `src/core/world/morrowind/morrowind_world_object_source.gd`;
@@ -37,14 +38,15 @@ Distance constants live in `src/core/world/distance_utils.gd`:
 
 - `NEAR_END = 150`
 - `MID_END = 400`
-- `HLOD_START = 400`
-- `HLOD_END = 1000`
-- `FAR_START = 400`
+- `CHUNK_START = 400`, `CHUNK_END = 1200` (offline chunk tier, in development)
+- `HLOD_START = 400`, `HLOD_END = 1000` (deprecated, deleted with object_paging)
+- `FAR_START = 400` (interim — moves to `CHUNK_END` when the chunk tier ships)
 - `FAR_END = 5000`
 
-`FAR_START` is the fixed post-MID design boundary for the current experiment.
-Runtime view distance can cap FAR visibility/loading, but does not move the
-handoff.
+`FAR_START` is the fixed post-MID boundary until the CHUNK tier ships; it
+was deliberately NOT moved to 1200 early because that would leave 400-1200m
+fully empty in the interim (decision 2026-07-05). Runtime view distance can
+cap FAR visibility/loading, but does not move the handoff.
 
 MID to NEAR streaming promotion is separate from render-tier visibility:
 

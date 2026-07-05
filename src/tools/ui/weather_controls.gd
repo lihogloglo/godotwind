@@ -25,6 +25,16 @@ var _env_controls: EnvironmentControls = null
 ## Whether the weather system is wired and active
 var weather_enabled: bool = false
 
+## True while the player is inside a classic (fade-to-black) interior pocket.
+## Weather is an exterior-worldspace system (OpenMW model: weather applies to
+## exterior/quasi-exterior cells only). While suspended, all per-frame visual
+## writes stop — the WeatherRenderer would otherwise write exterior fog into
+## whatever Environment is active, which during an interior visit is the
+## pocket's interior Environment. The clouds CompositorEffect must be disabled
+## explicitly because compositor effects render regardless of camera cull mask.
+## WeatherManager itself keeps simulating (clock + transitions keep advancing).
+var _interior_suspended: bool = false
+
 ## Whether weather drives ocean parameters (wind, foam, color)
 var ocean_link_enabled: bool = true
 
@@ -293,8 +303,8 @@ func on_weather_toggled(enabled: bool) -> void:
 	if not enabled and _env_controls:
 		_env_controls.reassert_fog_defaults()
 
-	# Enable/disable SunshineClouds2 rendering
-	_set_clouds_enabled(enabled or (_env_controls and _env_controls.show_sky))
+	# Enable/disable SunshineClouds2 rendering (kept off while inside an interior)
+	_set_clouds_enabled(not _interior_suspended and (enabled or (_env_controls != null and _env_controls.show_sky)))
 
 	if _particles:
 		if enabled:
@@ -381,7 +391,21 @@ func _set_clouds_enabled(on: bool) -> void:
 ## Notify weather_controls that sky visibility changed.
 ## Called by environment_controls so clouds enable/disable tracks sky state.
 func on_sky_visibility_changed(sky_visible: bool) -> void:
-	_set_clouds_enabled(weather_enabled or sky_visible)
+	_set_clouds_enabled(not _interior_suspended and (weather_enabled or sky_visible))
+
+
+## Suspend/resume outdoor weather visuals for classic interior transitions.
+## Called by world_explorer on transition_started (suspend, idempotent — fires
+## on exit-start too) and on transition_completed once the player is outside
+## (resume). Restores clouds/particles according to the user's toggles.
+func set_interior_suspended(suspended: bool) -> void:
+	if _interior_suspended == suspended:
+		return
+	_interior_suspended = suspended
+	_set_clouds_enabled(not suspended and (weather_enabled or (_env_controls != null and _env_controls.show_sky)))
+	if _particles:
+		_particles.visible = weather_enabled and not suspended
+	Log.info("weather", "Outdoor weather visuals %s" % ("suspended (interior)" if suspended else "resumed (exterior)"))
 
 
 ## Write a single SunshineClouds2 resource parameter. Silently no-ops if
@@ -460,6 +484,13 @@ func on_time_pause_toggled(paused: bool) -> void:
 ## once on weather type change (via _apply_cloud_preset_from_weather), then the user
 ## tweaks via sliders. Re-picking a preset resets the sliders.
 func process(delta: float) -> void:
+	# Interior worldspace: no outdoor sky/cloud/fog writes. The active
+	# Environment is the interior pocket's — writing exterior fog into it was
+	# the "interiors inherit outdoor fog" bug. Simulation continues in
+	# WeatherManager; only rendering output is suspended.
+	if _interior_suspended:
+		return
+
 	# Always update SkyManager with current game hour (even when weather is off)
 	if _env_controls and _env_controls.sky_manager and _env_controls.show_sky:
 		_env_controls.sky_manager.update(WeatherManager.game_hour)
