@@ -26,7 +26,7 @@ func test_apply_adds_required_contract_fields() -> void:
 	assert_bool(payload["valid_for_performance_baseline"]).is_false()
 	assert_array(payload["invalid_reasons"]).contains(["sync_fallback"])
 	assert_dict(payload["summary"]).contains_key_value("avg_fps", 120.0)
-	assert_dict(payload["raw_outputs"]).contains_key("summary_json")
+	assert_dict(payload["raw_outputs"]).contains_keys("summary_json")
 	assert_bool(payload.has("git_commit")).is_true()
 	assert_bool(payload.has("worktree_dirty")).is_true()
 	assert_bool(payload.has("renderer")).is_true()

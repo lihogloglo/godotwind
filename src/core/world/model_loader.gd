@@ -32,7 +32,19 @@ const MAX_CACHE_SIZE := 500
 ## Maximum concurrent ResourceLoader.load_threaded_request calls in flight.
 ## Godot 4.6's internal resource loader can segfault (c0000005) when hammered
 ## with hundreds of concurrent threaded load requests during heavy startup.
-const MAX_CONCURRENT_ASYNC_LOADS := 16
+##
+## 2026-07-05 crash hunt: set to 1 (single-flight). Godot ≤4.6 has a VERIFIED
+## race when multiple loader threads pull the same sub-resource (shared
+## textures/materials across our baked models): the anti-deadlock logic
+## misclassifies concurrent loaders and double-loads the dependency, causing
+## use-after-free (upstream issue godotengine/godot#111202, fixed for 4.7 by
+## PR #118824 — "fixing a use-after-free bug in resource_changed_connections").
+## Our 3/3 bench-ladder segfaults (material.get_rid UAF on main + two
+## loader-thread native crashes) match that signature exactly; reproduction
+## rate rose with streaming throughput (waves 1-4), i.e. with loader
+## concurrency. Single-flight removes contested loads entirely. Revisit when
+## the engine carries the upstream fix.
+const MAX_CONCURRENT_ASYNC_LOADS := 1
 
 ## Per-frame hard caps for the main-thread side of async ResourceLoader drain.
 ## These bound status polling, load_threaded_get() result handoff, and new

@@ -28,19 +28,31 @@ const SC := preload("res://src/core/world/streaming_config.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 
+## Per-frame budget when the caller passes no deadline (Phase 1, 2026-07-05).
+## Bounds the model-warmup drain — request_model_async is main-thread file
+## I/O, and unbudgeted per-cell bursts measured 53-60ms.
+const DEFAULT_UPDATE_BUDGET_USEC: int = 1000
+
 
 ## One cached entry per unique cell grid. Transitions: loading -> ready ->
 ## activated. Evicted (dropped from _cache) on LRU expiry unless activated.
 class PreloadEntry:
 	extends RefCounted
 	var cell: Vector2i
-	var state: String = "loading"  # "loading" | "ready" | "activated"
+	var state: String = "loading"  # "kicking" | "loading" | "ready" | "activated"
 	var last_touched_msec: int = 0
 	## Debug / stat: model paths touched by this preload. Not used for logic.
 	var model_paths: Array[String] = []
 	## Model paths handed to ModelLoader.request_model_async without callback
 	## instantiation. Ready once ModelLoader has cached every listed path.
 	var pending_model_paths: Array[String] = []
+	## Phase 1 slicing (2026-07-05): model paths not yet handed to the
+	## ModelLoader. `request_model_async` does main-thread file I/O
+	## (file_exists + load_threaded_request), so warming a dense cell's
+	## 100+ unique models in one frame cost 50-60ms — the preloader is
+	## ahead-of-time by design, so the warmup drains a few paths per frame
+	## under the update() deadline instead.
+	var unwarmed_paths: Array[String] = []
 
 
 var _cache: Dictionary = {}  # Vector2i -> PreloadEntry
@@ -101,9 +113,11 @@ func set_pipeline_compile_monitor(monitor: PipelineCompileMonitorScript) -> void
 ## camera_cell - current grid position (Vector2i)
 ## camera_pos - world position (only used for Z-up alignment if needed)
 ## velocity_xz - planar velocity, Vector2(x, z) m/s (Godot convention)
-func update(camera_cell: Vector2i, camera_pos: Vector3, velocity_xz: Vector2) -> void:
+func update(camera_cell: Vector2i, camera_pos: Vector3, velocity_xz: Vector2, deadline_usec: int = 0) -> void:
 	_current_anchor_cell = camera_cell
 	var now_msec: int = Time.get_ticks_msec()
+	if deadline_usec <= 0:
+		deadline_usec = Time.get_ticks_usec() + DEFAULT_UPDATE_BUDGET_USEC
 
 	# 1. Compute predicted cells from velocity (§8.3 speed-scaled lookahead).
 	var predicted: Array[Vector2i] = _compute_predicted_cells(camera_cell, velocity_xz)
@@ -114,6 +128,11 @@ func update(camera_cell: Vector2i, camera_pos: Vector3, velocity_xz: Vector2) ->
 			(_cache[cell] as PreloadEntry).last_touched_msec = now_msec
 		else:
 			_begin_preload(cell, now_msec)
+
+	# 2b. Phase 1 slicing: drain a few unwarmed model paths per frame under
+	# the deadline. The prediction window is 0.3-4s, so spreading a cell's
+	# warmup over many frames costs nothing in effective latency.
+	_process_kicking_entries(deadline_usec)
 
 	# 3. Promote LOADING -> READY for entries with all tasks done.
 	_poll_completions()
@@ -272,6 +291,9 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 		entry.state = "ready"
 		stats["preloads_ready"] += 1
 		return
+	# Collect the unique model paths now (record fetch is manifest-cached and
+	# useful work regardless), but hand them to the ModelLoader incrementally —
+	# each request_model_async does main-thread file I/O.
 	var records: Array = _world_object_source.call("get_objects_in_cell", cell)
 	var seen: Dictionary = {}
 	for record: RefCounted in records:
@@ -283,15 +305,41 @@ func _begin_preload(cell: Vector2i, now_msec: int) -> void:
 			continue
 		seen[key] = true
 		entry.model_paths.append(mp)
-
-		var queued: bool = bool(model_loader.call("request_model_async", mp, "", Callable(), false))
-		if queued:
-			entry.pending_model_paths.append(mp)
+		entry.unwarmed_paths.append(mp)
 	if _debug_enabled:
-		print("[CellPreloader] preload kick cell=", cell, " pending=", entry.pending_model_paths.size(), " paths=", entry.model_paths.size())
-	if entry.pending_model_paths.is_empty():
+		print("[CellPreloader] preload kick cell=", cell, " paths=", entry.model_paths.size())
+	if entry.unwarmed_paths.is_empty():
 		entry.state = "ready"
 		stats["preloads_ready"] += 1
+	else:
+		entry.state = "kicking"
+
+
+## Phase 1 slicing: feed unwarmed model paths to the ModelLoader under the
+## frame deadline. Processes entries in cache order; each path is one
+## request_model_async call (file_exists + load_threaded_request — the
+## expensive atoms this slicing exists to spread out).
+func _process_kicking_entries(deadline_usec: int) -> void:
+	var model_loader: Object = _model_loader_ref.get_ref() if _model_loader_ref != null else null
+	if model_loader == null:
+		return
+	for cell: Vector2i in _cache:
+		var entry: PreloadEntry = _cache[cell]
+		if entry.state != "kicking":
+			continue
+		while not entry.unwarmed_paths.is_empty():
+			if Time.get_ticks_usec() >= deadline_usec:
+				return
+			var mp: String = entry.unwarmed_paths.pop_back()
+			var queued: bool = bool(model_loader.call("request_model_async", mp, "", Callable(), false))
+			if queued:
+				entry.pending_model_paths.append(mp)
+		entry.state = "loading"
+		if entry.pending_model_paths.is_empty():
+			entry.state = "ready"
+			stats["preloads_ready"] += 1
+		if Time.get_ticks_usec() >= deadline_usec:
+			return
 
 
 ## Promote LOADING -> READY when all requested models are cached.

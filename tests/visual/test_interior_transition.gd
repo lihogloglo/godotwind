@@ -138,20 +138,33 @@ func _ready() -> void:
 	_log_exterior_door_node_summary()
 	_loading = false
 
-	# Position camera near first door
-	if not _door_pairs.is_empty():
-		_teleport_to_door(0)
-
 	# Auto-drive: if launched with `-- --auto-test` (user args after `--`),
 	# programmatically walk through a transition so headless runs can
 	# verify the async pipeline. Without this the scene just sits idle
 	# with no input and the async pipeline is never exercised.
+	# `--auto-test-walk` / `--auto-test-rush` (wave-2 owed check, 2026-07-05):
+	# approach-profile variants — walk verifies proximity preload assembles the
+	# pocket before interact range; rush activates the door with the slot still
+	# loading to exercise the fade bridge + collapse finish-up.
 	var user_args: PackedStringArray = OS.get_cmdline_user_args()
 	var engine_args: PackedStringArray = OS.get_cmdline_args()
 	var has_auto_test: bool = ("--auto-test" in user_args) or ("--auto-test" in engine_args)
+	var has_auto_walk: bool = ("--auto-test-walk" in user_args) or ("--auto-test-walk" in engine_args)
+	var has_auto_rush: bool = ("--auto-test-rush" in user_args) or ("--auto-test-rush" in engine_args)
+
+	# Position camera near first door — except in approach modes, where the
+	# run function owns camera placement (starting next to the door would
+	# trigger the proximity preload the walk variant is trying to measure).
+	if not _door_pairs.is_empty() and not has_auto_walk and not has_auto_rush:
+		_teleport_to_door(0)
+
 	Log.info("testing", "[AUTO-TEST] user_args=%s engine_args_has=%s" % [str(user_args), "--auto-test" in engine_args])
 	if has_auto_test:
 		_auto_test_run.call_deferred()
+	elif has_auto_walk:
+		_auto_test_approach_run.call_deferred(false)
+	elif has_auto_rush:
+		_auto_test_approach_run.call_deferred(true)
 
 
 func _auto_test_run() -> void:
@@ -292,6 +305,118 @@ func _auto_test_run() -> void:
 	var verdict: String = "PASS" if _transition_peak_ms <= _HICCUP_MS_THRESHOLD else "FAIL"
 	Log.info("testing", "[AUTO-TEST] RESULT: enter+exit complete, last transition peak=%.2f ms [%s]" % [_transition_peak_ms, verdict])
 	await _finish_auto_test(0 if verdict == "PASS" else 2)
+
+
+## Approach-profile verification (wave-2 owed check, 2026-07-05).
+## rush=false (walk): start outside the 10m preload radius and move toward the
+## door at walking speed, letting _process → pocket_manager.update drive the
+## proximity preload. PASS requires the pocket to be FULLY assembled
+## (is_occupied, progressive finish-up done) before the camera reaches
+## interact range, then a clean enter.
+## rush=true: teleport straight to the door and activate it immediately —
+## the slot is still loading, so the transition must take the fade bridge and
+## the _is_transitioning collapse must assemble the interior in one gulp.
+func _auto_test_approach_run(rush: bool) -> void:
+	var mode_name := "RUSH" if rush else "WALK"
+	Log.info("testing", "[AUTO-APPROACH:%s] starting" % mode_name)
+	await get_tree().process_frame
+	await get_tree().process_frame
+
+	if _door_pairs.is_empty():
+		Log.error("testing", "[AUTO-APPROACH:%s] no doors — abort" % mode_name)
+		get_tree().quit(1)
+		return
+	var dp: Dictionary = _door_pairs[0]
+	var door = null
+	if not str(dp.get("instance_key", "")).is_empty():
+		door = _pocket_manager.get_door_info_by_instance_key(StringName(str(dp.instance_key)))
+	if door == null:
+		Log.error("testing", "[AUTO-APPROACH:%s] registered DoorInfo missing for '%s'" % [mode_name, str(dp.get("instance_key", ""))])
+		get_tree().quit(1)
+		return
+	var door_pos: Vector3 = door.world_position
+
+	if rush:
+		# Teleport to interact range; one update() tick fires the proximity
+		# preload (realistic: a rushing player triggers it late), then we
+		# activate with the slot still loading.
+		_camera.global_position = door_pos + Vector3(0, 1.5, 2.0)
+		_camera.look_at(door_pos + Vector3(0, 1.2, 0))
+		_sync_camera_from_basis()
+		await get_tree().physics_frame
+		var pre_slot = _pocket_manager._get_slot_for_cell_any(dp.interior_name)
+		var preloaded: bool = pre_slot != null and pre_slot.is_occupied
+		Log.info("testing", "[AUTO-APPROACH:RUSH] activating immediately (pocket already occupied=%s)" % preloaded)
+		var entered_rush: bool = await _pocket_manager.enter_interior(door)
+		if not entered_rush:
+			Log.error("testing", "[AUTO-APPROACH:RUSH] enter_interior returned false")
+			get_tree().quit(1)
+			return
+	else:
+		var walk_speed := 1.4
+		var walk_start_dist := 18.0
+		var walk_stop_dist := 2.0
+		var walk_timeout_ms := 120000
+		# Approach direction is arbitrary (fly camera, no collision): proximity
+		# preload is distance-based, which is what this verifies.
+		_camera.global_position = door_pos + Vector3(0, 1.5, walk_start_dist)
+		_camera.look_at(door_pos + Vector3(0, 1.2, 0))
+		_sync_camera_from_basis()
+		var walk_start_ms := Time.get_ticks_msec()
+		var occupied_at_dist := -1.0
+		while true:
+			await get_tree().process_frame
+			if Time.get_ticks_msec() - walk_start_ms > walk_timeout_ms:
+				Log.error("testing", "[AUTO-APPROACH:WALK] timeout before reaching door")
+				get_tree().quit(1)
+				return
+			var to_door := door_pos - _camera.global_position
+			to_door.y = 0.0
+			var dist := to_door.length()
+			if occupied_at_dist < 0.0:
+				var slot = _pocket_manager._get_slot_for_cell_any(dp.interior_name)
+				if slot and slot.is_occupied:
+					occupied_at_dist = dist
+			if dist <= walk_stop_dist:
+				break
+			_camera.global_position += to_door.normalized() * walk_speed * get_process_delta_time()
+		if occupied_at_dist < 0.0:
+			Log.error("testing", "[AUTO-APPROACH:WALK] pocket was NOT assembled when player reached interact range — progressive preload too slow")
+			get_tree().quit(1)
+			return
+		Log.info("testing", "[AUTO-APPROACH:WALK] pocket fully assembled %.1fm from the door (preload radius 10m)" % occupied_at_dist)
+		var entered_walk: bool = await _pocket_manager.enter_interior(door)
+		if not entered_walk:
+			Log.error("testing", "[AUTO-APPROACH:WALK] enter_interior returned false")
+			get_tree().quit(1)
+			return
+
+	# Common post-entry asserts: inside, pocket assembled and populated.
+	var enter_wait_ms := Time.get_ticks_msec()
+	while not _pocket_manager.is_inside() and Time.get_ticks_msec() - enter_wait_ms < 30000:
+		await get_tree().process_frame
+	if not _pocket_manager.is_inside():
+		Log.error("testing", "[AUTO-APPROACH:%s] transition never completed" % mode_name)
+		get_tree().quit(1)
+		return
+	var active_slot = _pocket_manager._active_pocket
+	if active_slot == null or not active_slot.is_occupied \
+			or active_slot.cell_node == null or not is_instance_valid(active_slot.cell_node) \
+			or active_slot.cell_node.get_child_count() == 0:
+		Log.error("testing", "[AUTO-APPROACH:%s] interior did not assemble (slot=%s)" % [
+			mode_name, "null" if active_slot == null else "occupied=%s children=%d" % [
+				active_slot.is_occupied,
+				active_slot.cell_node.get_child_count() if active_slot.cell_node else -1]])
+		get_tree().quit(1)
+		return
+	if not active_slot.cell_node.visible:
+		Log.error("testing", "[AUTO-APPROACH:%s] pocket assembled but not visible" % mode_name)
+		get_tree().quit(1)
+		return
+
+	Log.info("testing", "[AUTO-APPROACH:%s] RESULT: entered '%s', %d children, transition peak=%.2f ms" % [
+		mode_name, active_slot.cell_name, active_slot.cell_node.get_child_count(), _transition_peak_ms])
+	await _finish_auto_test(0)
 
 
 func _finish_auto_test(exit_code: int) -> void:

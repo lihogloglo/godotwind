@@ -77,6 +77,16 @@ var _frustum_container: Node3D = null
 ## Whether tier rings need to be rebuilt (only when distances change)
 var _tier_rings_built: bool = false
 
+## Camera height above the ring plane at the last rebuild. Tier bands are
+## spheres around the camera (3D distance — the same metric the engine's
+## visibility_range uses), so their ground intersection shrinks with
+## altitude: r_ground = sqrt(R² − h²), and the band vanishes when h > R.
+## Rings rebuild when altitude drifts past TIER_ALTITUDE_REBUILD_DELTA so
+## the overlay stops lying from the air (Phase 0, 2026-07-05).
+var _tier_built_altitude: float = 0.0
+const TIER_RING_PLANE_Y := 2.0
+const TIER_ALTITUDE_REBUILD_DELTA := 5.0
+
 ## LOD level colors for debug visualization
 ## LOD0 = Full detail (NEAR tier), LOD1-3 = MID tier, Impostor = FAR tier
 const LOD_COLORS: Dictionary[int, Color] = {
@@ -184,6 +194,11 @@ func _process(delta: float) -> void:
 			# Just move the container - no expensive geometry rebuild
 			var cam_pos := _camera.global_position
 			_tier_container.global_position = Vector3(cam_pos.x, 0.0, cam_pos.z)
+			# Altitude changes the ground intersection of the camera-distance
+			# bands — rebuild the (cheap) ring geometry when it drifts.
+			var altitude := absf(cam_pos.y - TIER_RING_PLANE_Y)
+			if absf(altitude - _tier_built_altitude) > TIER_ALTITUDE_REBUILD_DELTA:
+				_rebuild_tier_overlay()
 
 	_update_timer += delta
 	if _update_timer < _update_interval:
@@ -466,18 +481,41 @@ func _rebuild_tier_overlay() -> void:
 	Log.debug("debug", "Tier distances: NEAR %.0f, MID %.0f, HLOD %.0f, FAR %.0f (view cap %.0f)" % [
 		DU.NEAR_END, DU.MID_END, DU.HLOD_END, DU.FAR_END, view_cap])
 
-	_create_tier_ring(ring_center, DU.NEAR_START, minf(DU.NEAR_END, view_cap), 0, "NEAR")
+	# Tier bands are camera-distance spheres; project them onto the ring
+	# plane so the drawn circles match what the engine actually culls at
+	# this altitude. h = camera height above the plane.
+	var cam_pos := _camera.global_position
+	var altitude := absf(cam_pos.y - TIER_RING_PLANE_Y)
+	_tier_built_altitude = altitude
+
+	_create_tier_band(DU.NEAR_START, minf(DU.NEAR_END, view_cap), altitude, 0, "NEAR")
 	if view_cap > DU.MID_START:
-		_create_tier_ring(ring_center, DU.MID_START, minf(DU.MID_END, view_cap), 1, "MID")
+		_create_tier_band(DU.MID_START, minf(DU.MID_END, view_cap), altitude, 1, "MID")
 	if view_cap > DU.HLOD_START:
-		_create_tier_ring(ring_center, DU.HLOD_START, minf(DU.HLOD_END, view_cap), 2, "HLOD")
+		_create_tier_band(DU.HLOD_START, minf(DU.HLOD_END, view_cap), altitude, 2, "HLOD")
 	if view_cap > DU.FAR_START:
-		_create_tier_ring(ring_center, DU.FAR_START, minf(minf(DU.FAR_END, view_cap), 2000.0), 3, "FAR")
+		_create_tier_band(DU.FAR_START, minf(minf(DU.FAR_END, view_cap), 2000.0), altitude, 3, "FAR")
 
 	# Mark as built and set initial position
 	_tier_rings_built = true
-	var cam_pos := _camera.global_position
 	_tier_container.global_position = Vector3(cam_pos.x, 0.0, cam_pos.z)
+
+
+## Project a camera-distance band [inner, outer] onto the ring plane at the
+## given camera altitude and draw the resulting annulus (or disk). A band the
+## camera has risen above (h > outer) has no ground intersection and is
+## skipped entirely — from that height everything on the plane is farther
+## than `outer`, so drawing it would be a lie.
+func _create_tier_band(inner_radius: float, outer_radius: float, altitude: float, tier: int, tier_name: String) -> void:
+	if altitude >= outer_radius:
+		return
+	var outer_eff := sqrt(maxf(outer_radius * outer_radius - altitude * altitude, 0.0))
+	var inner_eff := 0.0
+	if altitude < inner_radius:
+		inner_eff = sqrt(maxf(inner_radius * inner_radius - altitude * altitude, 0.0))
+	if outer_eff - inner_eff < 0.5:
+		return
+	_create_tier_ring(Vector3.ZERO, inner_eff, outer_eff, tier, tier_name)
 
 
 ## Create a ring mesh for a tier zone

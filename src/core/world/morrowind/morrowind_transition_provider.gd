@@ -35,9 +35,24 @@ const NON_SEAMLESS_PATTERNS: Array[String] = [
 
 var object_source: RefCounted = null
 
+## Phase 1 wave 2 (2026-07-05): per-cell descriptor cache. Door/shell layout
+## is static world data; the uncached path cost 118-241ms per dense cell
+## (O(doors × refs) base-record lookups + pattern matches) inside the
+## cell_loading signal on every cell (re)load.
+var _exterior_portal_cache: Dictionary = {}  # Vector2i -> Array[TransitionPortalDescriptor]
+
+## Phase 1 wave 4 (2026-07-05): per-base-record classification memo shared
+## across cells (empty Dictionary = ref is not a shell candidate). The
+## classification is a pure function of the BASE record — static ESM data —
+## yet every cell's first touch re-paid base-record lookup + to_lower + up to
+## 38 substring matches per ref (part of the 15-50ms [door-register] spikes).
+var _ref_class_cache: Dictionary = {}  # lowercase ref_id -> classification Dictionary
+
 
 func configure(source: RefCounted) -> void:
 	object_source = source
+	_exterior_portal_cache.clear()
+	_ref_class_cache.clear()
 
 
 static func make_exterior_portal_key(cell_grid: Vector2i, base_ref_id: StringName, ref_num: int) -> StringName:
@@ -49,21 +64,119 @@ static func make_interior_portal_key(cell_name: String, base_ref_id: StringName,
 
 
 func get_exterior_transition_portals(cell_payload: Variant, cell_grid: Vector2i) -> Array[TransitionPortalDescriptor]:
+	if cell_grid in _exterior_portal_cache:
+		return _exterior_portal_cache[cell_grid]
+
 	var portals: Array[TransitionPortalDescriptor] = []
 	if cell_payload == null or not ("references" in cell_payload):
 		return portals
 
+	# Collect the door refs first — only build the (one-pass) shell candidate
+	# list when the cell actually has interior doors.
+	var t0 := Time.get_ticks_usec()
 	var source_space := WorldSpaceHandleScript.exterior_grid(cell_grid)
+	var door_refs: Array = []
+	var door_targets: Array[String] = []
 	for ref: Variant in cell_payload.references:
 		if not _is_teleport_ref(ref):
 			continue
 		var target_name := str(ref.teleport_cell)
 		if target_name.is_empty() or not _is_interior_space(target_name):
 			continue
-		var descriptor := _build_portal_descriptor(ref, source_space, WorldSpaceHandleScript.interior(target_name), cell_grid)
-		_identify_shell_for_portal(descriptor, cell_payload, ref)
-		portals.append(descriptor)
+		door_refs.append(ref)
+		door_targets.append(target_name)
+
+	var build_us := 0
+	var identify_us := 0
+	if not door_refs.is_empty():
+		var t1 := Time.get_ticks_usec()
+		var candidates := _build_shell_candidates(cell_payload)
+		var buckets := _bucket_shell_candidates(candidates)
+		var t2 := Time.get_ticks_usec()
+		build_us = t2 - t1
+		for i in door_refs.size():
+			var door_ref: Variant = door_refs[i]
+			var descriptor := _build_portal_descriptor(door_ref, source_space, WorldSpaceHandleScript.interior(door_targets[i]), cell_grid)
+			_identify_shell_from_candidates(descriptor, candidates, buckets, door_ref)
+			portals.append(descriptor)
+		identify_us = Time.get_ticks_usec() - t2
+
+	# Phase 1 wave 4 (2026-07-05): split attribution for the residual — the
+	# outer [door-register] timer can't tell candidate build from per-door
+	# shell identification.
+	var total_us := Time.get_ticks_usec() - t0
+	if total_us > 8_000:
+		Log.warn("streaming", "[door-shell %.1fms] grid=%s doors=%d build=%.1fms identify=%.1fms memo=%d" % [
+			float(total_us) / 1000.0, cell_grid, door_refs.size(),
+			float(build_us) / 1000.0, float(identify_us) / 1000.0, _ref_class_cache.size()])
+
+	_exterior_portal_cache[cell_grid] = portals
 	return portals
+
+
+## One pass over the cell's references resolving base records ONCE and
+## precomputing the pattern classifications the per-door shell search needs.
+## Replaces the O(doors × refs) rescan that cost 118-241ms on dense cells.
+## Wave 4: the per-record work is memoized in _ref_class_cache, so after the
+## first encounter of a base record this pass is one dictionary hit per ref.
+func _build_shell_candidates(cell_payload: Variant) -> Array[Dictionary]:
+	var candidates: Array[Dictionary] = []
+	for ref: Variant in cell_payload.references:
+		var cls := _classify_shell_base_record(str(ref.ref_id))
+		if cls.is_empty():
+			continue
+		candidates.append({
+			"ref_id": ref.ref_id,
+			"position": ref.position,
+			"is_static": cls["is_static"],
+			"is_building": cls["is_building"],
+			"is_non_seamless": cls["is_non_seamless"],
+			"model_path": cls["model_path"],
+		})
+	return candidates
+
+
+## Memoized shell classification for one base record. Returns an empty
+## Dictionary when the ref can never be a shell candidate (wrong record type
+## or no model). Safe for the session: base records are static ESM data.
+func _classify_shell_base_record(ref_id: String) -> Dictionary:
+	var key := ref_id.to_lower()
+	if key in _ref_class_cache:
+		return _ref_class_cache[key]
+	var cls := {}
+	var record_type: Array = [""]
+	var base_record: Variant = _get_base_record(ref_id, record_type)
+	if base_record != null:
+		var type_name := str(record_type[0])
+		if type_name == "static" or type_name == "activator":
+			var model_path := _model_path_for(base_record)
+			if not model_path.is_empty():
+				cls = {
+					"is_static": type_name == "static",
+					"is_building": _matches_any(model_path, BUILDING_PATTERNS),
+					"is_non_seamless": _matches_any(model_path, NON_SEAMLESS_PATTERNS),
+					"model_path": model_path,
+				}
+	_ref_class_cache[key] = cls
+	return cls
+
+
+## Uniform-grid bucket index over candidate positions (MW XY ground plane,
+## bucket edge = the 5m building search radius). Each door then scans its
+## 3x3 bucket neighborhood instead of every candidate in the cell — the full
+## per-door scan was O(doors × candidates) and dominated door-dense cells
+## (41 doors × ~hundreds of candidates on grid (-3,-2)).
+func _bucket_shell_candidates(candidates: Array[Dictionary]) -> Dictionary:
+	var bucket_units: float = BUILDING_SEARCH_RADIUS * CS.UNITS_PER_METER
+	var buckets: Dictionary = {}
+	for i in candidates.size():
+		var p: Vector3 = candidates[i]["position"]
+		var key := Vector2i(floori(p.x / bucket_units), floori(p.y / bucket_units))
+		if key in buckets:
+			(buckets[key] as Array).append(i)
+		else:
+			buckets[key] = [i]
+	return buckets
 
 
 func get_interior_transition_portals(
@@ -202,9 +315,10 @@ func _is_interior_space(cell_name: String) -> bool:
 	return cell != null and bool(cell.call("is_interior"))
 
 
-func _identify_shell_for_portal(
+func _identify_shell_from_candidates(
 	descriptor: TransitionPortalDescriptor,
-	cell_payload: Variant,
+	candidates: Array[Dictionary],
+	buckets: Dictionary,
 	door_ref: Variant,
 ) -> void:
 	var door_pos_mw: Vector3 = door_ref.position
@@ -212,61 +326,68 @@ func _identify_shell_for_portal(
 	var best_model_path: String = ""
 	var best_dist_sq: float = INF
 	var is_non_seamless := false
+	var radius_sq_mw: float = BUILDING_SEARCH_RADIUS_SQ * CS.UNITS_PER_METER * CS.UNITS_PER_METER
 
-	for ref: Variant in cell_payload.references:
-		if ref.ref_id == door_ref.ref_id:
+	# Bucket edge == search radius, so everything within BUILDING_SEARCH_RADIUS
+	# of the door is guaranteed to sit in the 3x3 neighborhood of the door's
+	# bucket (the 3m fallback radius below is smaller, so it's covered too).
+	# The exact distance checks stay — the buckets only pre-prune.
+	var bucket_units: float = BUILDING_SEARCH_RADIUS * CS.UNITS_PER_METER
+	var center := Vector2i(floori(door_pos_mw.x / bucket_units), floori(door_pos_mw.y / bucket_units))
+	var nearby: Array = []
+	for dy: int in range(-1, 2):
+		for dx: int in range(-1, 2):
+			var key := center + Vector2i(dx, dy)
+			if key in buckets:
+				nearby.append_array(buckets[key])
+
+	for idx: int in nearby:
+		var candidate: Dictionary = candidates[idx]
+		if candidate["ref_id"] == door_ref.ref_id:
 			continue
-		var record_type: Array = [""]
-		var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
-		if base_record == null:
+		var dist_sq: float = (candidate["position"] as Vector3).distance_squared_to(door_pos_mw)
+		if dist_sq > radius_sq_mw:
 			continue
-		var type_name := str(record_type[0])
-		if type_name != "static" and type_name != "activator":
-			continue
-		var model_path := _model_path_for(base_record)
-		if model_path.is_empty():
-			continue
-		var dist_sq: float = ref.position.distance_squared_to(door_pos_mw)
-		if dist_sq > BUILDING_SEARCH_RADIUS_SQ * CS.UNITS_PER_METER * CS.UNITS_PER_METER:
-			continue
-		if _matches_any(model_path, NON_SEAMLESS_PATTERNS):
+		if candidate["is_non_seamless"]:
 			is_non_seamless = true
-		if _matches_any(model_path, BUILDING_PATTERNS) and dist_sq < best_dist_sq:
+		if candidate["is_building"] and dist_sq < best_dist_sq:
 			best_dist_sq = dist_sq
-			best_ref_id = ref.ref_id
-			best_model_path = model_path
+			best_ref_id = candidate["ref_id"]
+			best_model_path = candidate["model_path"]
 
 	if best_ref_id == &"" and not is_non_seamless:
-		for ref: Variant in cell_payload.references:
-			if ref.ref_id == door_ref.ref_id:
+		var fallback_radius_mw: float = 3.0 * CS.UNITS_PER_METER
+		var fallback_radius_sq: float = fallback_radius_mw * fallback_radius_mw
+		for idx: int in nearby:
+			var candidate: Dictionary = candidates[idx]
+			if candidate["ref_id"] == door_ref.ref_id:
 				continue
-			var record_type: Array = [""]
-			var base_record: Variant = _get_base_record(str(ref.ref_id), record_type)
-			if base_record == null or str(record_type[0]) != "static":
+			if not candidate["is_static"]:
 				continue
-			var model_path := _model_path_for(base_record)
-			if model_path.is_empty():
-				continue
-			var dist_sq: float = ref.position.distance_squared_to(door_pos_mw)
-			var fallback_radius_mw: float = 3.0 * CS.UNITS_PER_METER
-			if dist_sq > fallback_radius_mw * fallback_radius_mw:
+			var dist_sq: float = (candidate["position"] as Vector3).distance_squared_to(door_pos_mw)
+			if dist_sq > fallback_radius_sq:
 				continue
 			if dist_sq < best_dist_sq:
 				best_dist_sq = dist_sq
-				best_ref_id = ref.ref_id
-				best_model_path = model_path
+				best_ref_id = candidate["ref_id"]
+				best_model_path = candidate["model_path"]
 
 	descriptor.shell_key = best_ref_id
 	descriptor.shell_model_path = best_model_path
 	descriptor.supports_seamless = not is_non_seamless and best_ref_id != &""
 
+	# Wave 4 (2026-07-05): demoted from info/warn to debug. These fired once
+	# PER DOOR (41 lines on grid (-3,-2)) — print I/O plus push_warning's
+	# script-backtrace collection dominated the measured [door-shell] identify
+	# time (a single no-shell warn measured 18ms in the unit-test env). A door
+	# without a shell is an expected condition, not a warning.
 	if best_ref_id != &"":
 		var dist_godot: float = sqrt(best_dist_sq) * CS.SCALE_FACTOR
-		Log.info("streaming", "Portal '%s' -> shell '%s' (%s, dist=%.1fm, seamless=%s)" % [
+		Log.debug("streaming", "Portal '%s' -> shell '%s' (%s, dist=%.1fm, seamless=%s)" % [
 			descriptor.affordance_key, best_ref_id, best_model_path.get_file(),
 			dist_godot, descriptor.supports_seamless])
 	else:
-		Log.warn("streaming", "Portal '%s' -> NO shell found (seamless=%s, non_seamless_match=%s)" % [
+		Log.debug("streaming", "Portal '%s' -> NO shell found (seamless=%s, non_seamless_match=%s)" % [
 			descriptor.affordance_key, descriptor.supports_seamless, is_non_seamless])
 
 

@@ -104,6 +104,10 @@ var _output_dir: String = ""
 var _started_msec: int = 0
 var _settle_elapsed: float = 0.0
 var _max_rungs: int = 0
+## User FPS cap saved at setup, restored at finish (0 = was uncapped).
+var _saved_max_fps: int = 0
+## User vsync mode saved at setup, restored at finish.
+var _saved_vsync_mode: DisplayServer.VSyncMode = DisplayServer.VSYNC_DISABLED
 
 ## State: waiting_settle -> apply_rung -> toggle_settle -> flyby -> (next rung) -> done
 var _state: String = "waiting_settle"
@@ -143,6 +147,18 @@ func configure(
 		DirAccess.make_dir_recursive_absolute(_output_dir)
 	if _toggles:
 		_toggles.disable_all()
+	# Benchmark hygiene (Phase 0, 2026-07-05): uncap FPS for the run so rung
+	# deltas aren't compressed against a user frame cap; restored in _finish().
+	# Both cap sources handled: Engine.max_fps AND vsync (user settings
+	# default vsync ON — on a 144 Hz panel that pins every fast rung at 144).
+	_saved_max_fps = Engine.max_fps
+	if _saved_max_fps > 0:
+		Engine.max_fps = 0
+		Log.info("tools", "[LADDER] Engine.max_fps %d -> 0 for the run (restored at finish)" % _saved_max_fps)
+	_saved_vsync_mode = DisplayServer.window_get_vsync_mode()
+	if _saved_vsync_mode != DisplayServer.VSYNC_DISABLED:
+		DisplayServer.window_set_vsync_mode(DisplayServer.VSYNC_DISABLED)
+		Log.info("tools", "[LADDER] vsync mode %d -> disabled for the run (restored at finish)" % _saved_vsync_mode)
 	_started_msec = Time.get_ticks_msec()
 	var rung_count := _effective_rung_count()
 	Log.info("tools", "[LADDER] configured — output dir: %s, rungs: %d" % [
@@ -397,6 +413,10 @@ func _finish() -> void:
 	_write_ladder_json()
 	if _toggles:
 		_toggles.reset()
+	if _saved_max_fps > 0:
+		Engine.max_fps = _saved_max_fps
+	if _saved_vsync_mode != DisplayServer.VSYNC_DISABLED:
+		DisplayServer.window_set_vsync_mode(_saved_vsync_mode)
 	Log.info("tools", "[LADDER] sequence complete — output dir: %s — quitting" % _output_dir)
 	ladder_complete.emit(_build_final_summary())
 	# Deferred quit so the log line flushes to disk.

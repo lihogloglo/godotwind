@@ -39,7 +39,13 @@ const TEXTURE_ARRAY_REBUILD_DELAY: float = 0.1
 ## texture finalization monopolizes a frame.
 const JOB_RESULT_POLL_MAX_PER_FRAME: int = 4
 const JOB_RESULT_POLL_BUDGET_USEC: int = 1500
-const TEXTURE_LOAD_MAX_ACTIVE_TASKS: int = 2
+## 2026-07-05 crash hunt: 2 → 1. Worker tasks call ResourceLoader.load for
+## v6 .res normal atlases; Godot ≤4.6 threaded loading races when loads run
+## concurrently (godotengine/godot#111202, fixed in 4.7 by PR #118824).
+## Single-flight here + single-flight in ModelLoader keeps at most two loader
+## operations alive engine-wide (one model + one atlas), the minimum without
+## a unified loader service.
+const TEXTURE_LOAD_MAX_ACTIVE_TASKS: int = 1
 
 ## Full-ring uploads are expensive while the startup ring is still ingesting.
 ## Let the first visible batch appear quickly, then throttle progressive global
@@ -337,6 +343,17 @@ class TextureBucket:
 	var normal_array_dirty: bool = false
 	var committed_texture_array_layers: int = 0
 	var committed_normal_array_layers: int = 0
+	## Wave 6 (2026-07-05) incremental atlas commits: the layer count the live
+	## Texture2DArray was CREATED with. create_from_images fixes the layer
+	## count, so full rebuilds allocate padded capacity (next power of two)
+	## and appends stream in via update_layer. Unused padded layers are never
+	## sampled — instances address layers by explicit index.
+	var committed_texture_array_capacity: int = 0
+	var committed_normal_array_capacity: int = 0
+	## True when layer INDICES changed (compaction remap): the live array no
+	## longer matches all_array_images order, so incremental append commits
+	## are invalid and the full rebuild path must run.
+	var array_layout_dirty: bool = false
 
 #endregion
 
@@ -1026,8 +1043,10 @@ func _load_texture_sync(hash_key: String, texture_path: String) -> void:
 
 ## Submit async job to load a normal texture.
 ## `is_res` selects between async PNG decode (Image.load) and Godot
-## ResourceLoader (.res ImageTexture for v6 bakes). ResourceLoader IS
-## thread-safe in Godot 4.6 for runtime resource files outside res://.
+## ResourceLoader (.res ImageTexture for v6 bakes). NOTE (2026-07-05): the
+## old claim here that ResourceLoader is thread-safe in 4.6 is WRONG for
+## concurrent loads — see godotengine/godot#111202 (races in ≤4.6, fixed for
+## 4.7). TEXTURE_LOAD_MAX_ACTIVE_TASKS=1 keeps these jobs single-flight.
 func _submit_normal_load_job(hash_key: String, normal_path: String, is_res: bool = false) -> void:
 	if not _texture_jobs_active:
 		return
@@ -1162,6 +1181,13 @@ func process_publication_slice(delta: float, deadline_usec: int = 0) -> void:
 	# task is in flight. When the worker completes, finalises the rebuild
 	# on this frame (main-thread create_from_images + shader param swap).
 	_poll_rebuild_task(deadline_usec)
+	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+		return
+
+	# Wave 6 (2026-07-05): drain appended atlas layers into the live
+	# capacity-padded arrays (update_layer, ~1 ms each) under the slice
+	# deadline — replaces full-array re-uploads for append-only changes.
+	_commit_incremental_layers(deadline_usec)
 	if deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
 		return
 
@@ -2730,6 +2756,9 @@ func _compact_texture_array(bucket_key: String = "") -> void:
 	bucket.committed_normal_array_layers = 0
 	bucket.texture_array_dirty = true
 	bucket.normal_array_dirty = true
+	# Compaction remapped layer indices — the live array is stale everywhere,
+	# incremental append commits are invalid until the next full rebuild.
+	bucket.array_layout_dirty = true
 	_mark_all_pages_dirty()
 
 	_stats["texture_array_layers"] = _get_total_texture_layers()
@@ -2738,6 +2767,96 @@ func _compact_texture_array(bucket_key: String = "") -> void:
 	# Reset "array full" warning flag since we freed space
 	if removed_count > 0:
 		_stats["_logged_array_full"] = false
+
+
+## Shared padding images for capacity-padded array builds, keyed by
+## "atlas_size:has_mipmaps". One Image reused for every padded slot —
+## create_from_images copies pixel data per layer, reuse is safe.
+var _pad_image_cache: Dictionary = {}
+
+
+## True when the bucket's dirt is append-only against live arrays with spare
+## created capacity — i.e. it can be drained via update_layer and must NOT
+## trigger a full rebuild. False when a full rebuild is required: no live
+## array yet, append exceeds created capacity, or compaction remapped
+## layer indices.
+func _bucket_qualifies_incremental(bucket: TextureBucket) -> bool:
+	if bucket.array_layout_dirty:
+		return false
+	if not bucket.texture_array_dirty and not bucket.normal_array_dirty:
+		return false
+	if bucket.texture_array_dirty and (
+			bucket.texture_array == null
+			or bucket.all_array_images.size() > bucket.committed_texture_array_capacity):
+		return false
+	if bucket.normal_array_dirty and (
+			bucket.normal_texture_array == null
+			or bucket.all_normal_images.size() > bucket.committed_normal_array_capacity):
+		return false
+	return true
+
+
+## Per-frame drain: commit appended layers into the live (capacity-padded)
+## texture arrays via ImageTextureLayered.update_layer, under the slice
+## deadline. At least one layer per call so the drain always terminates.
+## No page invalidation and no shader-param swap needed: the texture OBJECT
+## is unchanged (update is in-place) and new impostors already marked their
+## own pages dirty when they were added.
+func _commit_incremental_layers(deadline_usec: int = 0) -> void:
+	var committed := 0
+	for bucket: TextureBucket in _texture_buckets.values():
+		if not _bucket_qualifies_incremental(bucket):
+			continue
+		while bucket.committed_texture_array_layers < bucket.all_array_images.size():
+			if committed > 0 and deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+				break
+			var i := bucket.committed_texture_array_layers
+			bucket.texture_array.update_layer(_as_rgba8(bucket.all_array_images[i]), i)
+			bucket.committed_texture_array_layers = i + 1
+			committed += 1
+		while bucket.committed_normal_array_layers < bucket.all_normal_images.size():
+			if committed > 0 and deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+				break
+			var i := bucket.committed_normal_array_layers
+			bucket.normal_texture_array.update_layer(_as_rgba8(bucket.all_normal_images[i]), i)
+			bucket.committed_normal_array_layers = i + 1
+			committed += 1
+
+		if bucket.committed_texture_array_layers >= bucket.all_array_images.size():
+			bucket.texture_array_dirty = false
+		if bucket.committed_normal_array_layers >= bucket.all_normal_images.size():
+			bucket.normal_array_dirty = false
+		if committed > 0 and deadline_usec > 0 and Time.get_ticks_usec() >= deadline_usec:
+			break
+	if committed > 0:
+		_stats["far_incremental_layer_commits"] = int(_stats.get("far_incremental_layer_commits", 0)) + committed
+
+
+static func _as_rgba8(img: Image) -> Image:
+	if img.get_format() == Image.FORMAT_RGBA8:
+		return img
+	var copy: Image = img.duplicate()
+	copy.convert(Image.FORMAT_RGBA8)
+	return copy
+
+
+## Next-power-of-two layer capacity (min 8, clamped to the slab cap) so a
+## full rebuild leaves headroom for update_layer appends. Padded layers cost
+## VRAM (atlas_size² × 4 B each) but are uploaded once and never sampled.
+static func _padded_layer_capacity(used: int) -> int:
+	var capacity := 8
+	while capacity < used:
+		capacity *= 2
+	return mini(maxi(capacity, used), TEXTURE_ARRAY_SLAB_LAYERS)
+
+
+func _get_pad_image(atlas_size: int, with_mipmaps: bool) -> Image:
+	var key := "%d:%s" % [atlas_size, with_mipmaps]
+	if key in _pad_image_cache:
+		return _pad_image_cache[key]
+	var img := Image.create(atlas_size, atlas_size, with_mipmaps, Image.FORMAT_RGBA8)
+	_pad_image_cache[key] = img
+	return img
 
 
 ## Phase 6 (2026-04-17): async rebuild.
@@ -2753,6 +2872,16 @@ func _compact_texture_array(bucket_key: String = "") -> void:
 func _rebuild_texture_array() -> void:
 	var bucket := _get_dirty_rebuild_bucket()
 	if bucket == null:
+		return
+
+	## Wave 6 (2026-07-05): append-only dirt drains incrementally via
+	## ImageTextureLayered.update_layer (~1 ms per layer, per-frame in
+	## _commit_incremental_layers) instead of re-uploading the whole array —
+	## create_from_images on the full startup atlas measured 525 ms on the
+	## main thread, and every append used to re-upload everything (O(n²)
+	## over a session). The full rebuild below remains for: the first build,
+	## capacity growth, and compaction remaps.
+	if _bucket_qualifies_incremental(bucket):
 		return
 
 	if _rebuild_task_id != -1:
@@ -2775,6 +2904,9 @@ func _rebuild_texture_array() -> void:
 	if upload_normals:
 		normal_snapshot.assign(bucket.all_normal_images)
 	_rebuild_bucket_key = bucket.key
+	# The snapshot captures the current layer layout — the finalize commits
+	# exactly this order. A compaction landing mid-rebuild re-marks it.
+	bucket.array_layout_dirty = false
 
 	_rebuild_task_id = WorkerThreadPool.add_task(
 		_rebuild_worker.bind(albedo_snapshot, normal_snapshot),
@@ -2860,6 +2992,13 @@ func _poll_rebuild_task(deadline_usec: int = 0) -> void:
 	_stats["far_texture_upload_us"] = albedo_upload_usec
 	_stats["far_texture_upload_us_%d" % bucket.atlas_size] = albedo_upload_usec
 	if not albedo_images.is_empty():
+		# Wave 6: allocate padded capacity so subsequent appends stream in
+		# via update_layer instead of re-uploading the whole array.
+		var albedo_used := albedo_images.size()
+		var albedo_capacity := _padded_layer_capacity(albedo_used)
+		var albedo_pad := _get_pad_image(albedo_images[0].get_width(), albedo_images[0].has_mipmaps())
+		while albedo_images.size() < albedo_capacity:
+			albedo_images.append(albedo_pad)
 		var new_array := Texture2DArray.new()
 		var albedo_upload_start := Time.get_ticks_usec()
 		var err := new_array.create_from_images(albedo_images)
@@ -2877,16 +3016,22 @@ func _poll_rebuild_task(deadline_usec: int = 0) -> void:
 		bucket.old_texture_array = bucket.texture_array
 		bucket.texture_array = new_array
 		bucket.material.set_shader_parameter("texture_atlas", bucket.texture_array)
-		bucket.committed_texture_array_layers = albedo_images.size()
+		bucket.committed_texture_array_layers = albedo_used
+		bucket.committed_texture_array_capacity = albedo_capacity
 		_texture_array_committed_this_frame = true
-		bucket.texture_array_dirty = bucket.all_array_images.size() > albedo_images.size()
+		bucket.texture_array_dirty = bucket.all_array_images.size() > albedo_used
 		_mark_all_pages_dirty()
-		Log.debug("impostors", "Rebuilt texture array with %d layers (async)" % albedo_images.size())
+		Log.debug("impostors", "Rebuilt texture array with %d layers (capacity %d, async)" % [albedo_used, albedo_capacity])
 
 	var normal_upload_usec := 0
 	_stats["far_normal_upload_us"] = normal_upload_usec
 	_stats["far_normal_upload_us_%d" % bucket.atlas_size] = normal_upload_usec
 	if not normal_images.is_empty():
+		var normal_used := normal_images.size()
+		var normal_capacity := _padded_layer_capacity(normal_used)
+		var normal_pad := _get_pad_image(normal_images[0].get_width(), normal_images[0].has_mipmaps())
+		while normal_images.size() < normal_capacity:
+			normal_images.append(normal_pad)
 		var new_normal := Texture2DArray.new()
 		var normal_upload_start := Time.get_ticks_usec()
 		var err := new_normal.create_from_images(normal_images)
@@ -2899,10 +3044,11 @@ func _poll_rebuild_task(deadline_usec: int = 0) -> void:
 			bucket.old_normal_texture_array = bucket.normal_texture_array
 			bucket.normal_texture_array = new_normal
 			bucket.material.set_shader_parameter("normal_atlas", bucket.normal_texture_array)
-			bucket.committed_normal_array_layers = normal_images.size()
+			bucket.committed_normal_array_layers = normal_used
+			bucket.committed_normal_array_capacity = normal_capacity
 			_mark_all_pages_dirty()
-			Log.debug("impostors", "Rebuilt normal texture array with %d layers (async)" % normal_images.size())
-		bucket.normal_array_dirty = bucket.all_normal_images.size() > normal_images.size()
+			Log.debug("impostors", "Rebuilt normal texture array with %d layers (capacity %d, async)" % [normal_used, normal_capacity])
+		bucket.normal_array_dirty = bucket.all_normal_images.size() > normal_used
 	_stats["texture_array_rebuild_count"] = int(_stats.get("texture_array_rebuild_count", 0)) + 1
 
 

@@ -68,14 +68,16 @@ const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 ## Smaller meshes at distance project below a screen-space threshold and
 ## don't contribute visually — they're skipped.
 ##
-## OpenMW uses 0.14 in Morrowind (MW) units. Godotwind works in meters
-## (1 MW unit = 1/70 m), so 0.14 in MW-unit space is effectively the same
-## angular-size formula but with meter-scale distances. In practice, 0.14
-## requires mesh_radius >= 28m at 200m distance, which rejects all Morrowind
-## buildings and vegetation. Tuned to 0.003 so normal exterior statics survive
-## the full HLOD band; draw-call reduction belongs in proxy material/atlas
-## work, not in dropping visible coverage.
-## Source: inspos/openmw/components/settings/categories/terrain.hpp:34
+## PROVENANCE CORRECTED 2026-07-05 (audit): OpenMW's `object paging min size`
+## default is **0.01**, not 0.14 as previously claimed here. The threshold is
+## a radius/distance RATIO — dimensionless — so no MW-units-to-meters
+## conversion applies; OpenMW's 0.01 means "radius ≥ 1% of distance" in any
+## unit system (e.g. radius ≥ 4m at 400m). Source:
+## openmw.readthedocs.io → Terrain Settings → "object paging min size".
+## Our 0.003 is therefore ~3× MORE permissive than OpenMW (radius ≥ 1.2m at
+## 400m), tuned against the misremembered 0.14 baseline. Retune against the
+## real 0.01 is scheduled with the Phase 2 candidacy work
+## (docs/plans/distant_rendering_recovery_2026_07.md).
 const PAGING_MIN_SIZE: float = 0.003
 const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
 

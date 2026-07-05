@@ -31,6 +31,7 @@ const LightAnimatorScript := preload("res://src/core/world/light_animator.gd")
 const LightShadowBudgetScript := preload("res://src/core/world/light_shadow_budget.gd")
 const WorldSpaceHandleScript := preload("res://src/core/world/transition/world_space_handle.gd")
 const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
+const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 
 #region Constants
 
@@ -213,6 +214,15 @@ class PocketSlot:
 	## AABB computed during the single-pass walk in phase 0. Reused by phase
 	## 1 when building the lightbox mesh, so the walk only happens once.
 	var finish_up_aabb: AABB = AABB()
+	## True once finish_up_aabb holds at least one mesh AABB (progressive
+	## attach merges per-child results across frames; a default AABB at the
+	## origin must not poison the merge).
+	var finish_up_aabb_valid: bool = false
+	## Phase 1 wave 2 (2026-07-05): children stripped off the async-loaded
+	## cell_node, waiting to be attached under the per-frame budget. Attaching
+	## the whole subtree in one add_child was a 228ms frame on a 50-object
+	## interior (enter-tree cascade + full finalize walk).
+	var pending_attach: Array[Node] = []
 
 	func get_offset() -> Vector3:
 		return Vector3(slot_index * POCKET_SPACING_X, POCKET_BASE_Y, 0.0)
@@ -221,6 +231,12 @@ class PocketSlot:
 		if cell_node and is_instance_valid(cell_node):
 			cell_node.queue_free()
 		cell_node = null
+		# Detached pending children are not owned by any tree — free them
+		# explicitly or they leak on eviction mid-drain.
+		for pending: Node in pending_attach:
+			if pending != null and is_instance_valid(pending):
+				pending.queue_free()
+		pending_attach.clear()
 		space_handle = null
 		space_info = null
 		interior_environment = null
@@ -231,6 +247,7 @@ class PocketSlot:
 		async_request_id = -1
 		finish_up_phase = -1
 		finish_up_aabb = AABB()
+		finish_up_aabb_valid = false
 		doors_inside.clear()
 
 #endregion
@@ -272,6 +289,12 @@ var _player_body: CollisionObject3D = null
 
 ## Track which placed doors are already in preload range (avoid signal spam)
 var _doors_in_preload_range: Dictionary = {}  # instance_key -> bool
+
+## Per-cell retry cooldown for failed pocket loads (Phase 1 wave 2,
+## 2026-07-05). Without it a failed _load_pocket retried the full pipeline
+## every frame while the player stood near the door.
+var _load_retry_next_msec: Dictionary = {}  # cell_name -> ticks_msec
+const LOAD_RETRY_COOLDOWN_MSEC: int = 500
 
 ## Fade state
 var _fade_rect: ColorRect = null
@@ -433,7 +456,16 @@ func register_transition_portals(descriptors: Array, search_root: Node = null) -
 
 		if not already_registered:
 			_exterior_doors.append(door)
-			_sync_door_interactable_instance_key(door, search_root)
+			# Phase 1 wave 3 (2026-07-05): only sync door-node metadata when a
+			# bounded search root is provided (interior pocket subtrees). The
+			# exterior path (search_root == null) walked the ENTIRE scene tree
+			# per door — 41 doors × full walk = 166-211ms per dense cell,
+			# recurring on every reload — and it was redundant: the spawn
+			# adapter already stamps `door_instance_key` on every spawned door
+			# with the identical key format (morrowind_object_spawn_adapter
+			# `_attach_door`, make_exterior_portal_key == "ext:x,y:refid:num").
+			if search_root != null:
+				_sync_door_interactable_instance_key(door, search_root)
 			count += 1
 
 	if count > 0:
@@ -688,6 +720,14 @@ func _ensure_pocket_space_loaded(space_handle: RefCounted) -> void:
 		if slot.is_loading and slot.cell_name == cell_name:
 			return
 
+	# Phase 1 wave 2 (2026-07-05): retry cooldown. A failed _load_pocket
+	# (async capacity full, missing space info) used to retry the FULL
+	# pipeline every frame — space-info lookup, portal premark, log lines,
+	# push_warning with backtrace — a sustained 8-21ms/frame treadmill while
+	# standing near a door during streaming churn ([we-autopsy] evidence).
+	if Time.get_ticks_msec() < int(_load_retry_next_msec.get(cell_name, 0)):
+		return
+
 	# Find a free slot
 	var free_slot: PocketSlot = _find_free_slot()
 	if not free_slot:
@@ -793,6 +833,7 @@ func _load_pocket(slot: PocketSlot, space_handle: RefCounted) -> void:
 	var space_info: RefCounted = _get_transition_space_info(space_handle)
 	if space_info == null:
 		Log.error("streaming", "[POCKET] Transition space info not found: '%s'" % cell_name)
+		_load_retry_next_msec[cell_name] = Time.get_ticks_msec() + LOAD_RETRY_COOLDOWN_MSEC
 		slot.is_loading = false
 		slot.cell_name = ""
 		slot.space_handle = null
@@ -824,10 +865,16 @@ func _load_pocket(slot: PocketSlot, space_handle: RefCounted) -> void:
 		var request_id: int = _cell_manager.request_world_space_async(space_handle, profile)
 		if request_id >= 0:
 			slot.async_request_id = request_id
+			_load_retry_next_msec.erase(cell_name)
 			Log.info("streaming", "[POCKET] async load started (req=%d) for '%s'" % [request_id, cell_name])
 			return
 
-	Log.warn("streaming", "[POCKET] async unavailable; refusing sync runtime door load for '%s'" % cell_name)
+	# Cooldown before the next attempt — the per-frame retry treadmill was a
+	# sustained main-thread cost during streaming churn (see
+	# _ensure_pocket_space_loaded). The preload radius gives seconds of
+	# margin, so a 0.5s retry cadence costs nothing in effective latency.
+	_load_retry_next_msec[cell_name] = Time.get_ticks_msec() + LOAD_RETRY_COOLDOWN_MSEC
+	Log.info("streaming", "[POCKET] async busy; retrying '%s' in %dms" % [cell_name, LOAD_RETRY_COOLDOWN_MSEC])
 	slot.clear()
 
 
@@ -867,7 +914,13 @@ func _update_async_loads() -> void:
 		if not complete:
 			continue
 
+		# Phase 1 wave 3 (2026-07-05): attribute the completion-frame cost.
+		# A 154ms frame was measured on a 138-child interior with the
+		# progressive path — split result-consumption (payload unpin /
+		# resource frees) from the finish-up start so the offender has a name.
+		var t_result := Time.get_ticks_usec()
 		var cell_node: Node3D = _cell_manager.get_async_result(request_id)
+		var result_us := Time.get_ticks_usec() - t_result
 		slot.async_request_id = -1
 
 		if not cell_node:
@@ -882,24 +935,30 @@ func _update_async_loads() -> void:
 			"complete" if complete else "visual playable",
 			request_id, slot.cell_name, cell_node.get_child_count()])
 		slot.cell_node = cell_node
+		if result_us > 8_000:
+			Log.warn("streaming", "[pocket-complete %.1fms] get_async_result for '%s' (%d children)" % [
+				float(result_us) / 1000.0, slot.cell_name, cell_node.get_child_count()])
 
-		# Fast path: if the player is already right at the door, collapse
-		# the finish-up spread into a single frame. Single-pass walk (P1.0)
-		# keeps the spike bounded and it's strictly better than showing
-		# unlit empty geometry while the phases spread.
-		var collapse := false
-		var closest_door: DoorInfo = _find_closest_door_for_cell(slot.cell_name)
-		if closest_door and _camera:
-			var fast_r: float = INTERACT_RADIUS * FAST_PATH_RADIUS_MULT
-			if _camera.global_position.distance_squared_to(closest_door.world_position) < fast_r * fast_r:
-				collapse = true
+		# Fast path: collapse the finish-up into a single frame ONLY when an
+		# actual transition is waiting on it (fade running). The old
+		# proximity heuristic (within 2x interact radius) fired on flybys
+		# that merely passed a door — a measured 408ms hitch for a pocket
+		# nobody was entering. The progressive path keeps the pocket
+		# invisible until phase 1, so the "unlit empty geometry" concern the
+		# proximity rule guarded against no longer exists; a rushing player
+		# is covered by _is_transitioning (the fade pump drives the drain,
+		# 2ms/frame, and the wait loop already blocks on finish_up_phase).
+		var collapse := _is_transitioning
 
 		_begin_pocket_finish_up(slot, collapse)
 
 
 ## Start the finish-up pipeline for a slot whose cell_node is now populated.
-## collapse = true runs all phases synchronously on the current frame;
-## collapse = false spreads them across 2 frames via _update_pocket_finish_up().
+## collapse = true runs all phases synchronously on the current frame (rush
+## path — player is at the door and a fade is waiting); collapse = false
+## attaches children progressively under a per-frame budget via
+## _update_pocket_finish_up() (Phase 1 wave 2: the one-gulp add_child of a
+## 50-object interior measured 228ms).
 func _begin_pocket_finish_up(slot: PocketSlot, collapse: bool) -> void:
 	if not slot.cell_node or not is_instance_valid(slot.cell_node):
 		Log.error("streaming", "[POCKET] finish-up called with invalid cell_node for '%s'" % slot.cell_name)
@@ -908,27 +967,126 @@ func _begin_pocket_finish_up(slot: PocketSlot, collapse: bool) -> void:
 		return
 
 	# F0 — Placement. Position the cell_node at the pocket offset, make it
-	# invisible (layers haven't been applied yet), add to pocket container.
+	# invisible (layers haven't been applied yet).
 	slot.cell_node.position = slot.get_offset()
 	slot.cell_node.visible = false
-	_pocket_container.add_child(slot.cell_node)
+	slot.finish_up_aabb = AABB()
+	slot.finish_up_aabb_valid = false
 
-	# F0 — Single-pass walk: apply render layers, physics layers, collect AABB.
-	# Replaces 3 separate O(n) walks. Also registers doors found during the walk.
-	slot.finish_up_aabb = _finalize_cell_node(
-		slot.cell_node, INTERIOR_RENDER_LAYERS, slot.physics_layer_mask
-	)
-
-	# F0 — Build interior environment from transition-space info
-	slot.interior_environment = _build_interior_environment(slot.space_info)
-
-	# F0 — Register doors inside this interior
-	_register_interior_doors(slot)
+	# Phase 1 wave 4 (2026-07-05): the 158ms first-attach residual had no
+	# [pocket-complete] warn — the cost is inside the attach frame itself.
+	# Suspect: first-visibility pipeline compilation. Log elapsed + compile
+	# delta at both begin paths and each attach step (decision tree in
+	# pipeline_compile_monitor.gd).
+	var begin_start := Time.get_ticks_usec()
+	var pipe_before: PackedInt64Array = PipelineCompileMonitorScript.snapshot()
 
 	if collapse:
+		# Rush path: everything in one frame, exactly the pre-slicing behavior.
+		_pocket_container.add_child(slot.cell_node)
+		slot.finish_up_aabb = _finalize_cell_node(
+			slot.cell_node, INTERIOR_RENDER_LAYERS, slot.physics_layer_mask
+		)
+		slot.finish_up_aabb_valid = true
+		slot.interior_environment = _build_interior_environment(slot.space_info)
+		_register_interior_doors(slot)
 		_pocket_finish_up_phase_1(slot)
-	else:
-		slot.finish_up_phase = 1  # Phase 1 runs next frame via _update_pocket_finish_up
+		_warn_pocket_begin(slot, begin_start, pipe_before, "collapse", slot.cell_node.get_child_count())
+		return
+
+	# Progressive path: strip the children off the still-detached cell_node
+	# (remove_child on a detached parent fires no tree notifications), attach
+	# the now-empty root, then drain pending_attach a few children per frame
+	# in _update_pocket_finish_up(). Environment/doors/lightbox run after the
+	# drain — the pocket is invisible throughout, and the preload radius
+	# gives seconds of margin.
+	var children := slot.cell_node.get_children()
+	for child: Node in children:
+		slot.cell_node.remove_child(child)
+		slot.pending_attach.append(child)
+	_pocket_container.add_child(slot.cell_node)
+	slot.finish_up_phase = 0
+	_warn_pocket_begin(slot, begin_start, pipe_before, "progressive", slot.pending_attach.size())
+
+
+## Wave 4 probe: attribute a slow _begin_pocket_finish_up frame.
+func _warn_pocket_begin(slot: PocketSlot, start_us: int, pipe_before: PackedInt64Array, mode: String, child_count: int) -> void:
+	var elapsed := int(Time.get_ticks_usec() - start_us)
+	if elapsed <= 8_000:
+		return
+	Log.warn("streaming", "[pocket-begin %.1fms] '%s' mode=%s children=%d pipe=%s" % [
+		float(elapsed) / 1000.0, slot.cell_name, mode, child_count,
+		_pipe_delta_str(pipe_before)])
+
+
+## Delta between a prior PipelineCompileMonitor.snapshot() and now, formatted.
+func _pipe_delta_str(before: PackedInt64Array) -> String:
+	var after: PackedInt64Array = PipelineCompileMonitorScript.snapshot()
+	var delta := PackedInt64Array()
+	delta.resize(5)
+	for i in 5:
+		delta[i] = after[i] - before[i]
+	return PipelineCompileMonitorScript.format_delta(delta)
+
+
+## Per-frame budget for the progressive attach step (usec). Each child is an
+## atom (enter-tree cascade + finalize walk of that child's subtree); at
+## least one child is processed per frame so the drain always terminates.
+const POCKET_ATTACH_BUDGET_USEC: int = 2000
+
+## Phase 0 (progressive path): attach pending children under the budget.
+## When the drain completes, run the post-attach steps (environment, doors)
+## and hand off to phase 1.
+func _pocket_finish_up_attach_step(slot: PocketSlot) -> void:
+	if not slot.cell_node or not is_instance_valid(slot.cell_node):
+		slot.finish_up_phase = -1
+		return
+	# Wave 4 probe: each child attach is an indivisible atom — when one blows
+	# the budget, name it and log the pipeline-compile delta for the step.
+	var step_start := Time.get_ticks_usec()
+	var pipe_before: PackedInt64Array = PipelineCompileMonitorScript.snapshot()
+	var worst_child_us := 0
+	var worst_child_name := ""
+	var deadline := step_start + POCKET_ATTACH_BUDGET_USEC
+	var attached := 0
+	var budget_hit := false
+	while not slot.pending_attach.is_empty():
+		if attached > 0 and Time.get_ticks_usec() >= deadline:
+			budget_hit = true
+			break
+		var child: Node = slot.pending_attach.pop_back()
+		if child == null or not is_instance_valid(child):
+			continue
+		var child_start := Time.get_ticks_usec()
+		slot.cell_node.add_child(child)
+		attached += 1
+		if child is Node3D:
+			var child_aabb := _finalize_cell_node(
+				child as Node3D, INTERIOR_RENDER_LAYERS, slot.physics_layer_mask, slot.cell_node
+			)
+			if child_aabb.size.length_squared() > 0.0:
+				if slot.finish_up_aabb_valid:
+					slot.finish_up_aabb = slot.finish_up_aabb.merge(child_aabb)
+				else:
+					slot.finish_up_aabb = child_aabb
+					slot.finish_up_aabb_valid = true
+		var child_us := int(Time.get_ticks_usec() - child_start)
+		if child_us > worst_child_us:
+			worst_child_us = child_us
+			worst_child_name = str(child.name)
+
+	var step_us := int(Time.get_ticks_usec() - step_start)
+	if step_us > 8_000:
+		Log.warn("streaming", "[pocket-attach %.1fms] '%s' attached=%d remaining=%d worst=%s(%.1fms) pipe=%s" % [
+			float(step_us) / 1000.0, slot.cell_name, attached, slot.pending_attach.size(),
+			worst_child_name, float(worst_child_us) / 1000.0, _pipe_delta_str(pipe_before)])
+	if budget_hit:
+		return  # Resume next frame
+
+	# Drain complete — post-attach steps, then phase 1 next frame.
+	slot.interior_environment = _build_interior_environment(slot.space_info)
+	_register_interior_doors(slot)
+	slot.finish_up_phase = 1
 
 
 ## Phase 1: lightbox, light animator, shadow budget, visibility flip.
@@ -981,10 +1139,12 @@ func _pocket_finish_up_phase_1(slot: PocketSlot) -> void:
 	pocket_loaded.emit(slot.cell_name, slot.slot_index)
 
 
-## Per-frame driver for the phase-1 finish-up step. Called from update().
+## Per-frame driver for the finish-up steps. Called from update().
 func _update_pocket_finish_up() -> void:
 	for slot: PocketSlot in _slots:
-		if slot.finish_up_phase == 1:
+		if slot.finish_up_phase == 0:
+			_pocket_finish_up_attach_step(slot)
+		elif slot.finish_up_phase == 1:
 			_pocket_finish_up_phase_1(slot)
 
 
@@ -1001,7 +1161,11 @@ func _update_pocket_finish_up() -> void:
 ## one iterative pass. The old ipm._set_layers_recursive /
 ## _set_physics_layers_recursive / _collect_lightbox_aabb_inner have been
 ## deleted — this is the single source of truth for pocket finalization.
-func _finalize_cell_node(root: Node3D, layer_mask: int, physics_mask: int) -> AABB:
+func _finalize_cell_node(root: Node3D, layer_mask: int, physics_mask: int, aabb_root: Node3D = null) -> AABB:
+	# `aabb_root` lets the progressive attach path walk a single child while
+	# still expressing the accumulated AABB in the pocket root's local space
+	# (defaults to `root` for whole-subtree callers).
+	var aabb_space: Node3D = aabb_root if aabb_root != null else root
 	var combined := AABB()
 	var has_any := false
 	var stack: Array[Node] = [root]
@@ -1021,9 +1185,9 @@ func _finalize_cell_node(root: Node3D, layer_mask: int, physics_mask: int) -> AA
 		if node is MeshInstance3D:
 			var mi: MeshInstance3D = node
 			if mi.mesh:
-				# Transform local AABB into root-local space
+				# Transform local AABB into pocket-root-local space
 				var local_aabb: AABB = mi.mesh.get_aabb()
-				var xf: Transform3D = root.global_transform.affine_inverse() * mi.global_transform
+				var xf: Transform3D = aabb_space.global_transform.affine_inverse() * mi.global_transform
 				var world_aabb: AABB = xf * local_aabb
 				if has_any:
 					combined = combined.merge(world_aabb)

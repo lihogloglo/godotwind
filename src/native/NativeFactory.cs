@@ -338,6 +338,19 @@ public partial class NativeFactory : RefCounted
     }
 
     // =========================================================================
+    // Cooked Cell Manifests (Phase 3)
+    // =========================================================================
+
+    /// <summary>
+    /// Create a cooked per-cell manifest codec. Cook offline via the prebake
+    /// UI; load at runtime with plain FileAccess (no ResourceLoader).
+    /// </summary>
+    public NativeCellManifest CreateCellManifest()
+    {
+        return new NativeCellManifest();
+    }
+
+    // =========================================================================
     // Utility
     // =========================================================================
 

@@ -32,6 +32,14 @@ func clear_cache() -> void:
 	_source_cell_cache.clear()
 
 
+## True when the cell's manifest is already built (cache hit — cheap to
+## request). Used by the streaming manager to throttle cold manifest builds
+## to one per frame (each cold build is a 9-22ms GDScript atom on dense
+## cells; Phase 3 cooked manifests will delete the runtime build entirely).
+func has_cell_manifest(cell_grid: Vector2i) -> bool:
+	return _manifest_cache.has(cell_grid)
+
+
 func get_cell_manifest(cell_grid: Vector2i) -> Variant:
 	if _manifest_cache.has(cell_grid):
 		return _manifest_cache[cell_grid]

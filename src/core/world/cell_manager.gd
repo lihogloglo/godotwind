@@ -2368,16 +2368,31 @@ func request_world_cell_async(grid: Vector2i, profile: LoadProfile = null) -> in
 	if _world_object_source == null or not _world_object_source.has_method("get_cell_manifest"):
 		return -1
 
+	# Phase 1 atom instrumentation (2026-07-05): a single request start was
+	# observed at 253ms inside pending_loads_async. Attribute the cost between
+	# manifest build (cold cache) and profile filtering when it spikes; same
+	# 8ms warn threshold as [ml-request-start].
+	var t0 := Time.get_ticks_usec()
 	var manifest: Variant = _get_world_cell_manifest(grid)
+	var manifest_us := Time.get_ticks_usec() - t0
 	if manifest == null:
 		return -1
 
 	var effective_profile := profile if profile else LoadProfile.exterior_default()
+	var t1 := Time.get_ticks_usec()
 	var objects := _get_manifest_objects_for_profile(manifest, effective_profile)
+	var filter_us := Time.get_ticks_usec() - t1
 
 	var request_id := _start_async_request(null, grid, false, effective_profile, objects, true)
 	if request_id > 0:
 		_increment_route_usage_stat("async_world_manifest_requests")
+	var total_us := Time.get_ticks_usec() - t0
+	if total_us > 8_000:
+		Log.warn("streaming", "[cell-request-start %.1fms] grid=%s manifest=%.1fms filter=%.1fms objects=%d" % [
+			float(total_us) / 1000.0, grid,
+			float(manifest_us) / 1000.0, float(filter_us) / 1000.0,
+			objects.size(),
+		])
 	return request_id
 
 
@@ -3518,6 +3533,16 @@ func process_async_instantiation(
 			t_name = "unknown"
 		_diag_per_type_time_us[t_name] = _diag_per_type_time_us.get(t_name, 0) + inst_elapsed
 		_diag_per_type_count[t_name] = _diag_per_type_count.get(t_name, 0) + 1
+
+		# Phase 1 wave 4 (2026-07-05): name the big indivisible instantiate
+		# atoms. The startup burst shows 115-119ms one-shots (large PackedScene
+		# instantiates); the structural fix is a Phase 3 prebake split, which
+		# needs the guilty models identified first.
+		if inst_elapsed > 30_000:
+			Log.warn("streaming", "[inst-atom %.1fms] route=%s type=%s ml=%.1fms model='%s' grid=%s%s" % [
+				float(inst_elapsed) / 1000.0, route_name, t_name,
+				float(route_model_load_delta_us) / 1000.0, model_path,
+				request.grid, " (interior)" if request.is_interior else ""])
 
 		# Step 1 instrumentation — per-frame ESM-type bucket. Light's model-load
 		# subslice splits disk/parse cost from `OmniLight3D` construction so a

@@ -48,9 +48,15 @@ static func _dedup_strings(a: Array, b: Array = []) -> Array[String]:
 
 
 static func _renderer_info() -> Dictionary:
+	# max_fps / vsync recorded so FPS numbers can be read honestly: a run
+	# capped at 144 compresses every rung/segment that would exceed the cap
+	# (Phase 0 benchmark hygiene, 2026-07-05).
 	return {
 		"method": str(ProjectSettings.get_setting("rendering/renderer/rendering_method", "unknown")),
 		"display_server": DisplayServer.get_name(),
+		"max_fps": Engine.max_fps,
+		"vsync_mode": DisplayServer.window_get_vsync_mode(),
+		"fps_capped": Engine.max_fps > 0 or DisplayServer.window_get_vsync_mode() != DisplayServer.VSYNC_DISABLED,
 	}
 
 

@@ -172,6 +172,13 @@ var _sync_fallback_frames: int = 0
 var _sync_fallback_cells_loaded: int = 0
 var _sync_fallback_last_frame: int = -1
 var _mid_tier_visible: bool = true
+## Streaming POLICY for static visuals (Phase 0, 2026-07-05): governs the
+## scene-cell ring radius, load profiles, publish gates, and unload
+## hysteresis. Split from `_mid_tier_visible` so the `static_visuals`
+## benchmark toggle is a pure render ablation — flipping visibility must not
+## change what streams. Mode isolation (--near-only / --far-only /
+## --hlod-only) parks this via set_static_streaming_enabled(false).
+var _static_streaming_enabled: bool = true
 var _dev_mid_object_paging_visible: bool = false
 var _world_source: RefCounted = null
 var _world_object_source: RefCounted = null
@@ -889,11 +896,11 @@ func _distant_stream_radius_cells() -> int:
 
 
 func _effective_scene_load_radius_cells() -> int:
-	return load_radius_cells if _mid_tier_visible else SC.NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS
+	return load_radius_cells if _static_streaming_enabled else SC.NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS
 
 
 func _effective_scene_load_distance_cap() -> float:
-	return max_load_distance if _mid_tier_visible else SC.NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP
+	return max_load_distance if _static_streaming_enabled else SC.NEAR_ONLY_SCENE_LOAD_DISTANCE_CAP
 
 
 func _is_near_scene_cell(grid: Vector2i) -> bool:
@@ -910,7 +917,7 @@ func _is_near_scene_cell(grid: Vector2i) -> bool:
 func _load_profile_for_cell(grid: Vector2i) -> Variant:
 	if _is_near_scene_cell(grid):
 		return CellManagerScript.LoadProfile.exterior_default()
-	if _mid_tier_visible:
+	if _static_streaming_enabled:
 		return CellManagerScript.LoadProfile.exterior_static_visuals_only()
 	return CellManagerScript.LoadProfile.exterior_default()
 
@@ -1067,7 +1074,27 @@ func _process(delta: float) -> void:
 		if _pipeline_compile_monitor != null:
 			var pcd: PackedInt64Array = _pipeline_compile_monitor.delta_and_update()
 			pcd_str = " pipe=" + PipelineCompileMonitorScript.format_delta(pcd)
-		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d phys_active=%d phys_pairs=%d%s" % [
+		# Render CPU/GPU split (2026-07-05 audit) — the one metric the harness
+		# stack was missing. `viewport_set_measure_render_time` is idempotent;
+		# values are last-frame, in milliseconds, Vulkan-backed on this target.
+		var render_split_str: String = ""
+		if vp != null:
+			var vp_rid: RID = vp.get_viewport_rid()
+			RenderingServer.viewport_set_measure_render_time(vp_rid, true)
+			render_split_str = " render_cpu=%.1fms render_gpu=%.1fms" % [
+				RenderingServer.viewport_get_measured_render_time_cpu(vp_rid),
+				RenderingServer.viewport_get_measured_render_time_gpu(vp_rid),
+			]
+		# Split `loading` into truly-in-flight vs deferred-tail cells (visual
+		# playable, request held open only by proximity-deferred interactives).
+		# A steady nonzero tail near the ring edge is by design, not a stall.
+		var deferred_tail := 0
+		if _cell_manager != null and _cell_manager.has_method("is_async_visual_playable"):
+			for loading_grid: Vector2i in _loading_cells:
+				var rid_val: int = int(_async_requests.get(loading_grid, -1))
+				if rid_val >= 0 and bool(_cell_manager.call("is_async_visual_playable", rid_val)):
+					deferred_tail += 1
+		Log.info("streaming", "heartbeat sec=%d frame=%d fps=%.1f proc=%.1fms phys=%.1fms draws=%d (vis=%d shad=%d) objs=%d (vis=%d shad=%d) prims=%dk loaded=%d loading=%d (tail=%d) phys_active=%d phys_pairs=%d%s%s" % [
 			now_sec,
 			Engine.get_frames_drawn(),
 			fps_est,
@@ -1082,9 +1109,11 @@ func _process(delta: float) -> void:
 			prims / 1000,
 			_loaded_cells.size(),
 			_loading_cells.size(),
+			deferred_tail,
 			phys_active,
 			phys_pairs,
 			pcd_str,
+			render_split_str,
 		])
 
 	# Start timing for frame budget telemetry
@@ -1299,7 +1328,11 @@ func _process(delta: float) -> void:
 	# with its own aggressive budget first.
 	if not tracking_frozen and not _startup_phase and _cell_preloader != null:
 		if prof: prof.begin_section("cell_preloader_update")
-		_cell_preloader.update(_camera_cell, _camera_position, _camera_velocity_xz)
+		# Phase 1 (2026-07-05): hard 1ms deadline — the preloader's model
+		# warmup drains incrementally instead of bursting a whole cell's
+		# file I/O (53-60ms observed) into one frame.
+		_cell_preloader.update(_camera_cell, _camera_position, _camera_velocity_xz,
+			Time.get_ticks_usec() + CellPreloaderScript.DEFAULT_UPDATE_BUDGET_USEC)
 		if prof: prof.end_section("cell_preloader_update")
 
 	# Phase 0: Budgeted unloading — free children of departing cells gradually
@@ -1343,7 +1376,7 @@ func _process(delta: float) -> void:
 			prof.end_section("async_complete")
 		phase_times[1] = float(Time.get_ticks_usec() - phase_start)
 
-		if _near_tier_visible or _mid_tier_visible:
+		if _near_tier_visible or _static_streaming_enabled:
 			# Phase 2: instantiation
 			# During startup / burst drain: 25ms budget.
 			# Post-startup normal: 4ms — prevents 48%-of-frame death spiral.
@@ -1536,10 +1569,11 @@ func _is_cell_occupied(grid: Vector2i) -> bool:
 
 ## Update which cells should be loaded based on camera position
 func _update_loaded_cells() -> void:
-	# Freeze scene-cell streaming only when both scene-backed tiers are off.
-	# MID static buckets share the scene-cell source, so they must keep this
-	# scheduler alive even when NEAR gameplay nodes are disabled.
-	if not _near_tier_visible and not _mid_tier_visible:
+	# Freeze scene-cell streaming only when NEAR gameplay is off AND static
+	# streaming policy is parked. Render-visibility toggles must NOT gate this
+	# scheduler — hidden tiers keep streaming so benchmark toggles stay pure
+	# render ablations.
+	if not _near_tier_visible and not _static_streaming_enabled:
 		return
 	var ulc_start := Time.get_ticks_usec()
 
@@ -1618,7 +1652,7 @@ func _update_loaded_cells() -> void:
 	# Unload cells that are too far, using the same cell-bounds distance as
 	# load selection plus hysteresis so MID corners do not linger as a square ring.
 	var cells_to_unload: Array[Vector2i] = []
-	var unload_hysteresis := SC.HYSTERESIS_MID if _mid_tier_visible else SC.HYSTERESIS_NEAR
+	var unload_hysteresis := SC.HYSTERESIS_MID if _static_streaming_enabled else SC.HYSTERESIS_NEAR
 	var unload_distance := _effective_scene_load_distance_cap() + unload_hysteresis
 	var unload_threshold_sq := unload_distance * unload_distance
 
@@ -1627,6 +1661,17 @@ func _update_loaded_cells() -> void:
 			# Only unload if beyond hysteresis distance
 			if _cell_bounds_distance_squared_to_position(grid, _camera_position) > unload_threshold_sq:
 				cells_to_unload.append(grid)
+
+	# Phase 0 (2026-07-05): sweep never-completed loading cells too. Requests
+	# held open by the proximity-deferred interactive tail keep their grid out
+	# of _loaded_cells indefinitely (see CellManager.is_async_visual_playable);
+	# without this walk, their in-progress nodes and static buckets leak once
+	# the camera moves away — the permanent `loading=N` heartbeat residue.
+	for grid: Vector2i in _loading_cells:
+		if grid in _loaded_cells or grid in cells_to_load or grid in _unloading_cells:
+			continue
+		if _cell_bounds_distance_squared_to_position(grid, _camera_position) > unload_threshold_sq:
+			cells_to_unload.append(grid)
 
 	if debug_enabled and not cells_to_unload.is_empty():
 		_debug("Unloading %d cells" % cells_to_unload.size())
@@ -1862,7 +1907,10 @@ func _load_cell_sync(grid: Vector2i) -> void:
 func _queue_unload_cell(grid: Vector2i) -> void:
 	if grid in _pending_unload_set or grid in _unloading_cells:
 		return
-	if grid not in _loaded_cells:
+	# Loading-only grids are admissible: never-completed cells (requests held
+	# open by the proximity-deferred tail) must still unload when the camera
+	# leaves range — Phase 0 leak fix, 2026-07-05.
+	if grid not in _loaded_cells and grid not in _loading_cells:
 		return
 	_pending_unload_queue.append(grid)
 	_pending_unload_set[grid] = true
@@ -1885,7 +1933,7 @@ func _process_pending_unload_starts(start_time_usec: int, budget_usec: float) ->
 			break
 		var grid: Vector2i = _pending_unload_queue.pop_back()
 		_pending_unload_set.erase(grid)
-		if grid not in _loaded_cells or grid in _unloading_cells:
+		if (grid not in _loaded_cells and grid not in _loading_cells) or grid in _unloading_cells:
 			continue
 		_unload_cell(grid)
 		started += 1
@@ -1931,6 +1979,30 @@ func _unload_cell(grid: Vector2i) -> void:
 		_debug("Parked async request %d for cell %s (state-reversal limbo)" % [request_id, grid])
 
 	if grid not in _loaded_cells:
+		# Never-completed cell: its request was just parked above, but the
+		# in-progress cell node was added to the tree at request start and
+		# would leak here (Phase 0 fix, 2026-07-05 — the permanent `loading=N`
+		# residue). Route the node through the same limbo + budgeted-unload
+		# path as a completed cell; finalize_unloaded_cell picks the parked
+		# request up from _unloading_request_ids when the drain finishes.
+		var pending_node: Node3D = null
+		if grid in _unloading_request_ids and _cell_manager != null \
+				and _cell_manager.has_method("get_async_cell_node"):
+			pending_node = _cell_manager.get_async_cell_node(_unloading_request_ids[grid])
+		if pending_node == null or not is_instance_valid(pending_node) or not pending_node.is_inside_tree():
+			if prof: prof.end_section("unload_cell:total")
+			return
+		if _static_renderer:
+			_pending_rs_hide_cells.append(grid)
+			_pending_rs_hide_set[grid] = true
+			_pending_rs_cleanup_cells.append(grid)
+			_pending_rs_cleanup_set[grid] = true
+		_evacuate_persistent_nodes_from_cell(pending_node, grid)
+		pending_node.visible = false
+		_unloading_cells[grid] = pending_node
+		_debug("Queued never-completed cell %s for budgeted unloading (%d children)" % [grid, pending_node.get_child_count()])
+		if _cell_preloader != null:
+			_cell_preloader.notify_unloaded(grid)
 		if prof: prof.end_section("unload_cell:total")
 		return
 
@@ -2272,11 +2344,11 @@ func _count_mesh_instances(node: Node) -> int:
 ## Submits async requests for cells in the queue
 ## Uses staggered loading during startup to prevent freeze
 func _process_pending_loads_async() -> void:
-	# Dual-purpose SubsystemToggles gate: when `near_objects` is off, stop
-	# submitting new cell-load async requests. This kills both NEAR ingress
-	# AND the MID flora adds that piggyback on ReferenceInstantiator during
-	# the cell load. HLOD + impostors are independent (they read ESM direct).
-	if not _near_tier_visible and not _mid_tier_visible:
+	# Streaming-policy gate: stop submitting new cell-load requests only when
+	# NEAR gameplay is off AND static streaming is parked. The static_visuals
+	# RENDER toggle must not stop ingress. HLOD + impostors are independent
+	# (they read the world object source directly).
+	if not _near_tier_visible and not _static_streaming_enabled:
 		return
 	if _pending_load_queue.is_empty():
 		return
@@ -2294,8 +2366,20 @@ func _process_pending_loads_async() -> void:
 		if debug_enabled:
 			_debug("Async capacity exhausted, %d cells waiting in queue" % _pending_load_queue.size())
 	else:
+		# Phase 1 wave 3 (2026-07-05): at most ONE cold manifest build per
+		# frame. Building a dense cell's manifest is a 9-22ms GDScript atom
+		# ([cell-request-start] data); two cold submissions in one frame
+		# stacked to 40ms+. Warm cells (manifest cached — usually prepaid by
+		# the CellPreloader) submit freely.
+		var cold_manifest_built := false
+		var can_probe_manifest: bool = _world_object_source != null \
+			and _world_object_source.has_method("has_cell_manifest")
 		while not _pending_load_queue.is_empty() and requests_submitted < max_requests_per_frame and available_slots > 0:
 			var grid: Vector2i = _pending_load_queue[-1]
+			var is_cold := can_probe_manifest \
+				and not bool(_world_object_source.call("has_cell_manifest", grid))
+			if is_cold and cold_manifest_built:
+				break  # Next frame pays the next cold atom; queue order intact
 			_pending_load_queue.resize(_pending_load_queue.size() - 1)
 			_pending_load_set.erase(grid)
 
@@ -2309,6 +2393,8 @@ func _process_pending_loads_async() -> void:
 			if _request_cell_async(grid):
 				requests_submitted += 1
 				available_slots -= 1
+				if is_cold:
+					cold_manifest_built = true
 
 		if requests_submitted > 0 and debug_enabled:
 			_debug("Submitted %d async cell requests, %d remaining in queue (startup=%s, frame=%d)" % [
@@ -2461,8 +2547,8 @@ func _process_pending_loads_sync(_delta: float) -> void:
 	if Engine.get_frames_drawn() == 1:
 		push_warning("[NativeStreamingManager] Using synchronous cell loading - this can cause stuttering. Set async_loading_enabled = true for better performance.")
 
-	# Dual-purpose SubsystemToggles gate — mirror of async path.
-	if not _near_tier_visible and not _mid_tier_visible:
+	# Streaming-policy gate — mirror of async path.
+	if not _near_tier_visible and not _static_streaming_enabled:
 		return
 
 	if _pending_load_queue.is_empty():
@@ -2743,6 +2829,7 @@ func get_benchmark_mode_metadata() -> Dictionary:
 		"sync_fallback_last_frame": _sync_fallback_last_frame,
 		"near_gameplay": _near_tier_visible,
 		"static_visuals": _mid_tier_visible,
+		"static_streaming": _static_streaming_enabled,
 		"dev_mid_object_paging": _dev_mid_object_paging_visible,
 		"hlod_requested": hlod_requested,
 		"hlod_active": hlod_active,
@@ -3113,27 +3200,65 @@ func is_cell_loaded(grid: Vector2i) -> bool:
 # Each method delegates to the owning subsystem — no internal reach-around.
 
 ## Toggle MID-tier RS instances (StaticObjectRenderer)
+## PURE render-visibility toggle (Phase 0, 2026-07-05). Flips whether static
+## visuals draw — nothing else. Does NOT touch the loaded-cell ring, load
+## profiles, publish gates, or visibility ranges, so benchmark ablations
+## measure rendering cost only. Streaming policy lives in
+## set_static_streaming_enabled().
 func set_mid_tier_visible(visible: bool) -> void:
 	_mid_tier_visible = visible
 	_apply_static_renderer_tier_visibility()
 	_apply_hlod_request()
+
+
+## Streaming-POLICY control, not a render toggle: parks/resumes the wide
+## scene-cell ring and static-visuals publish. Used by mode isolation
+## (--near-only / --far-only / --hlod-only). Benchmark subsystem toggles must
+## never call this.
+func set_static_streaming_enabled(enabled: bool) -> void:
+	if _static_streaming_enabled == enabled:
+		return
+	_static_streaming_enabled = enabled
 	if _initialized and _camera:
 		_update_loaded_cells()
+
+
+func is_static_streaming_enabled() -> bool:
+	return _static_streaming_enabled
+
+
+## Debug override for the static renderer's visibility range (console
+## `static_range`). Persists until cleared; while active, view-distance
+## changes do not stomp it.
+var _static_range_override: Vector2 = Vector2(-1.0, -1.0)
+
+func set_static_visibility_range_override(begin: float, end: float) -> void:
+	_static_range_override = Vector2(maxf(0.0, begin), maxf(0.0, end))
+	_apply_static_renderer_tier_visibility()
+
+
+func clear_static_visibility_range_override() -> void:
+	_static_range_override = Vector2(-1.0, -1.0)
+	_apply_static_renderer_tier_visibility()
 
 
 func _apply_static_renderer_tier_visibility() -> void:
 	if not _static_renderer:
 		return
-	var any_static_visuals := _near_tier_visible or _mid_tier_visible
+	# Range policy: full 0..MID_END band (capped by the view-distance slider),
+	# regardless of which tiers are toggled — the static renderer owns ALL
+	# static scenery from 0m out. NEAR gameplay visibility is a separate
+	# concern (Node3D cells). Debug override wins when set.
 	var begin := 0.0
-	var end := minf(_distant_render_end_m, DU.MID_END if _mid_tier_visible else DU.NEAR_END)
-	if not _near_tier_visible and _mid_tier_visible:
-		begin = DU.NEAR_END
+	var end := minf(_distant_render_end_m, DU.MID_END)
+	if _static_range_override.y >= 0.0:
+		begin = _static_range_override.x
+		end = _static_range_override.y
 	if _static_renderer.has_method("set_visibility_range"):
 		_static_renderer.call("set_visibility_range", begin, end)
 	elif _static_renderer.has_method("set_visibility_range_end"):
 		_static_renderer.call("set_visibility_range_end", end)
-	_static_renderer.set_all_visible(any_static_visuals)
+	_static_renderer.set_all_visible(_mid_tier_visible)
 
 ## Toggle FAR-tier impostors (NativeImpostorRenderer) — hides + stops streaming.
 func set_impostors_visible(visible: bool) -> void:
@@ -3174,7 +3299,6 @@ func set_near_tier_visible(visible: bool) -> void:
 		_near_burst_drain = true
 		Log.info("streaming", "NEAR thaw — burst drain armed")
 		_update_loaded_cells()
-	_apply_static_renderer_tier_visibility()
 
 func _set_near_gameplay_active(root: Node, active: bool) -> void:
 	root.process_mode = Node.PROCESS_MODE_INHERIT if active else Node.PROCESS_MODE_DISABLED
@@ -3877,7 +4001,7 @@ func _check_startup_complete() -> void:
 	var impostor_inner_ring_done: bool = impostor_processed >= inner_ring_count or impostor_pending == 0
 	# Wait for nearby cells loaded + first-playable queue cap + inner ring impostors
 	# Don't be too strict — player shouldn't wait 30s for every impostor
-	var scene_tiers_disabled := not _near_tier_visible and not _mid_tier_visible
+	var scene_tiers_disabled := not _near_tier_visible and not _static_streaming_enabled
 	var nearby_cells_loaded := scene_tiers_disabled or _loaded_cells.size() >= mini(load_radius_cells * 2 + 1, 7)
 	# Diagnostic: log startup progress every 60 frames
 	if _startup_frames % 60 == 0:

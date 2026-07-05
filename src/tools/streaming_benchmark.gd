@@ -66,7 +66,7 @@ const SEGMENT_NAMES: Array[String] = [
 ## Sum of inst_* should match `phase_inst_us` within rounding (excluding
 ## skipped/deferred/unknown types). `inst_light_modelload_us` is a sub-slice
 ## of `inst_light_us` — disk/parse cost of the light's model load.
-const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us"
+const CSV_HEADERS := "frame,time_ms,fps,node_count,draw_calls,rendered_objects,primitives,queue_size,loaded_cells,async_requests,cam_x,cam_y,cam_z,memory_static,segment,mid_instances,mid_mesh_types,vram_mb,texture_mem_mb,promoted_objects,stream_total_ms,phase_unload_us,phase_async_us,phase_inst_us,phase_promo_us,phase_coll_us,phase_defer_us,phase_queue_us,phase_cellupd_us,phase_static_cull_us,inst_door_us,inst_light_us,inst_light_modelload_us,inst_container_us,inst_activator_us,inst_static_us,render_cpu_ms,render_gpu_ms"
 
 #endregion
 
@@ -205,6 +205,13 @@ func init_manual_mode(
 			_streaming_manager.cell_loaded.connect(_on_cell_loaded)
 		if _streaming_manager.has_signal("cell_unloaded"):
 			_streaming_manager.cell_unloaded.connect(_on_cell_unloaded)
+
+	# Render CPU/GPU split, matching _start_benchmark.
+	var vp := get_viewport()
+	if vp != null:
+		RenderingServer.viewport_set_measure_render_time(vp.get_viewport_rid(), true)
+	if Engine.max_fps > 0:
+		Log.warn("tools", "StreamingBenchmark: Engine.max_fps=%d — FPS numbers are capped; consider max_fps=0 for benchmarks" % Engine.max_fps)
 
 	Log.info("tools", "StreamingBenchmark: manual recording started (label: '%s')" % label)
 
@@ -353,6 +360,14 @@ func _start_benchmark() -> void:
 	_running = true
 	_finished = false
 
+	# Enable the render CPU/GPU time split for the run (idempotent; values
+	# land in the render_cpu_ms / render_gpu_ms CSV columns).
+	var vp := get_viewport()
+	if vp != null:
+		RenderingServer.viewport_set_measure_render_time(vp.get_viewport_rid(), true)
+	if Engine.max_fps > 0:
+		Log.warn("tools", "StreamingBenchmark: Engine.max_fps=%d — FPS numbers are capped; consider max_fps=0 for benchmarks" % Engine.max_fps)
+
 	# Position camera at first waypoint
 	var wp := _waypoints[0]
 	_camera.global_position = wp.position
@@ -468,7 +483,7 @@ func _update_segment_index() -> void:
 
 func _log_frame() -> void:
 	var entry := PackedFloat64Array()
-	entry.resize(36)
+	entry.resize(38)
 	entry[0] = float(Engine.get_frames_drawn())
 	entry[1] = _last_frame_time_ms
 	entry[2] = Engine.get_frames_per_second()
@@ -512,6 +527,15 @@ func _log_frame() -> void:
 		entry[33] = float(rt.get("container", 0))
 		entry[34] = float(rt.get("activator", 0))
 		entry[35] = float(rt.get("static", 0))
+
+	# Render CPU/GPU split (Phase 0, 2026-07-05) — the metric that separates
+	# "renderer is busy" from "main thread is busy". Values are last-frame,
+	# in milliseconds; measurement is enabled once in start().
+	var vp := get_viewport()
+	if vp != null:
+		var vp_rid := vp.get_viewport_rid()
+		entry[36] = RenderingServer.viewport_get_measured_render_time_cpu(vp_rid)
+		entry[37] = RenderingServer.viewport_get_measured_render_time_gpu(vp_rid)
 	_frame_log.append(entry)
 
 	# Sample visibility for appear/disappear detection

@@ -1123,7 +1123,22 @@ func _apply_bucket_visibility_ranges() -> void:
 	_refresh_hlod_bucket_override_stats()
 
 
+var _hlod_override_stats_frame: int = -1
+
 func _refresh_hlod_bucket_override_stats() -> void:
+	# Phase 1 (2026-07-05): this walk touches every bucket with reflective
+	# `.get()` calls and str() key builds — 1-4ms at ~1,700 buckets — and
+	# get_stats() is called per frame by the benchmark. Early-out when HLOD
+	# covers nothing (the default posture), and never recompute twice in the
+	# same frame.
+	if _hlod_covered_bucket_counts.is_empty():
+		_stats["hlod_bucket_overrides"] = 0
+		_stats["hlod_bucket_override_refs"] = 0
+		return
+	var frame := Engine.get_frames_drawn()
+	if frame == _hlod_override_stats_frame:
+		return
+	_hlod_override_stats_frame = frame
 	var override_count := 0
 	var override_refs := 0
 	for buckets: Array in _cell_buckets.values():

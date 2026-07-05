@@ -203,6 +203,10 @@ The HUD (`hud` command) shows five lines, updated at 10Hz while visible:
 ### Toggle contract
 `Node3D.visible = bool` does **NOT** hide raw `RenderingServer.instance_create()` RIDs. If the subsystem uses raw RS instances (MID tier, HLOD), it needs its own visibility API that iterates live draw groups/chunks and calls `RS.instance_set_visible()`. See `static_object_renderer.gd`, `cell_static_bucket.gd`, and `object_paging.gd` for the current patterns. Public API on `NativeStreamingManager` then delegates.
 
+**Toggles are pure render ablations (Phase 0, 2026-07-05).** `static_visuals` hides rendering only; streaming (cell ring, load profiles, publish) continues identically in every toggle state, so rung/toggle deltas measure rendering cost, not streaming-volume changes. Consequences: the "empty" ladder rung still streams hidden statics (it's a render floor, not a systems-off floor), and numbers from ladders before 2026-07-05 are not comparable to new ones. Streaming policy is parked only by mode isolation flags (`--near-only`, `--far-only`, `--hlod-only`).
+
+**Measurement hygiene (Phase 0):** benchmark CSVs now carry `render_cpu_ms` / `render_gpu_ms` (engine-measured render split); reports record `renderer.max_fps` / `renderer.vsync_mode` / `renderer.fps_capped`; `bench_ladder` uncaps `Engine.max_fps` for the run and restores it at finish. Standalone `benchmark` / `bench_start` runs warn when a cap is active instead of overriding it.
+
 ### Adding a new waypoint segment
 Edit `_build_waypoints()` in `streaming_benchmark.gd`. Append to `_segment_starts` with a name in the matching slot of `SEGMENT_NAMES`. Adjust `FLYBY_TOTAL_S` derivation if needed; the console command descriptions read from it dynamically so they auto-update.
 

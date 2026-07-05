@@ -189,6 +189,8 @@ var _lifetime_probe_started: bool = false
 # State
 var _data_path: String = ""
 var _initialized: bool = false
+## Phase 1 frame-autopsy warn throttle (see _process).
+var _wa_last_warn_frame: int = -1000
 var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS
@@ -2477,9 +2479,11 @@ func _setup_subsystem_toggles() -> void:
 	# architecture. `--near-only` remains the full distant-tier opt-out, and
 	# `--hlod` remains the runtime-HLOD experiment path.
 	#
-	# `static_visuals` controls the MID extension of the shared static renderer.
-	# With NEAR gameplay on, disabling it caps static buckets to NEAR range
-	# instead of hiding all rocks/arches/clutter.
+	# `static_visuals` is a PURE render toggle (Phase 0, 2026-07-05): it hides
+	# every static-renderer instance (buckets + direct + proxies) and touches
+	# nothing else — streaming ring, load profiles, and publish keep running so
+	# benchmark ablations isolate rendering cost. Streaming policy is parked
+	# separately via set_static_streaming_enabled() in the isolation modes.
 	var runtime_args := _runtime_cmdline_args()
 	var boot_near_only := false
 	var boot_near_mid_only := false
@@ -2568,6 +2572,10 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("hlod", false)
 			_subsystem_toggles.set_flag("far_impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
+			# Mode isolation also parks the streaming POLICY (ring shrinks to
+			# the NEAR-only radius). The toggle above only hides rendering.
+			if native_streaming_manager:
+				native_streaming_manager.set_static_streaming_enabled(false)
 			_log("[color=yellow]--near-only: NEAR gameplay/statics only; MID/HLOD/FAR/distant lights OFF[/color]")
 		elif a == "--near-mid-only":
 			_subsystem_toggles.set_flag("hlod", false)
@@ -2588,6 +2596,10 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("terrain", true)
 			_subsystem_toggles.set_flag("near_gameplay", false)
 			_subsystem_toggles.set_flag("static_visuals", false)
+			# Park scene-cell streaming: HLOD reads the world object source
+			# directly and must not compete with hidden static publish.
+			if native_streaming_manager:
+				native_streaming_manager.set_static_streaming_enabled(false)
 			_subsystem_toggles.set_flag("hlod", true)
 			_subsystem_toggles.set_flag("far_impostors", false)
 			_subsystem_toggles.set_flag("distant_lights", false)
@@ -2616,6 +2628,10 @@ func _setup_subsystem_toggles() -> void:
 			_subsystem_toggles.set_flag("shadows", false)
 			_subsystem_toggles.set_flag("ocean", false)
 			_subsystem_toggles.set_flag("characters", false)
+			# Park scene-cell streaming entirely — FAR reads the world object
+			# source directly, so hidden static publish is pure noise here.
+			if native_streaming_manager:
+				native_streaming_manager.set_static_streaming_enabled(false)
 			_log("[color=yellow]--far-only: terrain + FAR impostors only; NEAR/MID/HLOD/environment OFF[/color]")
 		elif a == "--no-hlod" or a == "-no-hlod" or ((a == "-no" or a == "--no") and next_arg == "hlod"):
 			_subsystem_toggles.set_flag("hlod", false)
@@ -2914,6 +2930,19 @@ func _setup_native_streaming_manager(start_tracking: bool = true) -> void:
 		)
 
 		console.register_command(
+			"static_range",
+			_cmd_static_range,
+			"Clamp static-renderer visibility range (debug). 'static_range off' restores the view-distance default.",
+			"debug",
+			PackedStringArray(),
+			[
+				CommandRegistry.ParameterInfo.new("end", TYPE_STRING, "end distance in meters, or 'off'", false),
+				CommandRegistry.ParameterInfo.new("begin", TYPE_STRING, "begin distance in meters (default 0)", false),
+			] as Array[CommandRegistry.ParameterInfo],
+			PackedStringArray(["static_range 150", "static_range 400 150", "static_range off"])
+		)
+
+		console.register_command(
 			"hlod_chunk_view",
 			_cmd_toggle_hlod_chunk_view,
 			"Toggle visual HLOD chunk boxes and state labels",
@@ -3166,6 +3195,29 @@ func _cmd_toggle_batch_debug(_args: Dictionary) -> String:
 	return "Batch debug HUD not initialized"
 
 
+## Debug clamp for the static renderer's visibility range. Replaces the old
+## behavior where `toggle static_visuals` silently clamped ranges — the toggle
+## is now a pure show/hide, and range experiments go through this command.
+func _cmd_static_range(args: Dictionary) -> String:
+	if not native_streaming_manager:
+		return "Streaming manager not available"
+	var end_raw := String(args.get("end", "")).to_lower().strip_edges()
+	if end_raw == "" :
+		return "Usage: static_range <end_m> [begin_m] | static_range off"
+	if end_raw in ["off", "clear", "default"]:
+		native_streaming_manager.clear_static_visibility_range_override()
+		return "static_range override cleared — back to view-distance default (0-%dm capped)" % int(StreamingConfig.DU.MID_END)
+	if not end_raw.is_valid_float():
+		return "Usage: static_range <end_m> [begin_m] | static_range off"
+	var end_m := end_raw.to_float()
+	var begin_raw := String(args.get("begin", "0")).strip_edges()
+	var begin_m := begin_raw.to_float() if begin_raw.is_valid_float() else 0.0
+	if end_m <= begin_m:
+		return "static_range: end (%.0f) must be greater than begin (%.0f)" % [end_m, begin_m]
+	native_streaming_manager.set_static_visibility_range_override(begin_m, end_m)
+	return "static_range override: %.0f-%.0fm (live buckets + future); 'static_range off' to restore" % [begin_m, end_m]
+
+
 func _cmd_toggle_tier_view(_args: Dictionary) -> String:
 	if not _debug_overlay:
 		return "Debug overlay not initialized"
@@ -3369,7 +3421,16 @@ func _register_exterior_doors_for_grid(grid: Vector2i) -> void:
 	if world_object_source != null and world_object_source.has_method("get_source_exterior_cell"):
 		cell = world_object_source.call("get_source_exterior_cell", grid)
 	if cell:
-		_pocket_manager.register_exterior_cell_doors(cell, grid)
+		# Phase 1 wave 3 scoping (2026-07-05): first-touch door registration
+		# on door-dense cells is the remaining pending_loads_async spike
+		# (shell-candidate classification is compute-bound GDScript — C#
+		# port candidate). Same 8ms warn pattern as [cell-request-start].
+		var t0 := Time.get_ticks_usec()
+		var registered: int = _pocket_manager.register_exterior_cell_doors(cell, grid)
+		var total_us := Time.get_ticks_usec() - t0
+		if total_us > 8_000:
+			Log.warn("streaming", "[door-register %.1fms] grid=%s doors=%d" % [
+				float(total_us) / 1000.0, grid, registered])
 
 
 ## Callback for native streaming manager cell activation/request
@@ -4206,13 +4267,21 @@ func _process(delta: float) -> void:
 	# native_streaming_manager._process with proper frame-budget-aware timing.
 	# Do NOT call it here too — duplicate calls double the CPU cost.
 
+	# Phase 1 frame autopsy (2026-07-05): during flyby benchmarks ~10-15ms of
+	# main-thread time was unattributed by the streaming brackets. Time each
+	# block here and warn with the breakdown on >8ms frames so the offender
+	# has a name. Throttled to one warn per 60 frames.
+	var wa_t0 := Time.get_ticks_usec()
+
 	# Update interior pocket manager (door detection, eviction)
 	if _pocket_manager:
 		_pocket_manager.update(camera.global_position, delta)
+	var wa_pocket := Time.get_ticks_usec()
 
 	# Update weather rendering
 	if _weather_controls:
 		_weather_controls.process(delta)
+	var wa_weather := Time.get_ticks_usec()
 
 	# Update ocean controls
 	if _ocean_controls:
@@ -4232,6 +4301,7 @@ func _process(delta: float) -> void:
 				float(optics_status.get("visibility_m", 0.0)),
 				float(optics_status.get("turbidity", 0.0)),
 			]
+	var wa_ocean := Time.get_ticks_usec()
 
 	# Update horizon map sun direction
 	if _horizon_map_manager:
@@ -4240,11 +4310,24 @@ func _process(delta: float) -> void:
 	# Feed sun elevation to distant light manager for time-of-day visibility
 	if native_streaming_manager and _env_controls and _env_controls.sky_manager:
 		native_streaming_manager.set_sun_elevation(_env_controls.sky_manager.celestial.sun_altitude)
+	var wa_horizon := Time.get_ticks_usec()
 
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:
 		_update_stats()
 		_update_hlod_ui_status()
+	var wa_end := Time.get_ticks_usec()
+
+	if wa_end - wa_t0 > 8_000 and Engine.get_frames_drawn() - _wa_last_warn_frame > 60:
+		_wa_last_warn_frame = Engine.get_frames_drawn()
+		Log.warn("tools", "[we-autopsy %.1fms] pocket=%.1f weather=%.1f ocean=%.1f horizon=%.1f stats=%.1f (ms)" % [
+			float(wa_end - wa_t0) / 1000.0,
+			float(wa_pocket - wa_t0) / 1000.0,
+			float(wa_weather - wa_pocket) / 1000.0,
+			float(wa_ocean - wa_weather) / 1000.0,
+			float(wa_horizon - wa_ocean) / 1000.0,
+			float(wa_end - wa_horizon) / 1000.0,
+		])
 
 
 func _get_distant_render_end_m() -> float:

@@ -10,7 +10,6 @@
 ## Controls: LEFT/RIGHT arrows = switch model, ZQSD = orbit
 extends Node3D
 
-const MODELS_DIR := "C:/Users/metzo/Documents/Godotwind/cache/models/"
 
 ## Models to test — multi-surface assets that should have distinct per-surface textures
 var _test_models: Array[String] = [
@@ -97,7 +96,7 @@ func _load_model(index: int) -> void:
 		_current_type_name = ""
 
 	var model_name: String = _test_models[index]
-	var path := MODELS_DIR + model_name + ".res"
+	var path := SettingsManager.get_models_path().path_join(model_name + ".res")
 
 	if not FileAccess.file_exists(path):
 		_label.text = "NOT FOUND: %s" % model_name

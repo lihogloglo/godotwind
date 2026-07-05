@@ -109,6 +109,16 @@ Canonical runtime toggle names:
 - `far_impostors`
 - `distant_lights`
 
+Phase 0 (2026-07-05): `static_visuals` is a PURE render toggle. It hides all
+static-renderer output (buckets, direct instances, visual proxies) and touches
+nothing else — the loaded-cell ring, load profiles, and publish keep running,
+so benchmark ablations isolate rendering cost. The streaming policy that used
+to piggyback on this toggle lives in
+`NativeStreamingManager.set_static_streaming_enabled()` and is parked only by
+mode isolation (`--near-only`, `--far-only`, `--hlod-only`). Range clamping
+moved to the `static_range <end_m> [begin_m]` console command
+(`static_range off` restores the view-distance default).
+
 Temporary compatibility aliases remain for benchmark scripts and console muscle
 memory: `near_objects -> near_gameplay`, `mid_objects -> static_visuals`, and
 `impostors -> far_impostors`. New docs, HUDs, benchmark ladders, and CLI
