@@ -786,6 +786,9 @@ static func _create_material(texture_path: String, properties: Dictionary) -> St
 	var mat := StandardMaterial3D.new()
 	mat.albedo_texture = texture
 	mat.texture_filter = BaseMaterial3D.TEXTURE_FILTER_LINEAR_WITH_MIPMAPS
+	# MW body parts ship no NiSpecularProperty — specular off (matches
+	# the specular gate in material_library.gd / nif_converter.gd).
+	mat.metallic_specular = 0.0
 
 	if not properties.is_empty():
 		if "alpha" in properties and properties["alpha"] < 1.0:

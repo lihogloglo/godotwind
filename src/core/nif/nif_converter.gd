@@ -441,6 +441,9 @@ func _create_material_from_native_info(info: Dictionary) -> StandardMaterial3D:
 		# Material properties
 		if info.has("diffuse"):
 			props.albedo_color = info["diffuse"] as Color
+		# C# only writes specular_enabled when a NiSpecularProperty exists —
+		# absent means specular OFF (vanilla MW / OpenMW convention).
+		props.specular_enabled = info.get("specular_enabled", false)
 		if info.has("glossiness"):
 			var glossiness: float = info.get("glossiness", 0.0)
 			props.specular = glossiness / 128.0
@@ -500,9 +503,11 @@ func _create_material_from_native_info(info: Dictionary) -> StandardMaterial3D:
 		material.emission = emissive
 		material.emission_enabled = emissive.r > 0 or emissive.g > 0 or emissive.b > 0
 
-	if info.has("glossiness"):
+	if info.has("glossiness") and info.get("specular_enabled", false):
 		var glossiness: float = info.get("glossiness", 0.0)
 		material.metallic_specular = glossiness / 128.0
+	elif not info.get("specular_enabled", false):
+		material.metallic_specular = 0.0
 
 	# Alpha
 	if info.get("blend_enabled", false):
@@ -1665,6 +1670,8 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 		# Material properties
 		if mat_prop:
 			props.albedo_color = mat_prop.diffuse
+			# Specular only with an enabled NiSpecularProperty (MW convention).
+			props.specular_enabled = spec_prop != null and spec_prop.enabled
 			props.specular = mat_prop.glossiness / 128.0
 			props.roughness = 1.0 - props.specular
 			if mat_prop.emissive.r > 0.01 or mat_prop.emissive.g > 0.01 or mat_prop.emissive.b > 0.01:
@@ -1714,7 +1721,10 @@ func _get_material_for_shape(geom: Defs.NiGeometry) -> StandardMaterial3D:
 		material.albedo_color = mat_prop.diffuse
 		material.emission = mat_prop.emissive
 		material.emission_enabled = mat_prop.emissive.r > 0 or mat_prop.emissive.g > 0 or mat_prop.emissive.b > 0
-		material.metallic_specular = mat_prop.glossiness / 128.0  # Normalize
+		if spec_prop != null and spec_prop.enabled:
+			material.metallic_specular = mat_prop.glossiness / 128.0  # Normalize
+		else:
+			material.metallic_specular = 0.0  # MW: no NiSpecularProperty = no specular
 
 	# Apply alpha property
 	if alpha_prop:
@@ -2631,6 +2641,7 @@ func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
 	var alpha_prop: Defs.NiAlphaProperty = null
 	var vc_prop: Defs.NiVertexColorProperty = null
 	var stencil_prop: Defs.NiStencilProperty = null
+	var spec_prop: Defs.NiSpecularProperty = null
 
 	for prop_idx in geom.property_indices:
 		if prop_idx < 0:
@@ -2646,6 +2657,8 @@ func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
 			vc_prop = prop
 		elif prop is Defs.NiStencilProperty:
 			stencil_prop = prop
+		elif prop is Defs.NiSpecularProperty:
+			spec_prop = prop
 
 	# Build material key using same logic as MaterialLibrary
 	var props := MatLib.MaterialProperties.new()
@@ -2660,6 +2673,7 @@ func _get_material_key_for_shape(geom: Defs.NiGeometry) -> String:
 
 	if mat_prop:
 		props.albedo_color = mat_prop.diffuse
+		props.specular_enabled = spec_prop != null and spec_prop.enabled
 		props.specular = mat_prop.glossiness / 128.0
 		props.roughness = 1.0 - props.specular
 		if mat_prop.emissive.r > 0.01 or mat_prop.emissive.g > 0.01 or mat_prop.emissive.b > 0.01:

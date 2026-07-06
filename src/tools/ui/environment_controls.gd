@@ -42,7 +42,10 @@ var _visual_state: Dictionary = {
 	"ssao": false,
 	"ssil": false,
 	"ssr": true,
-	"glow": false,
+	# Glow default ON (2026-07-06 lighting pass): light-source meshes now carry
+	# boosted emission (reference_instantiator._boost_light_model_emission) and
+	# rely on bloom for the fire halo. Cost is a fixed-resolution mip chain.
+	"glow": true,
 	"volumetric_fog": false,
 	# Depth fog defaults ON (2026-07-06): the terrain heightmap is a finite
 	# square slab — from altitude its edge/corners are visible without a

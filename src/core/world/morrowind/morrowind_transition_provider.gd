@@ -239,7 +239,42 @@ func _build_space_environment(
 ) -> Environment:
 	if cell_payload == null:
 		return null
-	var env := Environment.new()
+
+	# Duplicate the live exterior Environment so interiors inherit the full
+	# post-processing stack (SSAO/SSR/glow/tonemap/SDFGI) exactly as the user
+	# has it configured, then override the space-specific pieces (ambient, fog,
+	# background) from cell data. Weather writes to SkyManager's own
+	# Environment object, never this snapshot, so no cross-contamination.
+	var env: Environment
+	if exterior_environment != null:
+		env = exterior_environment.duplicate() as Environment
+	else:
+		env = Environment.new()
+		env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+
+	# Interiors are small, cluttered spaces — contact occlusion and emissive
+	# bloom carry the look. Force these on regardless of the exterior perf
+	# defaults; their cost is resolution-bound, not scene-bound.
+	env.ssao_enabled = true
+	env.ssao_radius = 1.5
+	env.ssao_intensity = 2.0
+	env.glow_enabled = true
+
+	# Strip inherited exterior features that are wrong indoors (2026-07-06
+	# regression fixes):
+	# - SDFGI replaces the constant ambient on static geometry, and with no sky
+	#   to read it turned MW interiors pitch black (plus its full GPU cost).
+	#   Prebaked VoxelGI is the interior GI path; flat AMBI ambient otherwise.
+	# - SSR: the bake-once ReflectionProbe covers interior reflections.
+	# - Exterior HEIGHT fog is anchored near y=0; interior pockets sit at
+	#   y=-500, where it saturates into a white wall (Arille's bug). Zero the
+	#   height/aerial terms and let the AMBI distance fog own interior fog.
+	env.sdfgi_enabled = false
+	env.ssr_enabled = false
+	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	env.fog_height_density = 0.0
+	env.fog_aerial_perspective = 0.0
+	env.fog_sky_affect = 0.0
 
 	if bool(cell_payload.get("has_ambient")):
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
@@ -259,10 +294,13 @@ func _build_space_environment(
 			env.fog_enabled = true
 			env.fog_light_color = cell_payload.get("fog_color")
 			env.fog_density = fog_density * INTERIOR_FOG_DENSITY_SCALE
+		else:
+			env.fog_enabled = false
 	else:
 		env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 		env.ambient_light_color = Color(0.15, 0.13, 0.11)
 		env.ambient_light_energy = 0.5
+		env.fog_enabled = false
 
 	if bool(cell_payload.call("is_quasi_exterior")):
 		env.background_mode = Environment.BG_SKY
@@ -271,8 +309,12 @@ func _build_space_environment(
 	else:
 		env.background_mode = Environment.BG_COLOR
 		env.background_color = Color(0.02, 0.02, 0.03)
+		# No sky indoors: ambient comes from AMBI, reflections fall back to the
+		# near-black background instead of sampling the exterior sky. Exterior
+		# volumetric fog (weather haze) has no business inside a pocket either.
+		env.sky = null
+		env.volumetric_fog_enabled = false
 
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
 	return env
 
 

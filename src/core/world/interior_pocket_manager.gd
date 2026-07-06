@@ -31,6 +31,10 @@ const LightAnimatorScript := preload("res://src/core/world/light_animator.gd")
 const LightShadowBudgetScript := preload("res://src/core/world/light_shadow_budget.gd")
 const WorldSpaceHandleScript := preload("res://src/core/world/transition/world_space_handle.gd")
 const RenderLayersScript := preload("res://src/core/world/render_layers.gd")
+# Preload, not class_name reference: fresh class_name registrations only land
+# in the editor's global class cache — a CLI launch that never re-opened the
+# editor fails to resolve them (verified 2026-07-06, boot parse error).
+const InteriorGICacheScript := preload("res://src/core/world/interior_gi_cache.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 
 #region Constants
@@ -1107,6 +1111,11 @@ func _pocket_finish_up_phase_1(slot: PocketSlot) -> void:
 	if slot.finish_up_aabb.size.length_squared() >= 0.01:
 		_add_lightbox_from_aabb(slot.cell_node, slot.finish_up_aabb)
 
+	# Bake-once reflections + prebaked voxel GI (2026-07-06 lighting pass).
+	if slot.finish_up_aabb_valid:
+		_add_reflection_probe(slot)
+	_add_interior_gi(slot)
+
 	# Add light animator for flicker/pulse effects
 	var light_count := _count_lights(slot.cell_node)
 	if light_count > 0:
@@ -1275,6 +1284,59 @@ func _add_lightbox_from_aabb(cell_node: Node3D, aabb: AABB) -> void:
 
 	cell_node.add_child(box_instance)
 	Log.info("streaming", "Added lightbox: size=%s center=%s" % [combined_aabb.size, combined_aabb.get_center()])
+
+
+## One bake-once ReflectionProbe per pocket (lighting roadmap Priority 2):
+## box-projected interior reflections so shiny materials indoors stop
+## reflecting a sky they can't see. UPDATE_ONCE renders the cubemap a single
+## time after entering the tree — the cost is absorbed by the load transition.
+func _add_reflection_probe(slot: PocketSlot) -> void:
+	var aabb := slot.finish_up_aabb
+	var probe := ReflectionProbe.new()
+	probe.name = "InteriorReflectionProbe"
+	probe.update_mode = ReflectionProbe.UPDATE_ONCE
+	probe.size = aabb.size + Vector3.ONE * 2.0
+	probe.position = aabb.get_center()
+	probe.interior = true
+	probe.box_projection = true
+	probe.enable_shadows = false
+	probe.cull_mask = INTERIOR_RENDER_LAYERS
+	probe.layers = INTERIOR_RENDER_LAYERS
+	slot.cell_node.add_child(probe)
+
+
+## Load prebaked interior VoxelGI if the bake exists (see
+## src/tools/prebaking/interior_gi_bake_runner.gd + interior_gi_cache.gd).
+## The voxel field is re-lit every frame from the live omni lights, so
+## flickering torches bounce — the reason VoxelGI beats lightmaps here.
+func _add_interior_gi(slot: PocketSlot) -> void:
+	var settings: Node = get_node_or_null("/root/SettingsManager")
+	if settings == null:
+		return
+	var path: String = InteriorGICacheScript.file_for_cell(InteriorGICacheScript.gi_dir(settings), slot.cell_name)
+	if not FileAccess.file_exists(path):
+		return
+	var data := ResourceLoader.load(path) as VoxelGIData
+	if data == null:
+		Log.warn("streaming", "Interior GI: failed to load %s" % path)
+		return
+	var size_v: Variant = data.get_meta(InteriorGICacheScript.META_SIZE) if data.has_meta(InteriorGICacheScript.META_SIZE) else null
+	var center_v: Variant = data.get_meta(InteriorGICacheScript.META_CENTER) if data.has_meta(InteriorGICacheScript.META_CENTER) else null
+	if not (size_v is Vector3) or not (center_v is Vector3):
+		Log.warn("streaming", "Interior GI: %s missing placement metadata, skipping" % path)
+		return
+	var gi := VoxelGI.new()
+	gi.name = "InteriorVoxelGI"
+	gi.data = data
+	gi.size = size_v as Vector3
+	gi.position = center_v as Vector3
+	gi.layers = INTERIOR_RENDER_LAYERS
+	slot.cell_node.add_child(gi)
+	# Prebaked voxel GI supersedes the SDFGI fallback inherited from the
+	# exterior environment duplicate — both at once would double-light.
+	if slot.interior_environment:
+		slot.interior_environment.sdfgi_enabled = false
+	Log.info("streaming", "Interior GI: prebaked VoxelGI active for '%s'" % slot.cell_name)
 
 
 func _evict_pocket(slot: PocketSlot) -> void:
@@ -1818,10 +1880,30 @@ func _build_interior_environment(space_info: RefCounted) -> Environment:
 		var provided: Variant = space_info.get("environment")
 		if provided is Environment:
 			return provided
-	var env := Environment.new()
+	# Fallback when no provider environment exists: duplicate the exterior so
+	# the interior inherits the active post-processing stack, then override
+	# the space-specific pieces. Mirrors the provider-side builder.
+	var env: Environment
+	if _exterior_environment != null:
+		env = _exterior_environment.duplicate() as Environment
+	else:
+		env = Environment.new()
+		env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+	env.ssao_enabled = true
+	env.glow_enabled = true
+	# Mirror the provider-side interior overrides (see
+	# morrowind_transition_provider._build_space_environment): no SDFGI/SSR
+	# indoors, no inherited exterior height fog at the pocket's y=-500 offset.
+	env.sdfgi_enabled = false
+	env.ssr_enabled = false
+	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
+	env.fog_height_density = 0.0
+	env.fog_aerial_perspective = 0.0
+	env.fog_sky_affect = 0.0
 	env.ambient_light_source = Environment.AMBIENT_SOURCE_COLOR
 	env.ambient_light_color = Color(0.15, 0.13, 0.11)
 	env.ambient_light_energy = 0.5
+	env.fog_enabled = false
 	if space_info != null and bool(space_info.get("is_quasi_exterior")):
 		env.background_mode = Environment.BG_SKY
 		if _exterior_environment:
@@ -1829,8 +1911,8 @@ func _build_interior_environment(space_info: RefCounted) -> Environment:
 	else:
 		env.background_mode = Environment.BG_COLOR
 		env.background_color = Color(0.02, 0.02, 0.03)  # Near black
-
-	env.tonemap_mode = Environment.TONE_MAPPER_FILMIC
+		env.sky = null
+		env.volumetric_fog_enabled = false
 
 	return env
 

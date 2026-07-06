@@ -155,9 +155,10 @@ func _compute_simple(game_hour: float) -> void:
 	# At hour 6: sunrise (east). At 12: zenith. At 18: sunset (west).
 	var hour_angle: float = (game_hour - 6.0) * RADIANS_PER_HOUR  # 0 at 6AM
 
-	# Elevation: sin curve peaking at noon, latitude reduces max elevation
+	# Elevation: 24h-period sin curve — rises 6:00, peaks 12:00, sets 18:00,
+	# nadir at midnight. Continuous across the day wrap (no snap).
 	var max_elevation: float = deg_to_rad(90.0 - absf(latitude) * 0.4)
-	var elevation: float = sin(hour_angle / 2.0) * max_elevation  # peaks at noon
+	var elevation: float = sin(hour_angle) * max_elevation
 
 	# Azimuth: east(90) -> south(180) -> west(270)
 	var azimuth: float = deg_to_rad(lerpf(90.0, 270.0, hour_angle / PI))
@@ -168,7 +169,7 @@ func _compute_simple(game_hour: float) -> void:
 
 	# Moon: roughly opposite the sun with artistic offset
 	var moon_hour_angle: float = hour_angle + PI
-	var moon_elevation: float = sin(moon_hour_angle / 2.0) * max_elevation
+	var moon_elevation: float = sin(moon_hour_angle) * max_elevation
 	var moon_azimuth: float = azimuth + PI
 	moon_elevation += deg_to_rad(moon_offset.y)
 	moon_azimuth += deg_to_rad(moon_offset.x)

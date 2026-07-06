@@ -2,6 +2,21 @@
 
 > Open roadmap. Items pulled from the 2026-04-05 lighting audit; update status inline when shipping. Boundary rule: core lighting systems consume generic light descriptors, and source-specific light flags are translated in source adapters.
 
+> **2026-07-06 lighting pass — SHIPPED:** SDFGI (was P1), emissive light models
+> (was P1), distant REAL point lights 150-600m in `distant_light_manager.gd`
+> (was P2 "billboard only" — upgraded: Forward+ is already a clustered-forward
+> renderer, the same architecture upstream adopted in its MR 5212, so real
+> shadowless omnis are cheap), interior ReflectionProbes (was P2), interior
+> environment post-stack inheritance + per-cell ambient/fog, the model-material
+> specular gate (whitish-container fix, see `docs/systems/lighting.md` §4c),
+> and prebaked interior VoxelGI (`interior_gi_bake_runner.tscn`) standing in
+> for lightmaps — LightmapGI.bake() is not scriptable (godot-proposals#8656),
+> so batch lightmap baking is impossible in stock Godot. Current state:
+> `docs/systems/lighting.md`. Still open below: extended NEAR light fade,
+> night impostor variants, FogVolumes, contact-shadow equivalent (NOTE:
+> `shadow_contact` is Godot 3 API — does not exist in Godot 4; needs a
+> different approach if pursued).
+
 ---
 
 ## Priority 1: Quick Wins (Configuration Only)

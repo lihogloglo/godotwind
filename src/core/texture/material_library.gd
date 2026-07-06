@@ -50,6 +50,10 @@ class MaterialProperties:
 	var roughness: float = 1.0
 	var metallic: float = 0.0
 	var albedo_color: Color = Color.WHITE
+	## MW convention (OpenMW nifloader): specular is OFF unless the shape has
+	## an enabled NiSpecularProperty. NIF paths must set this explicitly;
+	## defaults to true so non-NIF callers keep Godot's standard look.
+	var specular_enabled: bool = true
 
 	## Extended NIF material properties (Phase 0 — NIF pipeline overhaul)
 	var glow_texture_path: String = ""    ## NIF texture slot 4 (emission map)
@@ -88,8 +92,14 @@ class MaterialProperties:
 			parts.append("bump:%s" % bump_texture_path.to_lower())
 		if not dark_texture_path.is_empty():
 			parts.append("dark:%s" % dark_texture_path.to_lower())
-		if specular_color != Color.BLACK:
-			parts.append("sc:%s" % specular_color.to_html())
+		# Specular state must be part of the key — materials sharing a texture
+		# but differing in specular/roughness are NOT visually identical.
+		if not specular_enabled:
+			parts.append("ns")
+		else:
+			parts.append("sp%.2f_r%.2f" % [specular, roughness])
+			if specular_color != Color.BLACK:
+				parts.append("sc:%s" % specular_color.to_html())
 		if apply_mode != 2:
 			parts.append("am:%d" % apply_mode)
 		if not depth_test or not depth_write:
@@ -129,8 +139,15 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 	mat.shading_mode = props.shading_mode
 	mat.specular_mode = BaseMaterial3D.SPECULAR_SCHLICK_GGX
 	mat.metallic = props.metallic
-	mat.metallic_specular = props.specular
-	mat.roughness = props.roughness
+	if props.specular_enabled:
+		mat.metallic_specular = props.specular
+		mat.roughness = props.roughness
+	else:
+		# MW convention (OpenMW nifloader): no enabled NiSpecularProperty means
+		# no specular highlight at all — kill dielectric specular AND keep the
+		# surface fully rough so sky/SSR reflections don't wash it out.
+		mat.metallic_specular = 0.0
+		mat.roughness = 1.0
 	mat.albedo_color = props.albedo_color
 
 	# Texture filtering - critical for visual quality at distance
@@ -177,8 +194,11 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 			mat.normal_enabled = true
 			mat.normal_texture = bump_tex
 
-	# Specular color (NiMaterialProperty.specular)
-	if props.specular_color != Color.BLACK:
+	# Specular color (NiMaterialProperty.specular) — only meaningful when the
+	# shape has an enabled NiSpecularProperty. MW meshes routinely store a WHITE
+	# specular color with specular disabled; applying it unconditionally maxed
+	# metallic_specular to 1.0 and gave crates/containers a whitish sheen.
+	if props.specular_enabled and props.specular_color != Color.BLACK:
 		# StandardMaterial3D doesn't have direct specular color —
 		# approximate by modulating metallic_specular with luminance
 		var lum: float = props.specular_color.r * 0.299 + props.specular_color.g * 0.587 + props.specular_color.b * 0.114
@@ -232,6 +252,8 @@ static func props_from_nif_material(
 	# Extract material properties
 	if material_prop:
 		props.albedo_color = material_prop.get("diffuse_color", Color.WHITE)
+		# MW default: specular off unless an enabled NiSpecularProperty exists.
+		props.specular_enabled = material_prop.get("specular_enabled", false)
 		props.specular = material_prop.get("glossiness", 0.5) / 100.0
 		props.roughness = 1.0 - props.specular
 

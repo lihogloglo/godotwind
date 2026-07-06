@@ -18,6 +18,15 @@ const MAIN_SCENE_WATER_QUALITY: int = OceanMesh.QualityMode.HIGH
 const MAIN_SCENE_MESH_MODE: int = OceanMesh.MeshMode.CLIPMAP
 const MAIN_SCENE_SURFACE_SHADER: int = OceanMesh.SurfaceShaderMode.BOUJIE_EXPERIMENTAL
 const UNDERWATER_EFFECT_NAME := "underwater_medium"
+## Keep the underwater medium pass dispatched while the camera is this close
+## above the surface, not only when the eye is fully submerged. The shader
+## already tints each pixel per its view-ray water path length, so a frame
+## straddling the waterline fogs the through-water pixels down to the exact
+## surface crossing — but only if the pass is enabled. Gating enablement on the
+## eye being submerged killed the whole pass the instant the eye rose above the
+## surface, leaving the lower half dry. Activation must be generous; pixels with
+## no water along their ray early-out in the shader.
+const UNDERWATER_NEAR_SURFACE_BAND_M := 1.5
 const MAIN_SCENE_UNDERWATER_QUALITY: int = 2
 const MAIN_SCENE_UNDERWATER_PARTICLE_QUALITY: int = 3
 const MAIN_SCENE_UNDERWATER_PARTICLE_COUNT: int = 4096
@@ -398,7 +407,7 @@ func _sync_main_scene_underwater() -> void:
 	var state: WaterSurfaceState = WaterSystem.get_water_surface_state()
 	var camera_water := _get_camera_water_query(state)
 	var local_water_level := float(camera_water.get("height", _get_fallback_water_level(state)))
-	var underwater_active := underwater_medium_enabled and _is_camera_underwater(camera_water)
+	var underwater_active := underwater_medium_enabled and _is_camera_near_or_below_water(camera_water)
 	effect.effect_enabled = underwater_active
 	effect.blend_factor = 1.0 if underwater_active else 0.0
 	if effect.has_method("sync_from_water_state"):
@@ -507,8 +516,9 @@ func _get_camera_water_query(state: WaterSurfaceState) -> Dictionary:
 	}
 
 
-func _is_camera_underwater(camera_water: Dictionary) -> bool:
-	return bool(camera_water.get("has_water_body", false)) and float(camera_water.get("depth", 0.0)) >= -0.02
+func _is_camera_near_or_below_water(camera_water: Dictionary) -> bool:
+	return bool(camera_water.get("has_water_body", false)) \
+		and float(camera_water.get("depth", 0.0)) >= -UNDERWATER_NEAR_SURFACE_BAND_M
 
 
 func _get_fallback_water_level(state: WaterSurfaceState) -> float:

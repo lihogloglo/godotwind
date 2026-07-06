@@ -1,4 +1,13 @@
-## DistantLightManager - paged billboard MultiMeshes for lights beyond NEAR tier.
+## DistantLightManager - lights beyond the NEAR tier, two layers:
+##
+## 1. REAL point lights (150-600 m): server-direct RS omni lights for the most
+##    significant nearby-distant lights. Godot Forward+ is a clustered-forward
+##    renderer (the same architecture OpenMW adopted in MR 5212 "volume tiled
+##    forward shading") — a few hundred unshadowed omnis are cheap. Budgeted
+##    nearest-first, faded in over the NEAR_END boundary to crossfade with the
+##    NEAR tier's OmniLight3D distance fade (both are zero at exactly 150 m).
+## 2. Billboard MultiMesh glow sprites (150 m - FAR_END): the corona/halo layer,
+##    one draw call per page, carries the "town glitter" out to view distance.
 ##
 ## Canonical Godot pattern:
 ## - Use MultiMesh for many simple instances.
@@ -32,6 +41,42 @@ const PAGE_REBUILD_MAX_PER_FRAME: int = 16
 const PAGE_REBUILD_BUDGET_USEC: int = 1200
 const PAGE_AABB_MARGIN: float = 32.0
 
+## Real-light layer (60-350 m). The far cap is a HARD GPU constraint, not
+## taste: Forward+ cluster cells are depth-sliced logarithmically, so at
+## 400 m+ every light in a vista lands in the same few huge clusters and each
+## distant pixel shades all of them — measured +30 ms GPU on an RTX 4060
+## laptop with the original 600 m / 160-light config (2026-07-06). Beyond
+## 350 m per-surface lighting is near sub-pixel and the billboard glow
+## carries the visual alone.
+const REAL_LIGHT_MAX_DISTANCE_M: float = 350.0
+## Only lights with a meaningful radius get a real light at distance —
+## 2 m Godot ≈ 140 MW units, which keeps street lanterns and up, and drops
+## candles/clutter whose contribution is invisible past NEAR anyway.
+const REAL_LIGHT_MIN_RADIUS_M: float = 2.0
+## Hard cap on simultaneous real distant lights (nearest-first). Kept small
+## for the same cluster-density reason as the distance cap.
+const REAL_LIGHT_BUDGET: int = 64
+## Crossfade half-width at the big-light handoff and the far cutoff.
+## Matches FADE_MARGIN used by the billboard shader's near fade.
+const REAL_LIGHT_FADE_M: float = 30.0
+## Near handoff is per-light. Big lights (>= REAL_LIGHT_BIG_RADIUS_M) are
+## ALWAYS spawned by the NEAR tier when their cell loads (reference_instantiator
+## LIGHT_ALWAYS_SPAWN_RADIUS_MW = 700 MW = 10 m), so they hand off at NEAR_END
+## with a crossfade. Small lights only spawn in NEAR within its 60 m lazy-spawn
+## gate (LIGHT_PROXIMITY_THRESHOLD_M) — the distant layer must carry them all
+## the way down to that boundary or they blink out across the 60-150 m band
+## (user-reported pop, 2026-07-06). The 55 m floor overlaps NEAR's spawn by
+## 5 m so the handoff is a swap, not a dark blink.
+const REAL_LIGHT_BIG_RADIUS_M: float = 10.0
+const REAL_LIGHT_NEAR_MIN_SMALL_M: float = 55.0
+## Re-evaluation cadence. Selection + energy ramps update at this interval,
+## not per frame.
+const REAL_LIGHT_UPDATE_INTERVAL_S: float = 0.5
+## RS light creation is spread across ticks — a cold start near a town would
+## otherwise create the full budget in one 0.5s tick (measured 5-13 ms spikes
+## in the streaming autopsy on first boot, 2026-07-06).
+const REAL_LIGHT_MAX_CREATES_PER_TICK: int = 24
+
 #endregion
 
 
@@ -54,6 +99,22 @@ class LightPage:
 	var multimesh: MultiMesh
 	var instance_rid: RID
 	var light_ids: Array[int] = []
+
+
+## Server-direct RS omni light + its scenario instance for one distant light.
+class RealLight:
+	var light_rid: RID
+	var instance_rid: RID
+	var base_energy: float = 0.0
+	var current_energy: float = -1.0
+
+	func free_rids() -> void:
+		if instance_rid.is_valid():
+			RenderingServer.free_rid(instance_rid)
+			instance_rid = RID()
+		if light_rid.is_valid():
+			RenderingServer.free_rid(light_rid)
+			light_rid = RID()
 
 #endregion
 
@@ -79,6 +140,13 @@ var _pages: Dictionary[Vector2i, LightPage] = {}
 var _dirty_pages: Array[Vector2i] = []
 var _dirty_page_set: Dictionary[Vector2i, bool] = {}
 
+var _real_lights: Dictionary[int, RealLight] = {}
+## Lights whose radius passes REAL_LIGHT_MIN_RADIUS_M — maintained at scan /
+## unload time so the 0.5s selection tick iterates a few hundred entries, not
+## the full 4096-light billboard set.
+var _real_light_candidates: Dictionary[int, bool] = {}
+var _real_light_next_update_s: float = 0.0
+
 var _center_cell: Vector2i = Vector2i(999999, 999999)
 var _radius_cells: int = 0
 var _night_factor: float = 0.0
@@ -89,6 +157,7 @@ var _full_ring_dx: int = 0
 var _full_ring_dy: int = 0
 
 var _stats: Dictionary = {
+	"distant_real_light_count": 0,
 	"distant_light_count": 0,
 	"distant_light_loaded_cells": 0,
 	"distant_light_pending_cells": 0,
@@ -165,6 +234,11 @@ func update(camera_pos: Vector3, sun_elevation_rad: float, deadline_usec: int = 
 		_material.set_shader_parameter("camera_position", camera_pos)
 		_material.set_shader_parameter("night_factor", _night_factor)
 
+	var now_s := Time.get_ticks_msec() / 1000.0
+	if now_s >= _real_light_next_update_s and not _deadline_exhausted(deadline_usec):
+		_real_light_next_update_s = now_s + REAL_LIGHT_UPDATE_INTERVAL_S
+		_update_real_lights(camera_pos)
+
 
 func clear() -> void:
 	_clear_streamed_data()
@@ -203,6 +277,7 @@ func cleanup() -> void:
 	for page_key: Vector2i in _pages.keys():
 		_free_page(page_key)
 	_pages.clear()
+	_free_all_real_lights()
 	_material = null
 	_quad_mesh = null
 	_is_setup = false
@@ -276,6 +351,8 @@ func _process_full_ring_enum(deadline_usec: int = 0) -> void:
 func _clear_streamed_data() -> void:
 	for page_key: Vector2i in _pages.keys():
 		_free_page(page_key)
+	_free_all_real_lights()
+	_real_light_candidates.clear()
 	_lights.clear()
 	_cell_index.clear()
 	_loaded_cells.clear()
@@ -396,6 +473,8 @@ func _scan_cell(grid: Vector2i, deadline_usec: int = 0) -> void:
 		_next_id += 1
 
 		_lights[data.id] = data
+		if data.radius >= REAL_LIGHT_MIN_RADIUS_M:
+			_real_light_candidates[data.id] = true
 		if grid not in _cell_index:
 			_cell_index[grid] = []
 		(_cell_index[grid] as Array).append(data.id)
@@ -417,6 +496,7 @@ func _unload_cells(cells: Array[Vector2i]) -> void:
 			if data != null:
 				dirty[data.page_key] = true
 				_lights.erase(id)
+			_real_light_candidates.erase(id)
 		_cell_index.erase(grid)
 
 	for page_key: Vector2i in dirty.keys():
@@ -670,6 +750,108 @@ func _cell_radius_to_distance(radius_cells: int) -> float:
 
 func _page_visibility_extra_margin() -> float:
 	return float(LIGHT_PAGE_SIZE_CELLS) * _cell_size_meters() * 1.5
+
+#endregion
+
+
+#region Real distant lights (150-600 m)
+
+## Re-select which distant lights deserve a real RS omni light and drive their
+## crossfade energies. Runs every REAL_LIGHT_UPDATE_INTERVAL_S, not per frame.
+##
+## Selection: lights with radius >= REAL_LIGHT_MIN_RADIUS_M inside their
+## per-light band, nearest-first up to REAL_LIGHT_BUDGET. Big lights crossfade
+## in over NEAR_END..NEAR_END+fade (the NEAR tier's distance fade hits zero at
+## NEAR_END, so the handoff is continuous); small lights hold full energy down
+## to the NEAR lazy-spawn boundary. Both fade out over the last band before
+## the far cutoff.
+func _update_real_lights(camera_pos: Vector3) -> void:
+	if not _scenario.is_valid():
+		return
+
+	var select_max := REAL_LIGHT_MAX_DISTANCE_M
+	var select_max_sq := select_max * select_max
+	var small_min_sq := REAL_LIGHT_NEAR_MIN_SMALL_M * REAL_LIGHT_NEAR_MIN_SMALL_M
+	var big_min := MIN_DISTANCE - REAL_LIGHT_FADE_M
+	var big_min_sq := big_min * big_min
+
+	# Gather candidates: [distance_sq, id] pairs from the radius-gated subset.
+	var candidates: Array[Vector2] = []
+	for id: int in _real_light_candidates.keys():
+		var data: LightData = _lights.get(id)
+		if data == null:
+			_real_light_candidates.erase(id)
+			continue
+		var d_sq := camera_pos.distance_squared_to(data.position)
+		var min_sq := big_min_sq if data.radius >= REAL_LIGHT_BIG_RADIUS_M else small_min_sq
+		if d_sq < min_sq or d_sq > select_max_sq:
+			continue
+		candidates.append(Vector2(d_sq, float(id)))
+
+	if candidates.size() > REAL_LIGHT_BUDGET:
+		candidates.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.x < b.x)
+		candidates.resize(REAL_LIGHT_BUDGET)
+
+	# Diff: free real lights that fell out of selection (or whose data unloaded).
+	var selected: Dictionary[int, float] = {}
+	for c: Vector2 in candidates:
+		selected[int(c.y)] = sqrt(c.x)
+	for id: int in _real_lights.keys():
+		if id not in selected or id not in _lights:
+			_real_lights[id].free_rids()
+			_real_lights.erase(id)
+
+	# Create missing (capped per tick) + drive crossfade energy.
+	var creates_left := REAL_LIGHT_MAX_CREATES_PER_TICK
+	for id: int in selected.keys():
+		var data: LightData = _lights.get(id)
+		if data == null:
+			continue
+		var real: RealLight = _real_lights.get(id)
+		if real == null:
+			if creates_left <= 0:
+				continue
+			creates_left -= 1
+			real = _create_real_light(data)
+			_real_lights[id] = real
+		var dist: float = selected[id]
+		var near_ramp := 1.0
+		if data.radius >= REAL_LIGHT_BIG_RADIUS_M:
+			near_ramp = smoothstep(MIN_DISTANCE, MIN_DISTANCE + REAL_LIGHT_FADE_M, dist)
+		var far_ramp := 1.0 - smoothstep(REAL_LIGHT_MAX_DISTANCE_M - REAL_LIGHT_FADE_M, REAL_LIGHT_MAX_DISTANCE_M, dist)
+		var energy := real.base_energy * near_ramp * far_ramp
+		if not is_equal_approx(energy, real.current_energy):
+			real.current_energy = energy
+			RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_ENERGY, energy)
+
+	_stats["distant_real_light_count"] = _real_lights.size()
+
+
+func _create_real_light(data: LightData) -> RealLight:
+	var real := RealLight.new()
+	real.base_energy = 1.2 if data.is_fire else 0.8
+
+	real.light_rid = RenderingServer.omni_light_create()
+	RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_RANGE, data.radius)
+	RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_ATTENUATION, 1.0)
+	RenderingServer.light_set_color(real.light_rid, data.color)
+	RenderingServer.light_set_shadow(real.light_rid, false)
+	# Distant eye-candy lights stay out of SDFGI — GI updates for 160 far-away
+	# omnis are wasted work at these distances.
+	RenderingServer.light_set_bake_mode(real.light_rid, RenderingServer.LIGHT_BAKE_DISABLED)
+
+	real.instance_rid = RenderingServer.instance_create()
+	RenderingServer.instance_set_base(real.instance_rid, real.light_rid)
+	RenderingServer.instance_set_scenario(real.instance_rid, _scenario)
+	RenderingServer.instance_set_transform(real.instance_rid, Transform3D(Basis.IDENTITY, data.position))
+	return real
+
+
+func _free_all_real_lights() -> void:
+	for real: RealLight in _real_lights.values():
+		real.free_rids()
+	_real_lights.clear()
+	_stats["distant_real_light_count"] = 0
 
 #endregion
 

@@ -270,6 +270,13 @@ const LIGHT_PROXIMITY_THRESHOLD_M: float = 60.0
 ## (candles, torches, small lanterns) get the lazy-spawn gate.
 const LIGHT_ALWAYS_SPAWN_RADIUS_MW: float = 700.0
 
+## Emission boost for light-source models (lighting roadmap: fire textures
+## should emit strongly enough to trigger bloom). Data-driven: only surfaces
+## whose NIF material already carries emission (emissive color / glow texture)
+## qualify — wooden handles and metal cages stay unlit.
+const LIGHT_MODEL_EMISSION_FIRE: float = 2.5
+const LIGHT_MODEL_EMISSION_OTHER: float = 1.5
+
 ## Win 4b — MW light flag mask for animated lights (flicker / pulse). Lights
 ## with any of these flags need per-frame energy writes through the existing
 ## OmniLight3D Node3D path because LightAnimator (light_animator.gd) walks
@@ -1161,6 +1168,7 @@ func _instantiate_light(record: RefCounted, light_record: LightRecord) -> Node3D
 				_enable_collision_shapes_in_tree(model_instance)
 			# Auto-play NIF animations on light models (rotating lights, animated lanterns)
 			_auto_play_nif_animation_for_transform(model_instance, _record_transform(record))
+			_boost_light_model_emission(model_instance, light_record)
 			light_node.add_child(model_instance)
 
 	# Apply transform first — Win 4b needs the world transform up front to
@@ -1191,6 +1199,43 @@ func _instantiate_light(record: RefCounted, light_record: LightRecord) -> Node3D
 	light_node.set_meta("form_id", light_record.record_id if "record_id" in light_record else str(record.get("record_id")))
 
 	return light_node
+
+
+## Boosted-emission material cache — keyed by the SOURCE material object (holds
+## a reference, so instance-id reuse can't alias). Prebaked materials are shared
+## across every torch/candle using the same NIF, so each source is duplicated
+## exactly once per boost tier.
+var _emission_boost_fire: Dictionary[Material, StandardMaterial3D] = {}
+var _emission_boost_other: Dictionary[Material, StandardMaterial3D] = {}
+
+
+## Raise emission energy on light-model surfaces that already emit (flame quads,
+## glow textures from the NIF). Applied as per-instance surface overrides so the
+## shared prebaked materials are never mutated.
+func _boost_light_model_emission(root: Node3D, light_record: LightRecord) -> void:
+	var is_fire := light_record.is_fire()
+	var target_energy := LIGHT_MODEL_EMISSION_FIRE if is_fire else LIGHT_MODEL_EMISSION_OTHER
+	var cache := _emission_boost_fire if is_fire else _emission_boost_other
+	var stack: Array[Node] = [root]
+	while not stack.is_empty():
+		var node: Node = stack.pop_back()
+		for child: Node in node.get_children():
+			stack.append(child)
+		var mi := node as MeshInstance3D
+		if mi == null or mi.mesh == null:
+			continue
+		for surface: int in mi.mesh.get_surface_count():
+			var mat := mi.get_active_material(surface) as StandardMaterial3D
+			if mat == null or not mat.emission_enabled:
+				continue
+			if mat.emission_energy_multiplier >= target_energy:
+				continue
+			var boosted: StandardMaterial3D = cache.get(mat)
+			if boosted == null:
+				boosted = mat.duplicate() as StandardMaterial3D
+				boosted.emission_energy_multiplier = target_energy
+				cache[mat] = boosted
+			mi.set_surface_override_material(surface, boosted)
 
 
 ## Legacy OmniLight3D path — used for lights with flicker/pulse flags so

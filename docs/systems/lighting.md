@@ -19,6 +19,28 @@ Current lighting configuration. For industry comparison see `docs/reference/ligh
 
 **Server-direct lights (Win 4b, 2026-04-25):** non-animated lights go through `RenderingServer.omni_light_create()` + `RenderingServer.instance_create()` instead of an OmniLight3D Node3D wrapper. Saves ~1.3 KB + lifecycle/notification machinery per light. Animated lights (flicker / pulse flag-gated) stay on the Node3D path so `light_animator.gd` can drive `light_energy` per frame. See `docs/research/server_direct_pattern.md`.
 
+**Distant real lights (60/150-350 m)** (`distant_light_manager.gd`, 2026-07-06)
+- Server-direct RS omni lights for significant lights beyond NEAR: radius ≥ 2 m,
+  nearest-first budget of 64, no shadows, excluded from SDFGI (`LIGHT_BAKE_DISABLED`).
+- **The 350 m / 64-light caps are GPU constraints, not taste.** Forward+
+  clusters are depth-sliced logarithmically; past ~400 m all vista lights land
+  in the same few huge clusters and every distant pixel shades all of them —
+  the original 600 m / 160-light config measured +30 ms GPU on an RTX 4060
+  laptop (2026-07-06 regression). Do not raise these without re-measuring.
+- Per-light near handoff: big lights (≥ 10 m radius, which NEAR always spawns)
+  crossfade at NEAR_END (150-180 m ramp); small lights are carried all the way
+  down to NEAR's 60 m lazy-spawn boundary — otherwise they blink out across
+  the 60-150 m band. Far side fades out over 320-350 m. Selection + energy
+  ramps re-evaluate every 0.5 s.
+- The billboard MultiMesh glow sprites remain on top (150 m - FAR_END) as the
+  corona layer — one draw call per page.
+
+**Emissive light models** (`reference_instantiator._boost_light_model_emission`, 2026-07-06)
+- Surfaces of light-source models that already emit in the NIF data (flame
+  quads, glow textures) get their emission energy raised (fire 2.5×, other
+  1.5×) via per-instance surface overrides — shared prebaked materials are
+  duplicated once per tier, never mutated. Requires glow (default ON).
+
 **NIF Lights** (`nif_converter.gd`)
 - NiPointLight → OmniLight3D, NiSpotLight → SpotLight3D.
 - Attenuation computed from NIF coefficients.
@@ -65,23 +87,62 @@ Flicker, FlickerSlow, Pulse, PulseSlow from MW light flags. Random brightness ta
 
 `environment_controls.gd`
 
-| Feature | Status | Settings |
+Exterior defaults (`environment_controls.gd` `_visual_state`, 2026-07-06):
+
+| Feature | Default | Settings |
 |---|---|---|
-| **SSAO** | Enabled | radius=1.5, intensity=3.0, detail=0.7 |
-| **SSIL** | Enabled | radius=5.0, intensity=1.0 |
-| **SSR** | Enabled | max_steps=64, depth_tolerance=0.2 |
-| **Glow/Bloom** | Enabled | intensity=0.4, bloom=0.15, HDR threshold=0.8 |
-| **Volumetric Fog** | Enabled | density=0.0015, length=800 m, temporal reprojection |
-| **Depth Fog** | Enabled | exponential, density=0.00008, height fog at y=0 |
+| **SSAO** | OFF outdoors, forced ON in interiors | radius=1.5, intensity=2.0-3.0 |
+| **SSIL** | OFF | radius=5.0, intensity=1.0 |
+| **SSR** | ON | max_steps=64, depth_tolerance=0.2 |
+| **Glow/Bloom** | ON (2026-07-06 — emissive light models rely on it) | intensity=0.4, bloom=0.15, HDR threshold=0.8 |
+| **Volumetric Fog** | OFF outdoors, OFF in enclosed interiors | density=0.0015 when enabled |
+| **Depth Fog** | ON | exponential, density=0.00008, height fog at y=0 |
 | **Tonemap** | Filmic | exposure=1.0, white=8.0 |
-| **SDFGI** | Enabled (`sky_manager.gd:250-253`) | cascades=4, y_scale=75%, occlusion on, bounce_feedback=0.3, read_sky_light=true, energy=1.0, normal/probe bias 1.1 |
-| **VoxelGI** | Not used | — |
-| **LightmapGI** | Not used | — |
-| **ReflectionProbe** | Only for ocean | — |
+| **SDFGI** | ON (`sky_manager.gd:298`) — exterior GI + interior fallback | cascades=4, y_scale=75%, occlusion on, bounce_feedback=0.3, read_sky_light=true |
+| **VoxelGI** | Prebaked per interior (2026-07-06) | see §Interior lighting |
+| **LightmapGI** | Not used — `bake()` not scriptable (godot-proposals#8656), batch bake impossible | — |
+| **ReflectionProbe** | One per interior pocket (2026-07-06) | UPDATE_ONCE, box-projected, interior=true |
 | **GI half-resolution** | Enabled (`project.godot`) | `rendering/global_illumination/gi/use_half_resolution = true` |
-| **Anti-aliasing** | FSR 2.2 native + MSAA 4× | runtime via `environment_controls.gd` / `settings_tool.gd` |
+| **Anti-aliasing** | FSR 2.2 at native scale (temporal AA; NOT Godot TAA — `use_taa` stays false) | `environment_controls.on_taa_toggled` / `settings_tool.gd` (menu default FSR2_NATIVE) |
 
 Ambient light: source = SKY, contribution = 1.0, energy = 1.0. Reflected light: source = SKY.
+
+## 4b. Interior lighting (2026-07-06 lighting pass)
+
+- **Environment**: built per transition as a `duplicate()` of the live exterior
+  Environment (`morrowind_transition_provider._build_space_environment`), so
+  interiors inherit the user's post stack. Overrides: ambient from the cell's
+  AMBI record (luma floor 0.08), MW fog color/density, near-black background,
+  `sky = null`, volumetric fog off, SSAO + glow forced on. Forced OFF indoors:
+  SDFGI (it replaces the constant ambient on static geometry — with no sky it
+  turned interiors pitch black, and it costs real GPU), SSR (the probe covers
+  reflections), and the inherited exterior HEIGHT fog (anchored near y=0, it
+  saturates at the pocket's y=-500 offset into a white wall — the 2026-07-06
+  "Arille's fog" regression).
+- **AMBI sunlight_color is parsed but deliberately unused** — user decision
+  2026-07-06: an interior directional "sun" doesn't make sense here.
+- **ReflectionProbe**: one per pocket in finish-up phase 1, sized to the pocket
+  AABB, `UPDATE_ONCE`, box projection, interior=true, interior layers only.
+- **VoxelGI**: prebaked per interior cell by
+  `src/tools/prebaking/interior_gi_bake_runner.tscn` into
+  `<cache>/interior_gi/<cell>.res` (contract: `interior_gi_cache.gd`). Loaded
+  in pocket phase 1; when present it disables the interior env's SDFGI
+  fallback. Voxel field is re-lit per frame from live lights → torch flicker
+  bounces (the reason VoxelGI was chosen over lightmaps, besides LightmapGI's
+  bake being unscriptable).
+- Without a bake, interiors fall back to SDFGI from the duplicated exterior
+  environment.
+
+## 4c. Material specular gate (2026-07-06)
+
+MW convention (OpenMW nifloader): a shape has specular ONLY with an enabled
+`NiSpecularProperty`. MW meshes routinely store WHITE specular color + nonzero
+glossiness with specular disabled; applying them unconditionally maxed
+`metallic_specular` and washed containers/crates with a whitish sheen.
+`MaterialProperties.specular_enabled` (material_library.gd) now gates
+specular/roughness/specular_color in every converter path, and specular state
+is part of the dedup cache key. **Model prebake cache must be re-baked for the
+fix to appear on prebaked assets.**
 
 **Note:** the current ocean surface shader declares `hint_depth_texture` /
 `hint_screen_texture` and owns a custom SSR raymarch for water-surface
