@@ -8,3 +8,17 @@ Files:
   Milkyway.jpg  — Star panorama (equirectangular Milky Way)
   StarField.jpg — Star field overlay
   MoonMap.png   — Lunar surface texture
+
+---
+
+Cheap skydome cloud textures + compute shader (clouds/ subdirectory and
+src/core/sky/clouds/cheap_clouds.glsl) are from the Godot Volumetric Cloud
+Demo v2 by clayjohn. Licensed under MIT License.
+Copyright (c) 2007-2021 Juan Linietsky, Ariel Manzur.
+Copyright (c) 2014-2021 Godot Engine contributors.
+Source: https://github.com/clayjohn/godot-volumetric-cloud-demo-v2
+
+Files:
+  clouds/perlworlnoise.tga — 3D Perlin-Worley noise (128 slices), cloud base shapes
+  clouds/worlnoise.bmp     — 3D Worley noise (32 slices), cloud detail erosion
+  clouds/weather.bmp       — 2D weather/coverage map

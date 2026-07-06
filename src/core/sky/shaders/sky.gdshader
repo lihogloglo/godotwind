@@ -65,6 +65,15 @@ uniform vec3 cirrus_night_color = vec3(0.15, 0.18, 0.25);
 // ---- Ground ----
 uniform vec3 ground_color = vec3(0.15, 0.12, 0.1);
 
+// ---- Cheap Skydome Clouds ----
+// Octahedral hemisphere textures rendered by cheap_cloud_layer.gd (ported from
+// clayjohn's godot-volumetric-cloud-demo-v2, MIT). Two snapshots cross-blended
+// to hide the amortized rolling update.
+uniform bool cheap_clouds_enabled = false;
+uniform sampler2D cheap_clouds_from : filter_linear, repeat_disable, hint_default_transparent;
+uniform sampler2D cheap_clouds_to : filter_linear, repeat_disable, hint_default_transparent;
+uniform float cheap_clouds_blend : hint_range(0.0, 1.0) = 0.0;
+
 // --- Procedural Cirrus Noise ---
 // Gradient noise (Perlin-style) + FBM for wispy cloud patterns. No texture needed.
 // Quintic interpolation (C2 continuous) eliminates visible cell boundaries.
@@ -107,6 +116,25 @@ uniform float cloud_coverage : hint_range(0.0, 1.0) = 0.0;
 // ---- Night Glow ----
 uniform float night_intensity : hint_range(0.0, 0.1) = 0.005;
 
+
+// --- Cheap Skydome Cloud Mapping ---
+// Signed-octahedral hemisphere encoding, matches oct_to_vec3 in cheap_clouds.glsl.
+vec2 _cheap_oct_wrap(vec2 v) {
+	vec2 sign_val;
+	sign_val.x = v.x >= 0.0 ? 1.0 : -1.0;
+	sign_val.y = v.y >= 0.0 ? 1.0 : -1.0;
+	return (1.0 - abs(v.yx)) * sign_val;
+}
+
+vec2 _cheap_vec3_to_oct(vec3 e) {
+	e /= abs(e.x) + abs(e.y) + abs(e.z);
+	e.xy = e.z >= 0.0 ? e.xy : _cheap_oct_wrap(e.xy);
+	vec2 n;
+	n.y = e.y * 0.5 + 0.5;
+	n.x = e.x * 0.5 + n.y;
+	n.y = e.x * -0.5 + n.y;
+	return n;
+}
 
 void sky() {
 	vec3 view_dir = EYEDIR;
@@ -315,6 +343,21 @@ void sky() {
 	// When volumetric clouds cover the sky, darken the atmosphere behind them.
 	// The cloud plugin does actual cloud rendering — we just dim the backdrop.
 	inscatter *= 1.0 - cloud_coverage * 0.4;
+
+	// --- Cheap Skydome Clouds ---
+	// Sample the amortized hemisphere textures and composite over everything
+	// (sun disc, stars, cirrus). Faded out near the horizon like upstream —
+	// at grazing angles the atmosphere haze should win.
+	if (cheap_clouds_enabled) {
+		vec3 cloud_dir = vec3(view_dir.x, max(0.0, view_dir.y), view_dir.z);
+		cloud_dir = normalize(cloud_dir);
+		vec2 oct_uv = _cheap_vec3_to_oct(cloud_dir.xzy);
+		vec4 clouds_from = textureLod(cheap_clouds_from, oct_uv, 0.0);
+		vec4 clouds_to = textureLod(cheap_clouds_to, oct_uv, 0.0);
+		vec4 clouds = mix(clouds_from, clouds_to, cheap_clouds_blend);
+		clouds *= 1.0 - smoothstep(0.6, 1.0, 1.0 - view_dir.y);
+		inscatter = inscatter * (1.0 - clouds.a) + clouds.rgb;
+	}
 
 	// Output linear HDR radiance — NO tonemapping here.
 	// Godot's Environment handles tonemapping (FILMIC/ACES/AGX).

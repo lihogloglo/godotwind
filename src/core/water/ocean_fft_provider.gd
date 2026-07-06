@@ -12,7 +12,11 @@ const WaterInteractionSimScript := preload("res://src/core/water/water_interacti
 
 const WATER_BODY_ATLAS_RESOLUTION := 128
 const WATER_BODY_ATLAS_EXTENT_M := 512.0
-const WATER_BODY_ATLAS_UPDATE_MOVE_M := 2.0
+# Re-center threshold. The rebuild is 128x128 CPU registry samples on the main
+# thread; at the old 2m threshold it re-ran near-continuously while flying.
+# 32m keeps the camera within 6% of the atlas extent from center — consumers
+# (waterline/underwater, <=140m range) always stay well inside the window.
+const WATER_BODY_ATLAS_UPDATE_MOVE_M := 32.0
 
 # Project settings paths
 const SETTING_ENABLED := "ocean/enabled"
@@ -132,6 +136,12 @@ var _water_body_atlas_bounds: Rect2 = Rect2()
 var _water_body_atlas_center_xz: Vector2 = Vector2.INF
 var _water_body_atlas_frame: int = -1
 var _water_body_atlas_last_rebuild_usec: int = 0
+
+## Per-frame cache for camera-position registry samples (see get_water_surface_state).
+var _camera_sample_frame: int = -1
+var _camera_sample_coverage: float = 0.0
+var _camera_sample_body_id: StringName = WaterSurfaceState.WATER_BODY_NONE
+var _camera_sample_level: float = NAN
 var _water_body_atlas_total_rebuild_usec: int = 0
 var _water_body_atlas_rebuild_count: int = 0
 var _current_shore_wave_amplitude: float = 0.18
@@ -1307,6 +1317,9 @@ func _rebuild_water_body_atlas(center: Vector3) -> void:
 	_water_body_atlas_last_rebuild_usec = Time.get_ticks_usec() - rebuild_start_usec
 	_water_body_atlas_total_rebuild_usec += _water_body_atlas_last_rebuild_usec
 	_water_body_atlas_rebuild_count += 1
+	if _water_body_atlas_last_rebuild_usec > 8000:
+		Log.warn("water", "Water body atlas rebuild took %.1f ms (%d rebuilds total) — main-thread stall" % [
+			_water_body_atlas_last_rebuild_usec / 1000.0, _water_body_atlas_rebuild_count])
 
 
 func _clear_water_body_atlas() -> void:
@@ -2026,13 +2039,21 @@ func get_water_surface_state() -> WaterSurfaceState:
 	state.water_body_index = 1 if _system_enabled and _enabled else 0
 	state.coverage_available = (_system_enabled and _enabled) or has_registered_water
 	if _camera != null and is_instance_valid(_camera):
-		var camera_pos := _camera.global_position
-		state.camera_water_coverage = sample_water_coverage(camera_pos)
-		state.camera_water_body_id = sample_water_body_id_at(camera_pos)
-		if state.camera_water_coverage > WaterSurfaceState.COVERAGE_GATE_START and state.camera_water_body_id != WaterSurfaceState.WATER_BODY_NONE:
-			state.camera_water_level = sample_water_height(camera_pos)
-		else:
-			state.camera_water_level = NAN
+		# Registry samples (polygon tests per water body) are the expensive
+		# part of building a state, and this function runs several times per
+		# frame across consumers — sample the camera position once per frame.
+		if frame_id != _camera_sample_frame:
+			_camera_sample_frame = frame_id
+			var camera_pos := _camera.global_position
+			_camera_sample_coverage = sample_water_coverage(camera_pos)
+			_camera_sample_body_id = sample_water_body_id_at(camera_pos)
+			if _camera_sample_coverage > WaterSurfaceState.COVERAGE_GATE_START and _camera_sample_body_id != WaterSurfaceState.WATER_BODY_NONE:
+				_camera_sample_level = sample_water_height(camera_pos)
+			else:
+				_camera_sample_level = NAN
+		state.camera_water_coverage = _camera_sample_coverage
+		state.camera_water_body_id = _camera_sample_body_id
+		state.camera_water_level = _camera_sample_level
 	if has_registered_water:
 		state.coverage_source = &"water_body_registry"
 	elif _active_shore_mask_image != null:

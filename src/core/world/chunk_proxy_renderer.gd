@@ -1,18 +1,34 @@
-## ChunkProxyRenderer — CHUNK tier runtime consumer (Phase 2 revised,
-## 2026-07-05). Streams OFFLINE-baked merged chunk proxies
-## (chunk_proxy_bake_runner.tscn) for the 400-1200m ring and publishes each
-## as ONE RenderingServer instance with an engine visibility band.
+## ChunkProxyRenderer — CHUNK tier runtime consumer (Phase 2 revised;
+## boundary rework 2026-07-06). Streams OFFLINE-baked PER-CELL merged proxies
+## (chunk_proxy_bake_runner.tscn) and publishes each as ONE RenderingServer
+## instance.
 ##
-## Design contract (plan: docs/plans/distant_rendering_recovery_2026_07.md):
+## MID↔CHUNK boundary contract (content selection, NOT range fencing):
+## a cell's proxy is visible exactly while that cell has NO published MID
+## static buckets. The streaming manager drives `set_cell_covered` from
+## StaticObjectRenderer's per-cell bucket presence events, and the covered
+## buckets' own far band is released (see set_paged_coverage) so the
+## streaming-ring unload is the swap point. Range-fencing a merged proxy
+## against per-object MID culling had an irreducible ±radius error —
+## z-fight shimmer leaning one way, cell-sized holes the other (both
+## user-verified 2026-07-05). Canonical pattern: UE World Partition HLOD
+## (one HLOD per streaming cell, swapped on cell load/unload) + OpenMW
+## object paging (active-grid content exclusion, chunks re-keyed on grid
+## change — see inspos/openmw objectpaging.cpp).
+##
+## Consequences:
+## - Near visibility band DELETED (begin = 0): proxies double as instant
+##   stand-ins for cells the streamer hasn't published yet (kills the
+##   fast-flight void). Far band stays engine-driven at CHUNK_END.
+## - Proxies for covered cells stay resident but hidden — the unload swap
+##   must be same-frame, never behind a single-flight load.
+##
+## Other design notes (unchanged from Phase 2):
 ## - Loads are SINGLE-FLIGHT threaded requests: chunk files share external
 ##   material dependencies (the baker's deduped library), and Godot ≤4.6's
 ##   loader races on contested sub-resources (godotengine/godot#111202).
-##   One in-flight chunk at a time removes intra-tier contention; the model
-##   loader's own single flight touches a disjoint file set.
 ## - No Node3D per chunk, no physics, no processing — server-direct pattern.
 ## - Shadows OFF: sun shadow maps never reach the ring anyway.
-## - Fade margins mirror cell_static_bucket (begin/end padded by the chunk's
-##   horizontal radius — visibility_range measures instance-origin distance).
 class_name ChunkProxyRenderer
 extends Node3D
 
@@ -39,6 +55,28 @@ var _enabled: bool = false
 var _last_scan_pos: Vector3 = Vector3(1e20, 0, 0)
 var _stats_published: int = 0
 var _stats_evicted: int = 0
+## Cover-side crossfade duration. When MID buckets start publishing for a
+## cell, its proxy alpha-fades out instead of vanishing: static prepare
+## publishes ~1 bucket/frame, so a cell fills over ~0.3-0.5 s, and an
+## instant hide exposes that drain as a whole-cell pop (user-reported
+## 2026-07-06). The ease-in curve (t²) keeps the proxy near-opaque while
+## the cell is still sparse, then drops fast. This is alpha through the
+## transparent pipeline (GeometryInstance3D `transparency` semantics,
+## verified against the 4.6 docs) — acceptable because only publish-edge
+## cells fade, a handful concurrently during traversal. The uncover
+## direction stays instant: the proxy shows the same frame the buckets
+## start hiding (complete-for-complete swap).
+const COVER_FADE_DURATION_S: float = 0.6
+
+## Cells whose MID static buckets are currently published — their proxies
+## are hidden (content selection; see class header). Keyed like _index.
+var _covered: Dictionary = {}
+## key -> elapsed fade seconds for proxies fading out after being covered.
+var _cover_fades: Dictionary = {}
+## Mirrors StaticObjectRenderer._globally_visible: the Phase 0 ablation
+## contract — `toggle static_visuals` hides ALL static output, proxies
+## included.
+var _globally_visible: bool = true
 
 
 func is_enabled() -> bool:
@@ -53,6 +91,88 @@ func set_enabled(enabled: bool) -> void:
 		_clear_all()
 	else:
 		_last_scan_pos = Vector3(1e20, 0, 0)
+
+
+## Content selection: hide/show one cell's proxy in lockstep with its MID
+## static-bucket presence. Coverage state persists across enable/disable and
+## applies to proxies that finish loading later (they publish hidden).
+## Cover of a currently-visible proxy starts the crossfade; uncover cancels
+## any fade and restores the proxy instantly.
+func set_cell_covered(cell: Vector2i, covered: bool) -> void:
+	var key := "%d,%d" % [cell.x, cell.y]
+	if covered:
+		_covered[key] = true
+		var entry: Dictionary = _active.get(key, {})
+		if not entry.is_empty() and _globally_visible:
+			_cover_fades[key] = 0.0
+			return
+		_cover_fades.erase(key)
+	else:
+		_covered.erase(key)
+		_cover_fades.erase(key)
+		_reset_instance_transparency(key)
+	_apply_instance_visibility(key)
+
+
+## Phase 0 ablation contract: `toggle static_visuals` hides ALL static
+## renderer output — buckets, direct instances, AND visual proxies.
+func set_globally_visible(visible: bool) -> void:
+	if _globally_visible == visible:
+		return
+	_globally_visible = visible
+	if not visible:
+		for key: String in _cover_fades:
+			_reset_instance_transparency(key)
+		_cover_fades.clear()
+	for key: String in _active:
+		_apply_instance_visibility(key)
+
+
+func _proxy_should_be_visible(key: String) -> bool:
+	return _globally_visible and key not in _covered
+
+
+func _apply_instance_visibility(key: String) -> void:
+	var entry: Dictionary = _active.get(key, {})
+	if entry.is_empty():
+		return
+	var rid: RID = entry["rid"]
+	if rid.is_valid():
+		RenderingServer.instance_set_visible(rid, _proxy_should_be_visible(key))
+
+
+func _reset_instance_transparency(key: String) -> void:
+	var entry: Dictionary = _active.get(key, {})
+	if entry.is_empty():
+		return
+	var rid: RID = entry["rid"]
+	if rid.is_valid():
+		RenderingServer.instance_geometry_set_transparency(rid, 0.0)
+
+
+## Advance cover-side crossfades (called once per frame from update()).
+func _advance_cover_fades() -> void:
+	if _cover_fades.is_empty():
+		return
+	var delta := get_process_delta_time()
+	var finished: Array[String] = []
+	for key: String in _cover_fades:
+		var entry: Dictionary = _active.get(key, {})
+		if entry.is_empty() or not (entry["rid"] as RID).is_valid():
+			finished.append(key)
+			continue
+		var rid: RID = entry["rid"]
+		var age := float(_cover_fades[key]) + delta
+		if age >= COVER_FADE_DURATION_S:
+			RenderingServer.instance_set_visible(rid, false)
+			RenderingServer.instance_geometry_set_transparency(rid, 0.0)
+			finished.append(key)
+			continue
+		var t := age / COVER_FADE_DURATION_S
+		RenderingServer.instance_geometry_set_transparency(rid, t * t)
+		_cover_fades[key] = age
+	for key: String in finished:
+		_cover_fades.erase(key)
 
 
 ## Resolve the baked chunk index from the shared cache. Returns the number
@@ -72,6 +192,12 @@ func initialize_from_cache() -> int:
 		return 0
 	var data := parsed as Dictionary
 	var chunk_cells := int(data.get("chunk_cells", 2))
+	if chunk_cells != 1:
+		# Legacy 2×2 bake: the per-cell MID↔CHUNK content selection cannot
+		# toggle sub-chunk regions, and range fencing is the failure mode this
+		# rework removed. Refuse rather than resurrect the broken seam.
+		Log.warn("streaming", "Chunk tier: legacy bake (chunk_cells=%d) at %s — re-bake per-cell via chunk_proxy_bake_runner.tscn; tier stays dormant" % [chunk_cells, index_path])
+		return 0
 	var chunks: Dictionary = data.get("chunks", {})
 	for key_variant: Variant in chunks.keys():
 		var key := str(key_variant)
@@ -104,6 +230,7 @@ func update(camera_pos: Vector3, deadline_usec: int) -> void:
 	if not is_enabled():
 		return
 
+	_advance_cover_fades()
 	_poll_pending_load()
 
 	if camera_pos.distance_to(_last_scan_pos) >= RESCAN_DISTANCE:
@@ -119,6 +246,7 @@ func get_stats() -> Dictionary:
 	return {
 		"chunk_tier_indexed": _index.size(),
 		"chunk_tier_active": _active.size(),
+		"chunk_tier_covered": _covered.size(),
 		"chunk_tier_queue": _queue.size(),
 		"chunk_tier_published_total": _stats_published,
 		"chunk_tier_evicted_total": _stats_evicted,
@@ -197,16 +325,25 @@ func _publish(key: String, mesh: ArrayMesh) -> void:
 	RenderingServer.instance_set_scenario(rid, get_world_3d().scenario)
 	RenderingServer.instance_set_transform(rid, Transform3D(Basis.IDENTITY, entry["origin"]))
 	RenderingServer.instance_set_layer_mask(rid, EXTERIOR_RENDER_LAYER_MASK)
+	# NO near band (begin = 0): the near-side handoff is content selection —
+	# the proxy hides while this cell's MID buckets are published
+	# (set_cell_covered) — so a distance fence here would only re-open the
+	# gap for cells the streamer hasn't published yet. Both range-fence
+	# variants failed with an irreducible ±radius error (z-fight shimmer /
+	# cell-sized holes, user-verified 2026-07-05). Far band stays
+	# engine-driven: the FAR impostor tier takes over past CHUNK_END.
 	RenderingServer.instance_geometry_set_visibility_range(
 		rid,
-		maxf(0.0, DU.CHUNK_START - radius),
+		0.0,
 		DU.CHUNK_END + radius,
-		DU.FADE_MARGIN_RENDER_FAR,
+		0.0,
 		DU.FADE_MARGIN_RENDER_FAR,
 		SC.MID_VISIBILITY_FADE_MODE)
 	RenderingServer.instance_geometry_set_cast_shadows_setting(
 		rid, RenderingServer.SHADOW_CASTING_SETTING_OFF)
 	RenderingServer.instance_geometry_set_lod_bias(rid, SC.DEFAULT_LOD_BIAS)
+	if not _proxy_should_be_visible(key):
+		RenderingServer.instance_set_visible(rid, false)
 	_active[key] = {"rid": rid, "mesh": mesh}
 	_stats_published += 1
 
@@ -219,6 +356,7 @@ func _evict(key: String) -> void:
 	if rid.is_valid():
 		RenderingServer.free_rid(rid)
 	_active.erase(key)
+	_cover_fades.erase(key)
 	_stats_evicted += 1
 
 
@@ -226,5 +364,6 @@ func _clear_all() -> void:
 	for key: String in _active.keys():
 		_evict(key)
 	_queue.clear()
+	_cover_fades.clear()
 	_pending_key = ""
 	_pending_path = ""

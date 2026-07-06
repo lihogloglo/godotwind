@@ -562,6 +562,12 @@ func _ready() -> void:
 	add_child(_chunk_renderer)
 	var chunk_count: int = _chunk_renderer.initialize_from_cache()
 	_chunk_renderer.set_enabled(chunk_count > 0)
+	# MID↔CHUNK content selection (2026-07-06): per-cell bucket presence
+	# drives the proxy swap, and covered bucket types run band-free while
+	# the chunk tier is active (their far cutoff is the streaming-ring
+	# unload). See chunk_proxy_renderer.gd header for the full contract.
+	_static_renderer.cell_static_presence_changed = _on_cell_static_presence_changed
+	_apply_paged_coverage()
 
 	# Create fallback impostor candidates helper
 	if _impostor_candidates == null:
@@ -3256,11 +3262,13 @@ var _static_range_override: Vector2 = Vector2(-1.0, -1.0)
 
 func set_static_visibility_range_override(begin: float, end: float) -> void:
 	_static_range_override = Vector2(maxf(0.0, begin), maxf(0.0, end))
+	_apply_paged_coverage()
 	_apply_static_renderer_tier_visibility()
 
 
 func clear_static_visibility_range_override() -> void:
 	_static_range_override = Vector2(-1.0, -1.0)
+	_apply_paged_coverage()
 	_apply_static_renderer_tier_visibility()
 
 
@@ -3281,6 +3289,10 @@ func _apply_static_renderer_tier_visibility() -> void:
 	elif _static_renderer.has_method("set_visibility_range_end"):
 		_static_renderer.call("set_visibility_range_end", end)
 	_static_renderer.set_all_visible(_mid_tier_visible)
+	# Phase 0 ablation contract: static_visuals hides ALL static output,
+	# chunk proxies included (they are merged copies of the same content).
+	if _chunk_renderer != null and _chunk_renderer.has_method("set_globally_visible"):
+		_chunk_renderer.call("set_globally_visible", _mid_tier_visible)
 
 ## Toggle FAR-tier impostors (NativeImpostorRenderer) — hides + stops streaming.
 func set_impostors_visible(visible: bool) -> void:
@@ -3306,13 +3318,35 @@ func _apply_impostor_request() -> void:
 
 ## Toggle the CHUNK tier (offline-baked ring proxies). Returns the effective
 ## state (false when no bake exists on disk). Re-applies the impostor range
-## so FAR_START flips between MID_END and CHUNK_END accordingly.
+## so FAR_START flips between MID_END and CHUNK_END accordingly, and the
+## paged-coverage band release so MID buckets revert to the plain MID_END
+## band when the proxies are gone.
 func set_chunk_tier_enabled(enabled: bool) -> bool:
 	if _chunk_renderer == null:
 		return false
 	_chunk_renderer.call("set_enabled", enabled)
 	_apply_impostor_request()
+	_apply_paged_coverage()
 	return bool(_chunk_renderer.call("is_enabled"))
+
+
+## Route per-cell static-bucket presence to the chunk-proxy swap.
+func _on_cell_static_presence_changed(cell_grid: Vector2i, present: bool) -> void:
+	if _chunk_renderer != null:
+		_chunk_renderer.call("set_cell_covered", cell_grid, present)
+
+
+## Covered MID bucket types run band-free ONLY while the chunk tier can
+## actually cover them, and never while a `static_range` debug override is
+## in force (the override is a measurement instrument — it must clamp
+## everything or its ablations lie).
+func _apply_paged_coverage() -> void:
+	if _static_renderer == null:
+		return
+	var chunk_active: bool = _chunk_renderer != null and bool(_chunk_renderer.call("is_enabled"))
+	var override_active := _static_range_override.y >= 0.0
+	var min_radius := 0.0 if (not chunk_active or override_active) else DU.CHUNK_PROXY_MIN_WORLD_RADIUS
+	_static_renderer.set_paged_coverage(min_radius)
 
 
 func get_chunk_tier_stats() -> Dictionary:

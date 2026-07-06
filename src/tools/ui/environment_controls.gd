@@ -44,7 +44,10 @@ var _visual_state: Dictionary = {
 	"ssr": true,
 	"glow": false,
 	"volumetric_fog": false,
-	"depth_fog": false,
+	# Depth fog defaults ON (2026-07-06): the terrain heightmap is a finite
+	# square slab — from altitude its edge/corners are visible without a
+	# horizon-closing haze. MGE XE / OpenMW distant land use the same fix.
+	"depth_fog": true,
 	"sdfgi": true,
 	"tonemap_mode": Environment.TONE_MAPPER_FILMIC,
 	"shadow_cascades": false,
@@ -337,11 +340,16 @@ func _apply_volumetric_fog_defaults(env: Environment) -> void:
 ## Single source of truth — called by _apply_visual_state() and on_depth_fog_toggled().
 func _apply_depth_fog_defaults(env: Environment) -> void:
 	env.fog_mode = Environment.FOG_MODE_EXPONENTIAL
-	env.fog_density = 0.00008
+	# 0.00025: ~74% visibility at the CHUNK boundary (1.2km), ~8% at 10km —
+	# geometry is fully hazed out before the terrain-data edge (~8-15km) so
+	# the square map boundary can't be seen from altitude.
+	env.fog_density = 0.00025
 	env.fog_light_color = Color(0.7, 0.75, 0.82)
 	env.fog_light_energy = 1.0
 	env.fog_sun_scatter = 0.5
-	env.fog_aerial_perspective = 0.8
+	# 1.0 = fog fades toward the actual per-pixel sky color, so fogged
+	# geometry merges seamlessly into the horizon.
+	env.fog_aerial_perspective = 1.0
 	env.fog_sky_affect = 0.15
 	env.fog_height = 0.0
 	env.fog_height_density = 0.003

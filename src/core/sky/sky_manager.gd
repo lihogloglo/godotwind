@@ -166,6 +166,31 @@ var moon_texture: Texture2D = null:
 			else:
 				_sky_material.set_shader_parameter("moon_texture_enabled", false)
 
+# ---- Cheap Skydome Clouds ----
+
+## Cheap cloud renderer (clayjohn skydome port) — amortized hemisphere march
+## composited in the sky shader. Alternative to compositor clouds
+## (SunshineClouds2); both are toggled from the Clouds tab renderer selector.
+var cheap_clouds_enabled: bool = false:
+	set(value):
+		if cheap_clouds_enabled == value:
+			return
+		cheap_clouds_enabled = value
+		if value and _cheap_clouds == null:
+			_cheap_clouds = CheapCloudLayer.new()
+			_cheap_clouds.initialize()
+		if value and _cheap_clouds:
+			_cheap_clouds.request_full_init()
+		if _sky_material:
+			_set_param("cheap_clouds_enabled", value)
+
+## Coverage 0-1 for the cheap layer (weather presets / Clouds tab slider).
+var cheap_cloud_coverage: float = 0.45
+## Extinction density for the cheap layer (upstream default 0.05).
+var cheap_cloud_density: float = 0.05
+
+var _cheap_clouds: CheapCloudLayer = null
+
 # ---- Celestial ----
 
 ## Celestial position calculator.
@@ -196,6 +221,20 @@ var _zenith_transmittance: Color = Color.WHITE
 var _last_atm_hash: float = 0.0
 var _debug_logged: bool = false
 
+## Last value pushed per shader uniform — no-op writes are skipped (see _set_param).
+var _pushed_uniforms: Dictionary = {}
+
+# ---- Shadow Stability ----
+
+## Quantize the shadow-casting lights' rotation to discrete angular steps so
+## shadow edges stay pixel-stable between steps instead of crawling every frame
+## as the sun moves. The sky's visual sun disc keeps moving smoothly (it reads
+## the sun_direction uniform, not the light node). 0 = continuous (old behavior).
+var shadow_update_angle_deg: float = 0.5
+
+var _sun_applied_dir: Vector3 = Vector3.ZERO
+var _moon_applied_dir: Vector3 = Vector3.ZERO
+
 
 # ---- SkyState for Cloud Plugins ----
 
@@ -216,6 +255,11 @@ func _ready() -> void:
 	_initialize()
 
 
+func _notification(what: int) -> void:
+	if what == NOTIFICATION_PREDELETE and _cheap_clouds:
+		_cheap_clouds.cleanup()
+
+
 func _initialize() -> void:
 	if _initialized:
 		return
@@ -232,7 +276,11 @@ func _initialize() -> void:
 	# --- Sky resource ---
 	var sky := Sky.new()
 	sky.sky_material = _sky_material
-	sky.process_mode = Sky.PROCESS_MODE_QUALITY
+	# INCREMENTAL, not QUALITY: our uniforms change every frame (sun direction,
+	# cirrus scroll), and QUALITY re-renders the full radiance cubemap whenever
+	# the material is dirtied — the docs forbid it for runtime-changing skies.
+	# INCREMENTAL amortizes the radiance update over several frames.
+	sky.process_mode = Sky.PROCESS_MODE_INCREMENTAL
 	sky.radiance_size = Sky.RADIANCE_SIZE_256
 
 	# --- Environment ---
@@ -337,6 +385,9 @@ func update(hour: float) -> void:
 	# Update zenith transmittance cache (for cloud plugins)
 	_update_zenith_transmittance()
 
+	# Drive the cheap skydome cloud layer (no-op when disabled)
+	_update_cheap_clouds()
+
 
 ## Get read-only sky state for cloud plugins.
 func get_sky_state() -> SkyState:
@@ -376,6 +427,17 @@ func get_world_environment() -> WorldEnvironment:
 
 #region Shader Uniforms
 
+## Push a uniform only if its value changed since the last push. Every
+## set_shader_parameter dirties the sky material and (re)queues a radiance
+## update, so skipping no-op writes keeps the radiance stable when the sky
+## isn't actually changing (e.g. time paused).
+func _set_param(param_name: String, value: Variant) -> void:
+	if _pushed_uniforms.get(param_name) == value:
+		return
+	_pushed_uniforms[param_name] = value
+	_sky_material.set_shader_parameter(param_name, value)
+
+
 func _update_shader_uniforms() -> void:
 	if not _sky_material:
 		return
@@ -383,60 +445,61 @@ func _update_shader_uniforms() -> void:
 	# Atmosphere params
 	var params: Dictionary = atmosphere.to_shader_params()
 	for key: String in params:
-		_sky_material.set_shader_parameter(key, params[key])
+		_set_param(key, params[key])
 
 	# Turbidity (separate because it's used raw, not just in to_shader_params)
-	_sky_material.set_shader_parameter("turbidity", atmosphere.turbidity)
+	_set_param("turbidity", atmosphere.turbidity)
 
 	# Celestial directions
-	_sky_material.set_shader_parameter("sun_direction", celestial.sun_direction)
-	_sky_material.set_shader_parameter("moon_direction", celestial.moon_direction)
+	_set_param("sun_direction", celestial.sun_direction)
+	_set_param("moon_direction", celestial.moon_direction)
 
 	# Sun/moon disc
-	_sky_material.set_shader_parameter("sun_disk_size", sun_disk_size)
-	_sky_material.set_shader_parameter("sun_energy", sun_energy)
-	_sky_material.set_shader_parameter("sun_color", Vector3(sun_color.r, sun_color.g, sun_color.b))
-	_sky_material.set_shader_parameter("moon_disk_size", moon_disk_size)
-	_sky_material.set_shader_parameter("moon_energy", moon_energy)
+	_set_param("sun_disk_size", sun_disk_size)
+	_set_param("sun_energy", sun_energy)
+	_set_param("sun_color", Vector3(sun_color.r, sun_color.g, sun_color.b))
+	_set_param("moon_disk_size", moon_disk_size)
+	_set_param("moon_energy", moon_energy)
 
 	# Stars
-	_sky_material.set_shader_parameter("star_rotation", celestial.star_rotation)
-	_sky_material.set_shader_parameter("star_energy", star_energy)
-	_sky_material.set_shader_parameter("scintillation_amount", scintillation_amount)
-	_sky_material.set_shader_parameter("scintillation_speed", scintillation_speed)
+	_set_param("star_rotation", celestial.star_rotation)
+	_set_param("star_energy", star_energy)
+	_set_param("scintillation_amount", scintillation_amount)
+	_set_param("scintillation_speed", scintillation_speed)
 
 	# Mie halos
-	_sky_material.set_shader_parameter("sun_halo_intensity", sun_halo_intensity)
-	_sky_material.set_shader_parameter("sun_halo_g", sun_halo_g)
-	_sky_material.set_shader_parameter("moon_halo_intensity", moon_halo_intensity)
-	_sky_material.set_shader_parameter("moon_halo_g", moon_halo_g)
+	_set_param("sun_halo_intensity", sun_halo_intensity)
+	_set_param("sun_halo_g", sun_halo_g)
+	_set_param("moon_halo_intensity", moon_halo_intensity)
+	_set_param("moon_halo_g", moon_halo_g)
 
 	# Color tinting
-	_sky_material.set_shader_parameter("day_tint", Vector3(day_tint.r, day_tint.g, day_tint.b))
-	_sky_material.set_shader_parameter("night_tint", Vector3(night_tint.r, night_tint.g, night_tint.b))
-	_sky_material.set_shader_parameter("horizon_tint", Vector3(horizon_tint.r, horizon_tint.g, horizon_tint.b))
-	_sky_material.set_shader_parameter("tint_strength", tint_strength)
+	_set_param("day_tint", Vector3(day_tint.r, day_tint.g, day_tint.b))
+	_set_param("night_tint", Vector3(night_tint.r, night_tint.g, night_tint.b))
+	_set_param("horizon_tint", Vector3(horizon_tint.r, horizon_tint.g, horizon_tint.b))
+	_set_param("tint_strength", tint_strength)
 
 	# Night
-	_sky_material.set_shader_parameter("night_intensity", night_intensity)
+	_set_param("night_intensity", night_intensity)
 
 	# Ground
-	_sky_material.set_shader_parameter("ground_color", Vector3(ground_color.r, ground_color.g, ground_color.b))
+	_set_param("ground_color", Vector3(ground_color.r, ground_color.g, ground_color.b))
 
 	# Cloud darkening
-	_sky_material.set_shader_parameter("cloud_coverage", cloud_coverage)
+	_set_param("cloud_coverage", cloud_coverage)
 
 	# Cirrus clouds
-	_sky_material.set_shader_parameter("cirrus_visible", cirrus_visible)
-	_sky_material.set_shader_parameter("cirrus_coverage", cirrus_coverage)
-	_sky_material.set_shader_parameter("cirrus_absorption", cirrus_absorption)
-	_sky_material.set_shader_parameter("cirrus_intensity", cirrus_intensity)
-	_sky_material.set_shader_parameter("cirrus_thickness", cirrus_thickness)
-	_sky_material.set_shader_parameter("cirrus_size", cirrus_size)
-	_sky_material.set_shader_parameter("cirrus_scroll1", _cirrus_scroll1)
-	_sky_material.set_shader_parameter("cirrus_scroll2", _cirrus_scroll2)
-	_sky_material.set_shader_parameter("cirrus_day_color", Vector3(cirrus_day_color.r, cirrus_day_color.g, cirrus_day_color.b))
-	_sky_material.set_shader_parameter("cirrus_night_color", Vector3(cirrus_night_color.r, cirrus_night_color.g, cirrus_night_color.b))
+	_set_param("cirrus_visible", cirrus_visible)
+	_set_param("cirrus_coverage", cirrus_coverage)
+	_set_param("cirrus_absorption", cirrus_absorption)
+	_set_param("cirrus_intensity", cirrus_intensity)
+	_set_param("cirrus_thickness", cirrus_thickness)
+	_set_param("cirrus_size", cirrus_size)
+	if cirrus_visible:
+		_set_param("cirrus_scroll1", _cirrus_scroll1)
+		_set_param("cirrus_scroll2", _cirrus_scroll2)
+	_set_param("cirrus_day_color", Vector3(cirrus_day_color.r, cirrus_day_color.g, cirrus_day_color.b))
+	_set_param("cirrus_night_color", Vector3(cirrus_night_color.r, cirrus_night_color.g, cirrus_night_color.b))
 
 #endregion
 
@@ -451,7 +514,9 @@ func _update_lights() -> void:
 
 	# --- Sun light ---
 	if _sun_light:
-		_sun_light.basis = _direction_to_light_basis(sun_dir)
+		if _should_step_light(_sun_applied_dir, sun_dir):
+			_sun_light.basis = _direction_to_light_basis(sun_dir)
+			_sun_applied_dir = sun_dir
 
 		# Energy: from curve if available, otherwise hardcoded
 		if sun_light_curve:
@@ -471,7 +536,9 @@ func _update_lights() -> void:
 
 	# --- Moon light ---
 	if _moon_light:
-		_moon_light.basis = _direction_to_light_basis(moon_dir)
+		if _should_step_light(_moon_applied_dir, moon_dir):
+			_moon_light.basis = _direction_to_light_basis(moon_dir)
+			_moon_applied_dir = moon_dir
 
 		var moon_alt: float = asin(clampf(moon_dir.y, -1.0, 1.0))
 		var phase_factor: float = maxf(0.0, cos(celestial.moon_phase * TAU))
@@ -501,6 +568,14 @@ func _update_lights() -> void:
 		_environment.ambient_light_energy = _current_ambient_energy
 
 
+## True when a shadow-casting light should be re-oriented: first update ever,
+## quantization disabled, or the body moved past the configured angular step.
+func _should_step_light(applied_dir: Vector3, new_dir: Vector3) -> bool:
+	if applied_dir == Vector3.ZERO or shadow_update_angle_deg <= 0.0:
+		return true
+	return applied_dir.angle_to(new_dir) >= deg_to_rad(shadow_update_angle_deg)
+
+
 ## Build a Basis where -Z points in the light direction (away from the celestial body).
 ## direction: normalized vector pointing TOWARD the celestial body from the observer.
 static func _direction_to_light_basis(direction: Vector3) -> Basis:
@@ -512,6 +587,49 @@ static func _direction_to_light_basis(direction: Vector3) -> Basis:
 	var up: Vector3 = right.cross(forward).normalized()
 	# Basis columns are (X=right, Y=up, Z=forward)
 	return Basis(right, up, forward)
+
+#endregion
+
+
+#region Cheap Skydome Clouds
+
+func _update_cheap_clouds() -> void:
+	if not cheap_clouds_enabled or _cheap_clouds == null:
+		return
+
+	_cheap_clouds.wind_direction_deg = wind_direction
+	_cheap_clouds.wind_speed = maxf(wind_speed, 0.5)
+	_cheap_clouds.cloud_coverage = cheap_cloud_coverage
+	_cheap_clouds.density = cheap_cloud_density
+	_cheap_clouds.sun_direction = celestial.sun_direction
+	if _sun_light:
+		_cheap_clouds.sun_energy = _sun_light.light_energy
+		_cheap_clouds.sun_color = _sun_light.light_color
+	_compute_cloud_atmo_colors()
+	_cheap_clouds.update_sky(_sky_material)
+
+
+## Approximate sky radiance toward the sun / at 45° altitude / toward the
+## ground, replacing the upstream demo's Hillaire sky-view LUT samples.
+## Magnitudes target the demo's LUT scale (~50x display radiance) so the
+## constants inside cheap_clouds.glsl stay untouched. These are calibration
+## ramps — if cloud lighting drifts from the sky at twilight, evaluate the
+## analytical scatter model here instead.
+func _compute_cloud_atmo_colors() -> void:
+	var alt: float = celestial.sun_altitude
+	var day: float = clampf(sin(alt) * 5.0 + 0.5, 0.0, 1.0)
+	var sunset: float = clampf(1.0 - absf(sin(alt)) * 8.0, 0.0, 1.0)
+
+	# Sky looking toward the sun: bright white-blue, warming to orange at sunset
+	var sun_sky: Color = Color(0.9, 0.95, 1.0).lerp(Color(1.0, 0.5, 0.22), sunset)
+	_cheap_clouds.atmo_sun = sun_sky * (90.0 * day + 2.0)
+
+	# Sky at ~45° altitude: blue ambient, muted purple-grey at sunset
+	var ambient_sky: Color = Color(0.30, 0.48, 0.80).lerp(Color(0.50, 0.40, 0.45), sunset)
+	_cheap_clouds.atmo_ambient = ambient_sky * (45.0 * day + 1.0)
+
+	# Ground bounce: dusty Morrowind earth tones
+	_cheap_clouds.atmo_ground = Color(0.35, 0.32, 0.28) * (30.0 * day + 0.5)
 
 #endregion
 

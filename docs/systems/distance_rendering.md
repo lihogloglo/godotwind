@@ -10,7 +10,7 @@ system docs linked below.
 | --- | --- | --- | --- | --- |
 | NEAR gameplay | 0-150m visual/gameplay band | `cell_manager.gd`, `native_streaming_manager.gd` | Sparse `Node3D` for gameplay/interactives, static collision, physics, and scene-tree behavior. Toggle disables visibility, processing, and collision/area activation. | Working |
 | Static visuals | Fixed 150-400m bridge | `static_object_renderer.gd`, `cell_static_bucket.gd` | Cell-local `CellStaticBucket` draw groups. Groups use local MultiMeshes; singleton groups use the single-slot transform API instead of a bulk buffer upload. Mesh detail uses embedded Godot LOD chains. | Working |
-| CHUNK | 400-1200m (target) | Baker: `src/tools/prebaking/` (runner); runtime consumer TBD | **OFFLINE-baked** merged + simplified chunk proxies (MGE XE / OpenMW pattern: merged low-poly real geometry, min-size 0.01 gate, meshoptimizer LOD chain at bake, 1 RS instance per chunk) | Decision locked 2026-07-05 (user); baker in development. Plan: `docs/plans/distant_rendering_recovery_2026_07.md` Phase 2 (revised) |
+| CHUNK | Unpublished cells out to 1200m (content fills from ~400m in practice) | Baker: `src/tools/prebaking/chunk_proxy_bake_runner.gd`; runtime: `chunk_proxy_renderer.gd` | **OFFLINE-baked** PER-CELL merged + simplified proxies (MGE XE / OpenMW pattern: merged low-poly real geometry, min-size 0.01 gate, meshoptimizer LOD chain at bake, 1 RS instance per cell). The MID↔CHUNK handoff is **content selection**, not range fencing — see below | Boundary rework 2026-07-06; pending user verification. Plan: `docs/plans/distant_rendering_recovery_2026_07.md` Phase 2 (revised) |
 | FAR impostors | Interim 400-5000m; retreats to **1200-5000m** when CHUNK ships | `native_impostor_renderer.gd` | Octahedral impostors in spatial `MultiMeshInstance3D` pages from generic impostor-capable records. Wrong tool below ~1.2km for architecture (baked lighting vs dynamic sun, parallax flatness) | Working |
 | ~~HLOD~~ | ~~Optional 400-1000m experiment~~ | `object_paging.gd` | Runtime merged chunk proxies — merge-without-simplify, stall + segfault class. Superseded by CHUNK; parked default-off; DELETE when CHUNK is verified (the merge kernel + `object_paging_kernel.gd` survive — the CHUNK baker uses them) | Deprecated |
 
@@ -47,6 +47,34 @@ Distance constants live in `src/core/world/distance_utils.gd`:
 was deliberately NOT moved to 1200 early because that would leave 400-1200m
 fully empty in the interim (decision 2026-07-05). Runtime view distance can
 cap FAR visibility/loading, but does not move the handoff.
+
+## MID↔CHUNK Handoff Contract (content selection, 2026-07-06)
+
+The 400m seam is NOT a distance band. Both range-fence variants failed with
+an irreducible ±chunk-radius error (coplanar z-fight shimmer one way,
+cell-sized holes the other — user-verified 2026-07-05). The shipped design
+adapts OpenMW's object-paging content exclusion to an offline bake via the
+UE World Partition HLOD swap pattern:
+
+- Proxies are baked and published PER CELL (`chunk_index.json`
+  `chunk_cells = 1`; legacy 2×2 bakes are refused at load).
+- A cell's proxy is visible **exactly while that cell has no published MID
+  static buckets**. `StaticObjectRenderer.cell_static_presence_changed`
+  fires on the first bucket publish / first bucket hide / detach;
+  `NativeStreamingManager` routes it to
+  `ChunkProxyRenderer.set_cell_covered`. Covered proxies stay resident but
+  hidden so the unload swap is same-frame.
+- Proxies have NO near visibility band (begin 0): they double as instant
+  stand-ins for cells the streamer hasn't published yet. Far band stays
+  engine-driven at `CHUNK_END + radius` (FAR impostors beyond).
+- MID bucket types passing the shared min-size gate
+  (`DU.CHUNK_PROXY_MIN_WORLD_RADIUS`, prototype AABB radius × max ref
+  scale ≥ 4m — the same predicate the baker gates refs with) run
+  **band-free** while the chunk tier is active; their far cutoff is the
+  streaming-ring unload, which is also the proxy swap point. Small clutter
+  keeps its screen-size cutoffs (it has no proxy copies). A `static_range`
+  override suspends the band release; the static_visuals ablation hides
+  proxies together with all other static output.
 
 MID to NEAR streaming promotion is separate from render-tier visibility:
 

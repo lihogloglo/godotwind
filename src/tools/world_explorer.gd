@@ -2117,6 +2117,7 @@ func _setup_visibility_toggles() -> void:
 		"time_scale_changed": _weather_controls.on_time_scale_changed,
 		"time_pause_toggled": _weather_controls.on_time_pause_toggled,
 		"fog_density_changed": _weather_controls.on_fog_density_changed,
+		"cloud_renderer_changed": _weather_controls.on_cloud_renderer_changed,
 		"cloud_coverage_changed": _weather_controls.on_cloud_coverage_changed,
 		"cloud_density_changed": _weather_controls.on_cloud_density_changed,
 		"cloud_sharpness_changed": _weather_controls.on_cloud_sharpness_changed,

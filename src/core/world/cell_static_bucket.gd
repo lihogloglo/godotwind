@@ -22,6 +22,14 @@ var visible: bool = true
 var frozen: bool = false
 var visibility_range_begin: float = 0.0
 var visibility_range_end: float = DU.MID_END
+## Largest squared ref scale in this bucket, set by StaticObjectRenderer at
+## creation. Combined with the prototype AABB radius it decides whether the
+## offline chunk bake carries a merged copy of this content (the shared
+## min-size gate) — covered buckets run with the far band released while the
+## chunk tier is active: the streaming-ring unload is their far cutoff and
+## the per-cell proxy swap covers everything beyond. Stored (not a frozen
+## bool) so visibility-range reapplies re-evaluate under chunk-tier toggles.
+var paged_max_scale_sq: float = 0.0
 var resource_handle: RefCounted = null
 var _bucket_owner_key: String = ""
 var _resource_refs: Array[Resource] = []
@@ -646,6 +654,14 @@ func _create_single_rs_draw_group(
 
 
 func _apply_visibility_range(group: DrawGroup) -> void:
+	if visibility_range_end <= 0.0:
+		# Far band RELEASED (MID↔CHUNK content selection, 2026-07-06): this
+		# bucket's content has an offline chunk-proxy copy, so its far cutoff
+		# is the streaming-ring unload + per-cell proxy swap — not a distance
+		# band. Zeroed range = engine visibility_range disabled.
+		RenderingServer.instance_geometry_set_visibility_range(
+			group.instance_rid, 0.0, 0.0, 0.0, 0.0, SC.MID_VISIBILITY_FADE_MODE)
+		return
 	var radius := _aabb_horizontal_radius(group.local_aabb)
 	var begin := maxf(0.0, visibility_range_begin - radius)
 	var end := visibility_range_end + radius

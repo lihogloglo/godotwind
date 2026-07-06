@@ -96,6 +96,26 @@ var visibility_range_end: float = DU.MID_END
 ## SubsystemToggles "mid_objects" flag via set_all_visible().
 var _globally_visible: bool = true
 
+## MID↔CHUNK content selection (2026-07-06). While the offline chunk-proxy
+## tier is active, bucket types whose content passes the shared min-size gate
+## (the bake carries merged copies of them) run with their far visibility
+## band RELEASED — the streaming-ring unload is their far cutoff and the
+## per-cell proxy swap covers everything beyond. Canonical pattern: UE World
+## Partition HLOD (sources render while their cell is streamed in, the HLOD
+## renders when it is not) + OpenMW object-paging content exclusion.
+## 0.0 = coverage off (chunk tier disabled, legacy bake, or a `static_range`
+## debug override in force — the streaming manager owns this value).
+var _paged_coverage_min_radius: float = 0.0
+
+## Fired as (cell_grid: Vector2i, present: bool) when a cell's FIRST static
+## bucket publishes and when its buckets start hiding / detach. The streaming
+## manager routes this to ChunkProxyRenderer.set_cell_covered — the per-cell
+## proxy↔MID swap that replaces range fencing at the CHUNK boundary.
+var cell_static_presence_changed: Callable = Callable()
+
+## Cells that currently hold live buckets (edge detection for the callable).
+var _cells_with_buckets: Dictionary[Vector2i, bool] = {}
+
 ## Stats
 var _stats: Dictionary = {
 	"mesh_types": 0,
@@ -955,6 +975,8 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 		return null
 
 	var bucket: RefCounted = CellStaticBucketScript.new()
+	var paged_scale_sq := _max_transform_scale_sq(transforms)
+	bucket.set("paged_max_scale_sq", paged_scale_sq)
 	var ok := bool(bucket.call(
 		"configure",
 		type_name,
@@ -963,7 +985,7 @@ func create_cell_bucket(type_name: String, payload_key: String, transforms: Arra
 		mesh_type.sub_meshes,
 		transforms,
 		_scenario,
-		_get_bucket_visibility_range_end(bucket_key, transforms.size(), type_name),
+		_get_bucket_visibility_range_end(bucket_key, transforms.size(), type_name, paged_scale_sq),
 		_globally_visible,
 		resource_handle,
 		visibility_range_begin
@@ -1005,6 +1027,8 @@ func create_cell_bucket_budgeted(
 	var bucket: RefCounted = _cell_bucket_build_tasks.get(bucket_key) as RefCounted
 	if bucket == null:
 		bucket = CellStaticBucketScript.new()
+		var paged_scale_sq := _max_transform_scale_sq(transforms)
+		bucket.set("paged_max_scale_sq", paged_scale_sq)
 		var started := bool(bucket.call(
 			"begin_configure",
 			type_name,
@@ -1013,7 +1037,7 @@ func create_cell_bucket_budgeted(
 			mesh_type.sub_meshes,
 			transforms,
 			_scenario,
-			_get_bucket_visibility_range_end(bucket_key, transforms.size(), type_name),
+			_get_bucket_visibility_range_end(bucket_key, transforms.size(), type_name, paged_scale_sq),
 			_globally_visible,
 			resource_handle,
 			visibility_range_begin
@@ -1056,6 +1080,20 @@ func _finalize_cell_bucket(bucket: RefCounted, type_name: String, _payload_key: 
 	if type_name in _mesh_types:
 		var mesh_type: MeshType = _mesh_types[type_name]
 		mesh_type.instance_count += bucket_count
+	if cell_grid not in _cells_with_buckets:
+		_cells_with_buckets[cell_grid] = true
+		if cell_static_presence_changed.is_valid():
+			cell_static_presence_changed.call(cell_grid, true)
+
+
+## Presence edge: the cell's buckets are going away (hide start, detach, or
+## clear). Idempotent per cell until buckets publish again.
+func _notify_cell_buckets_absent(cell_grid: Vector2i) -> void:
+	if cell_grid not in _cells_with_buckets:
+		return
+	_cells_with_buckets.erase(cell_grid)
+	if cell_static_presence_changed.is_valid():
+		cell_static_presence_changed.call(cell_grid, false)
 
 
 func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_end: float) -> void:
@@ -1070,7 +1108,7 @@ func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_en
 				var bucket_key := str(bucket.get("bucket_key"))
 				var bucket_count := int(bucket.get("instance_count"))
 				var bucket_type := str(bucket.get("type_name"))
-				var bucket_end := _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
+				var bucket_end := _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type, float(bucket.get("paged_max_scale_sq")))
 				if bucket.has_method("set_visibility_range"):
 					bucket.call("set_visibility_range", visibility_range_begin, bucket_end)
 				elif bucket.has_method("set_visibility_range_end"):
@@ -1091,6 +1129,37 @@ func set_visibility_range(p_visibility_range_begin: float, p_visibility_range_en
 
 func set_visibility_range_end(p_visibility_range_end: float) -> void:
 	set_visibility_range(visibility_range_begin, p_visibility_range_end)
+
+
+## Enable/disable the chunk-proxy coverage band release. `min_world_radius`
+## is the shared bake gate (DU.CHUNK_PROXY_MIN_WORLD_RADIUS) or 0.0 for off.
+## Reapplies every bucket band so runtime chunk-tier toggles stay honest.
+func set_paged_coverage(min_world_radius: float) -> void:
+	var clamped := maxf(0.0, min_world_radius)
+	if is_equal_approx(_paged_coverage_min_radius, clamped):
+		return
+	_paged_coverage_min_radius = clamped
+	_apply_bucket_visibility_ranges()
+
+
+## True when a prototype at the given max ref scale clears the chunk bake's
+## min-size gate — the same per-ref predicate the offline baker applies, with
+## the same union-AABB `size.length() * 0.5` radius convention.
+func _is_paged_covered_type(type_name: String, max_scale_sq: float) -> bool:
+	if _paged_coverage_min_radius <= 0.0 or max_scale_sq <= 0.0 or type_name not in _mesh_types:
+		return false
+	var mesh_type: MeshType = _mesh_types[type_name]
+	var radius_sq := mesh_type.aabb.size.length_squared() * 0.25
+	return radius_sq * max_scale_sq >= _paged_coverage_min_radius * _paged_coverage_min_radius
+
+
+static func _max_transform_scale_sq(transforms: Array) -> float:
+	var max_scale_sq := 0.0
+	for transform_value: Variant in transforms:
+		var ref_basis := (transform_value as Transform3D).basis
+		var scale_sq := maxf(ref_basis.x.length_squared(), maxf(ref_basis.y.length_squared(), ref_basis.z.length_squared()))
+		max_scale_sq = maxf(max_scale_sq, scale_sq)
+	return max_scale_sq
 
 
 ## Apply exact HLOD coverage to active MID buckets. Fully covered buckets cap at
@@ -1115,7 +1184,7 @@ func _apply_bucket_visibility_ranges() -> void:
 			var bucket_key := str(bucket.get("bucket_key"))
 			var bucket_count := int(bucket.get("instance_count"))
 			var bucket_type := str(bucket.get("type_name"))
-			var target_end := _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
+			var target_end := _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type, float(bucket.get("paged_max_scale_sq")))
 			if bucket.has_method("set_visibility_range"):
 				bucket.call("set_visibility_range", visibility_range_begin, target_end)
 			elif bucket.has_method("set_visibility_range_end"):
@@ -1155,7 +1224,11 @@ func _refresh_hlod_bucket_override_stats() -> void:
 	_stats["hlod_bucket_override_refs"] = override_refs
 
 
-func _get_bucket_visibility_range_end(bucket_key: String, bucket_count: int, type_name: String = "") -> float:
+func _get_bucket_visibility_range_end(bucket_key: String, bucket_count: int, type_name: String = "", paged_max_scale_sq: float = 0.0) -> float:
+	# Chunk-covered content runs band-free (0.0 = released): its far cutoff is
+	# the streaming-ring unload + per-cell proxy swap, not a distance band.
+	if _is_paged_covered_type(type_name, paged_max_scale_sq):
+		return 0.0
 	var end := visibility_range_end
 	if bucket_count > 0 and int(_hlod_covered_bucket_counts.get(bucket_key, 0)) >= bucket_count:
 		end = minf(end, _hlod_bucket_visibility_end)
@@ -1235,7 +1308,7 @@ func get_cell_bucket_debug_info(bucket_key: String) -> Dictionary:
 	var bucket_type := str(bucket.get("type_name"))
 	var covered_count := int(_hlod_covered_bucket_counts.get(bucket_key, 0))
 	result["hlod_capped"] = bucket_count > 0 and covered_count >= bucket_count
-	result["target_visibility_range_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
+	result["target_visibility_range_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type, float(bucket.get("paged_max_scale_sq")))
 	if bucket.has_method("get_debug_info"):
 		result["bucket"] = bucket.call("get_debug_info")
 	return result
@@ -1261,7 +1334,7 @@ func get_cell_bucket_cost(bucket_key: String) -> Dictionary:
 	result["instance_count"] = bucket_count
 	result["type_name"] = bucket_type
 	result["draw_group_count"] = int(bucket.call("get_draw_group_count")) if bucket.has_method("get_draw_group_count") else 0
-	result["effective_visibility_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type)
+	result["effective_visibility_end"] = _get_bucket_visibility_range_end(bucket_key, bucket_count, bucket_type, float(bucket.get("paged_max_scale_sq")))
 	return result
 
 
@@ -1458,6 +1531,7 @@ func remove_cell_instances(cell_grid: Vector2i) -> int:
 
 func _detach_cell_buckets(cell_grid: Vector2i) -> Array:
 	_cancel_bucket_builds_for_cell(cell_grid)
+	_notify_cell_buckets_absent(cell_grid)
 	if cell_grid not in _cell_buckets:
 		_cell_bucket_hide_progress.erase(cell_grid)
 		return []
@@ -1539,6 +1613,7 @@ func hide_cell_instances(cell_grid: Vector2i) -> int:
 			count += 1
 
 	if cell_grid in _cell_buckets:
+		_notify_cell_buckets_absent(cell_grid)
 		for bucket_value: Variant in _cell_buckets[cell_grid]:
 			var bucket: RefCounted = bucket_value as RefCounted
 			if bucket == null or bool(bucket.get("frozen")) or not bool(bucket.get("visible")):
@@ -1588,6 +1663,11 @@ func hide_cell_instances_budgeted(cell_grid: Vector2i, max_count: int) -> Array:
 		_cell_hide_progress[cell_grid] = i
 
 	if is_complete and cell_grid in _cell_buckets:
+		# Presence flips OFF the same frame the first bucket hides — the
+		# streaming manager shows the cell's chunk proxy in lockstep, so the
+		# swap lands within one rendered frame (no gap, no double-render).
+		if hidden < max_count:
+			_notify_cell_buckets_absent(cell_grid)
 		var buckets: Array = _cell_buckets[cell_grid]
 		var bucket_start_idx: int = _cell_bucket_hide_progress.get(cell_grid, 0)
 		var bi := bucket_start_idx

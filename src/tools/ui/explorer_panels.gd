@@ -76,6 +76,7 @@ var color_grading_toggle: CheckBox = null
 var weather_enabled_toggle: CheckBox = null
 var weather_type_btn: OptionButton = null  # Unified weather dropdown (Auto + 11 types)
 var fog_density_slider: HSlider = null
+var cloud_renderer_dropdown: OptionButton = null
 var cloud_coverage_slider: HSlider = null
 var cloud_density_slider: HSlider = null
 var cloud_sharpness_slider: HSlider = null
@@ -374,6 +375,7 @@ func _build_weather_tab(vbox: VBoxContainer) -> void:
 	fog_density_slider.step = 0.1
 	depth_fog_toggle = CheckBox.new()
 	depth_fog_toggle.text = "Depth Fog"
+	depth_fog_toggle.button_pressed = true
 	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
 	vbox.add_child(depth_fog_toggle)
 	native_vfog_toggle = CheckBox.new()
@@ -394,7 +396,23 @@ func _build_weather_tab(vbox: VBoxContainer) -> void:
 
 
 func _build_clouds_tab(vbox: VBoxContainer) -> void:
-	_add_section(vbox, "SunshineClouds2")
+	_add_section(vbox, "Clouds")
+	# Renderer selector: ids match WeatherControls.CloudRenderer enum
+	var renderer_row := HBoxContainer.new()
+	var renderer_label := Label.new()
+	renderer_label.text = "Renderer:"
+	renderer_label.add_theme_font_size_override("font_size", 11)
+	renderer_label.custom_minimum_size.x = 70
+	renderer_row.add_child(renderer_label)
+	cloud_renderer_dropdown = OptionButton.new()
+	cloud_renderer_dropdown.add_item("Off", 0)
+	cloud_renderer_dropdown.add_item("Cheap (Skydome)", 1)
+	cloud_renderer_dropdown.add_item("Volumetric (SunshineClouds2)", 2)
+	cloud_renderer_dropdown.selected = 2
+	cloud_renderer_dropdown.item_selected.connect(_cb.get("cloud_renderer_changed", Callable()))
+	cloud_renderer_dropdown.size_flags_horizontal = Control.SIZE_EXPAND_FILL
+	renderer_row.add_child(cloud_renderer_dropdown)
+	vbox.add_child(renderer_row)
 	cloud_coverage_slider = create_slider_row(vbox, "Coverage:", 0.0, 1.0, 0.45, _cb.get("cloud_coverage_changed", Callable()))
 	cloud_coverage_slider.step = 0.02
 	cloud_density_slider = create_slider_row(vbox, "Density:", 0.02, 1.0, 0.14, _cb.get("cloud_density_changed", Callable()) if _cb.has("cloud_density_changed") else Callable())
@@ -676,7 +694,7 @@ func _build_environment_tab(vbox: VBoxContainer) -> void:
 	# fog/godray parameters when active (authority model: Phase B refactor)
 	depth_fog_toggle = CheckBox.new()
 	depth_fog_toggle.text = "Depth Fog (aerial perspective)"
-	depth_fog_toggle.button_pressed = false
+	depth_fog_toggle.button_pressed = true
 	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
 	depth_fog_toggle.tooltip_text = "Distance haze — makes far objects fade to sky color for depth"
 	vbox.add_child(depth_fog_toggle)

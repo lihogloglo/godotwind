@@ -43,6 +43,16 @@ const HLOD_END: float = 1000.0
 const CHUNK_START: float = MID_END
 const CHUNK_END: float = 1200.0
 
+## CHUNK proxy min-size gate: OpenMW's `object paging min size` ratio (0.01 =
+## world radius must be ≥ 1% of the viewing distance) evaluated at CHUNK_START.
+## SHARED single source of truth for both sides of the MID↔CHUNK content
+## selection (2026-07-06): the offline baker uses it to decide which refs
+## enter the proxies, and StaticObjectRenderer uses it to decide which bucket
+## types get their far visibility band released while the chunk tier covers
+## them. The two sides must agree on the covered set or the boundary gaps.
+const CHUNK_PROXY_MIN_SIZE_RATIO: float = 0.01
+const CHUNK_PROXY_MIN_WORLD_RADIUS: float = CHUNK_PROXY_MIN_SIZE_RATIO * CHUNK_START
+
 ## FAR tier: Impostors/billboards (FAR_START to FAR_END).
 ## TRANSITION NOTE (2026-07-05): FAR_START stays at MID_END until the CHUNK
 ## tier ships (moving it now would leave 400-1200m fully empty). When chunks

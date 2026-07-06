@@ -42,6 +42,13 @@ No two-way coupling. No Sky3D-style "who owns time" ambiguity.
 
 ---
 
+## Performance contract (2026-07-06)
+
+- **Radiance process mode is `PROCESS_MODE_INCREMENTAL`** (`sky_manager.gd`, `_initialize`). QUALITY re-renders the full radiance cubemap whenever the sky material is dirtied; our uniforms change every frame, so QUALITY meant a full-quality cubemap re-render per frame — this was the "Sky toggle costs a lot" hit. Godot docs: QUALITY "should not be used if you plan on changing the sky at runtime."
+- **Uniform pushes are diffed** (`_set_param`) — unchanged values don't hit the RenderingServer and don't dirty the radiance. With time paused and cirrus hidden, the sky goes fully idle.
+- **Shadow-light rotation is quantized** (`shadow_update_angle_deg`, default 0.5°). The sun/moon `DirectionalLight3D` basis only updates when the celestial body has moved past the step, so directional-shadow edges are pixel-stable between steps instead of crawling every frame (the industry "discrete sun steps" pattern; Godot cannot rotationally stabilize a continuously rotating shadow frustum). The sky's visual sun disc still moves smoothly — it reads the `sun_direction` uniform, not the light node. Set to 0 to restore continuous rotation.
+- **Cloud renderer selector** (Clouds tab): Off / Cheap (Skydome) / Volumetric (SunshineClouds2), default Volumetric (`weather_controls.cloud_renderer`). Volumetric renders only when selected AND (sky or weather) on, never in interiors. **Cheap** is the clayjohn volumetric-cloud-demo-v2 port (`src/core/sky/clouds/`): a compute shader marches the cloud hemisphere into an octahedral texture amortized over 64 frames, cross-blending two snapshots; the sky shader just samples it. Requires Sky ON (it lives in the sky shader). Atmosphere colors for cloud lighting come from calibration ramps in `SkyManager._compute_cloud_atmo_colors` (the demo's LUT replacement). See `docs/plans/cheap_clouds_skydome_2026_07.md`.
+
 ## SDFGI
 
 Enabled in `SkyManager._init_environment()` (`sky_manager.gd:250-259`): 4 cascades, `Y_SCALE_75_PERCENT`, occlusion on, `bounce_feedback=0.3`, `read_sky_light=true`, normal/probe bias 1.1. See `docs/systems/lighting.md` for how SDFGI interacts with the rest of the lighting pipeline.

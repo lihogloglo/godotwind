@@ -25,6 +25,14 @@ var _env_controls: EnvironmentControls = null
 ## Whether the weather system is wired and active
 var weather_enabled: bool = false
 
+## Cloud renderer selection (Clouds tab dropdown). Ids match the dropdown.
+enum CloudRenderer { OFF = 0, CHEAP = 1, VOLUMETRIC = 2 }
+
+## Active cloud renderer. VOLUMETRIC = SunshineClouds2 compositor raymarch
+## (expensive, per-pixel every frame). CHEAP = skydome layer amortized over
+## 64 frames inside the sky shader (needs the sky to be ON). OFF = neither.
+var cloud_renderer: CloudRenderer = CloudRenderer.VOLUMETRIC
+
 ## True while the player is inside a classic (fade-to-black) interior pocket.
 ## Weather is an exterior-worldspace system (OpenMW model: weather applies to
 ## exterior/quasi-exterior cells only). While suspended, all per-frame visual
@@ -304,7 +312,7 @@ func on_weather_toggled(enabled: bool) -> void:
 		_env_controls.reassert_fog_defaults()
 
 	# Enable/disable SunshineClouds2 rendering (kept off while inside an interior)
-	_set_clouds_enabled(not _interior_suspended and (enabled or (_env_controls != null and _env_controls.show_sky)))
+	_refresh_clouds_enabled()
 
 	if _particles:
 		if enabled:
@@ -334,11 +342,17 @@ func on_fog_density_changed(value: float) -> void:
 ## manual override only when weather is OFF.
 func on_cloud_coverage_changed(value: float) -> void:
 	_set_cloud_param("clouds_coverage", value)
+	if _env_controls and _env_controls.sky_manager:
+		_env_controls.sky_manager.cheap_cloud_coverage = value
 
 
 ## Handle cloud density slider change.
 func on_cloud_density_changed(value: float) -> void:
 	_set_cloud_param("clouds_density", value)
+	if _env_controls and _env_controls.sky_manager:
+		# SunshineClouds2 density slider spans 0.02-1.0 (default 0.14); the
+		# cheap raymarcher wants ~0.05 at that default, hence the 0.35 scale.
+		_env_controls.sky_manager.cheap_cloud_density = value * 0.35
 
 
 ## Handle cloud sharpness slider change.
@@ -388,10 +402,39 @@ func _set_clouds_enabled(on: bool) -> void:
 		res.set("enabled", on)
 
 
+## Recompute which cloud renderer should be active and apply it.
+## Single source of truth: renderer dropdown AND (weather or sky on) AND outdoors.
+## The cheap skydome layer additionally requires the sky to be ON — it renders
+## inside the sky shader.
+func _refresh_clouds_enabled() -> void:
+	var sky_on: bool = _env_controls != null and _env_controls.show_sky
+	var context_on: bool = weather_enabled or sky_on
+	var outdoors: bool = not _interior_suspended
+	_set_clouds_enabled(cloud_renderer == CloudRenderer.VOLUMETRIC and outdoors and context_on)
+	if _env_controls and _env_controls.sky_manager:
+		_env_controls.sky_manager.cheap_clouds_enabled = \
+			cloud_renderer == CloudRenderer.CHEAP and outdoors and sky_on
+
+
+## Handle the Clouds tab renderer dropdown.
+func on_cloud_renderer_changed(index: int) -> void:
+	cloud_renderer = clampi(index, CloudRenderer.OFF, CloudRenderer.VOLUMETRIC) as CloudRenderer
+	if cloud_renderer == CloudRenderer.CHEAP and (_env_controls == null or not _env_controls.show_sky):
+		Log.info("weather", "Cheap clouds selected — they render inside the sky, enable Sky/Day-Night to see them")
+	_refresh_clouds_enabled()
+	# Push current slider values into the newly selected renderer
+	if _panels:
+		if _panels.cloud_coverage_slider:
+			on_cloud_coverage_changed(_panels.cloud_coverage_slider.value)
+		if _panels.cloud_density_slider:
+			on_cloud_density_changed(_panels.cloud_density_slider.value)
+	Log.info("weather", "Cloud renderer: %s" % ["Off", "Cheap (Skydome)", "Volumetric (SunshineClouds2)"][cloud_renderer])
+
+
 ## Notify weather_controls that sky visibility changed.
 ## Called by environment_controls so clouds enable/disable tracks sky state.
-func on_sky_visibility_changed(sky_visible: bool) -> void:
-	_set_clouds_enabled(not _interior_suspended and (weather_enabled or sky_visible))
+func on_sky_visibility_changed(_sky_visible: bool) -> void:
+	_refresh_clouds_enabled()
 
 
 ## Suspend/resume outdoor weather visuals for classic interior transitions.
@@ -402,7 +445,7 @@ func set_interior_suspended(suspended: bool) -> void:
 	if _interior_suspended == suspended:
 		return
 	_interior_suspended = suspended
-	_set_clouds_enabled(not suspended and (weather_enabled or (_env_controls != null and _env_controls.show_sky)))
+	_refresh_clouds_enabled()
 	if _particles:
 		_particles.visible = weather_enabled and not suspended
 	Log.info("weather", "Outdoor weather visuals %s" % ("suspended (interior)" if suspended else "resumed (exterior)"))
@@ -460,9 +503,9 @@ func on_weather_type_changed(index: int) -> void:
 func _apply_cloud_preset_from_weather() -> void:
 	var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
 	var preset: Dictionary = WeatherRenderer.get_cloud_preset_for_coverage(result.cloud_coverage)
-	# Apply to SunshineClouds2 resource
-	_set_cloud_param("clouds_coverage", preset["coverage"])
-	_set_cloud_param("clouds_density", preset["density"])
+	# Apply to whichever cloud renderer is active (both share coverage/density)
+	on_cloud_coverage_changed(preset["coverage"])
+	on_cloud_density_changed(preset["density"])
 	_set_cloud_param("clouds_sharpness", preset["sharpness"])
 	# Sync sliders to reflect preset values (no-signal to avoid re-triggering callbacks)
 	if _panels:
@@ -521,6 +564,8 @@ func process(delta: float) -> void:
 ## Computes cloud tint from sun altitude so clouds darken at night
 ## and pick up sunset/sunrise color. Works regardless of show_sky toggle.
 func _sync_cloud_ambient() -> void:
+	if cloud_renderer != CloudRenderer.VOLUMETRIC:
+		return
 	if _sunshine_driver == null or not is_instance_valid(_sunshine_driver):
 		return
 	var res: Resource = _sunshine_driver.get("clouds_resource")

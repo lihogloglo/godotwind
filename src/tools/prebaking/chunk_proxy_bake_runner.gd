@@ -3,9 +3,12 @@ extends Node
 ## CHUNK tier offline baker (Phase 2 revised, 2026-07-05).
 ## Plan: docs/plans/distant_rendering_recovery_2026_07.md.
 ##
-## Bakes 2×2-cell merged + simplified chunk proxies for the 400-1200m ring —
-## the MGE XE / OpenMW pattern: merged low-poly REAL geometry, min-size gate,
-## LOD chain at bake time, one RS instance per chunk at runtime.
+## Bakes PER-CELL merged + simplified chunk proxies covering the world out to
+## CHUNK_END — the MGE XE / OpenMW pattern: merged low-poly REAL geometry,
+## min-size gate, LOD chain at bake time, one RS instance per cell at runtime.
+## Per-cell granularity is load-bearing: the runtime hides each cell's proxy
+## while that cell's MID static buckets are published (content selection, not
+## range fencing — see chunk_proxy_renderer.gd for the boundary contract).
 ##
 ## Reuses the battle-tested pieces of the (deprecated) runtime HLOD:
 ## `ObjectPagingKernel.merge_refs` (C# material-grouped merge) and
@@ -25,15 +28,21 @@ const WorldObjectSourceScript := preload("res://src/core/world/morrowind/morrowi
 const PagingKernel := preload("res://src/core/world/object_paging_kernel.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
 
-## Chunk edge in cells (2×2 to start; measure before adding adaptive sizes).
-const CHUNK_CELLS := 2
+## Chunk edge in cells. PER-CELL (v3, 2026-07-06): the proxy toggle unit must
+## equal the streaming publication unit so the runtime can swap proxy↔MID per
+## cell in lockstep with static-bucket presence (the MID↔CHUNK boundary fix —
+## UE World Partition bakes one HLOD per streaming cell for the same reason,
+## and OpenMW re-keys paged chunks on the active grid). Range-fencing a 2×2
+## merged chunk against per-object MID culling had an irreducible ±radius
+## error: z-fight shimmer leaning one way, cell-sized holes the other.
+const CHUNK_CELLS := 1
 
-## Min-size gate: OpenMW's `object paging min size` ratio (0.01 = radius must
-## be ≥ 1% of viewing distance) evaluated at the ring's NEAR edge. At
+## Min-size gate ratio — shared with the runtime coverage logic in
+## StaticObjectRenderer (single source of truth in DistanceUtils). At
 ## CHUNK_START=400m this keeps objects with world radius ≥ 4m — the MGE XE
 ## "skip smaller meshes" rule. Provenance: openmw.readthedocs.io Terrain
 ## Settings (verified 2026-07-05 in the distant-rendering audit).
-const MIN_SIZE_RATIO := 0.01
+const MIN_SIZE_RATIO := DU.CHUNK_PROXY_MIN_SIZE_RATIO
 
 var _model_submesh_cache: Dictionary = {}  # model_path -> Array of sub-mesh dicts
 var _model_radius_cache: Dictionary = {}   # model_path -> float (prototype-space radius)
@@ -84,6 +93,14 @@ func _run() -> void:
 	_materials_dir = out_dir.path_join("materials")
 	DirAccess.make_dir_recursive_absolute(_materials_dir)
 
+	# Wipe stale outputs. The material library is rebuilt per run with fresh
+	# sequence numbers and the index is the sole authority over chunk files,
+	# so leftovers from a previous bake (different granularity / different
+	# material numbering) are dead weight at best and a stale-reference
+	# hazard at worst (the v1/v2 texture-embedding diagnosis cost a session).
+	_wipe_res_files(out_dir)
+	_wipe_res_files(_materials_dir)
+
 	# Optional region filter for test bakes.
 	var region := Rect2i(-1000000, -1000000, 2000000, 2000000)
 	for arg in Array(OS.get_cmdline_user_args()) + Array(OS.get_cmdline_args()):
@@ -124,8 +141,9 @@ func _run() -> void:
 
 	for ci in chunk_keys.size():
 		var chunk_key: Vector2i = chunk_keys[ci]
-		print("Chunk bake: starting chunk %d/%d %s (materials=%d, models=%d)" % [
-			ci + 1, chunk_keys.size(), chunk_key, _material_library.size(), _model_submesh_cache.size()])
+		if ci % 25 == 0:
+			print("Chunk bake: starting chunk %d/%d %s (materials=%d, models=%d)" % [
+				ci + 1, chunk_keys.size(), chunk_key, _material_library.size(), _model_submesh_cache.size()])
 		var chunk_origin: Vector3 = DU.cell_to_world_origin(Vector2i(chunk_key.x * CHUNK_CELLS, chunk_key.y * CHUNK_CELLS))
 		var inputs: Array = []
 
@@ -193,7 +211,7 @@ func _run() -> void:
 	var index_file := FileAccess.open(out_dir.path_join("chunk_index.json"), FileAccess.WRITE)
 	if index_file != null:
 		index_file.store_string(JSON.stringify({
-			"version": 1,
+			"version": 2,
 			"chunk_cells": CHUNK_CELLS,
 			"chunk_start": DU.CHUNK_START,
 			"chunk_end": DU.CHUNK_END,
@@ -376,6 +394,19 @@ func _get_shared_material(source: Material) -> Material:
 			"%dx%d" % [albedo.get_width(), albedo.get_height()] if albedo != null else "none"])
 	_material_library[key] = shared
 	return shared
+
+
+func _wipe_res_files(dir_path: String) -> void:
+	var dir := DirAccess.open(dir_path)
+	if dir == null:
+		return
+	var removed := 0
+	for file_name in dir.get_files():
+		if file_name.ends_with(".res") or file_name == "chunk_index.json":
+			if dir.remove(file_name) == OK:
+				removed += 1
+	if removed > 0:
+		print("Chunk bake: wiped %d stale output files from %s" % [removed, dir_path])
 
 
 func _to_submesh_inputs(sub_meshes: Array) -> Array:

@@ -557,6 +557,62 @@ budget → parallelize merges across WorkerThreadPool (kernel is
 thread-safe) when convenient. Size lever if wanted: meshoptimizer
 decimation of stored LOD0 via C# P/Invoke (~2× reduction expected).
 
+**MID↔CHUNK boundary — CONTENT SELECTION SHIPPED (2026-07-06).** Both
+range-fence attempts failed with an irreducible ±radius error (begin =
+CHUNK_START − radius → coplanar solid/solid z-fight shimmer; begin =
+CHUNK_START + radius → cell-sized holes until MID streams in — both
+user-verified 2026-07-05). Root cause: one origin-distance band per merged
+chunk cannot express a per-object seam against per-group MID culling.
+OpenMW study (`inspos/openmw/apps/openmw/mwrender/objectpaging.cpp`)
+confirmed the canonical answer is selection by IDENTITY, not distance:
+paged chunks are keyed on the active grid and rebuilt to exclude
+active-cell content. Since runtime re-merging is rejected here, the
+adaptation is the UE World Partition HLOD pattern (one HLOD per streaming
+cell, swapped on cell load/unload):
+
+1. **Bake granularity = streaming granularity.** The baker now emits
+   PER-CELL proxies (`CHUNK_CELLS = 1`, index version 2, stale outputs
+   wiped per run). The toggle unit must equal the publication unit.
+2. **Proxy visible ⟺ cell has no published MID buckets.**
+   StaticObjectRenderer fires `cell_static_presence_changed` on a cell's
+   first bucket publish / first bucket hide / detach; the streaming
+   manager routes it to `ChunkProxyRenderer.set_cell_covered`. Covered
+   proxies stay resident but hidden, so the unload swap is same-frame,
+   never behind a single-flight load.
+3. **Proxy near band deleted (begin = 0).** Proxies double as instant
+   stand-ins for cells the streamer hasn't published yet — kills the
+   fast-flight void. Far band unchanged (CHUNK_END + radius → FAR
+   impostors).
+4. **Covered MID bucket types run band-free** while the chunk tier is
+   active: types passing the shared min-size gate
+   (`DU.CHUNK_PROXY_MIN_WORLD_RADIUS`, 4 m at CHUNK_START — same constant
+   the baker gates refs with, evaluated against prototype AABB radius ×
+   max ref scale) get `visibility_range_end = 0` (engine band disabled).
+   Their far cutoff becomes the streaming-ring unload (~460 m bounds +
+   hysteresis) — exactly where the proxy swap fires. Small clutter keeps
+   its screen-size cutoffs (no proxy copies exist for it; its 400 m cull
+   is invisible by construction). Direct (non-bucket) instances keep the
+   plain 400 m band — the bake only carries `static_batch_allowed`
+   content, so they have no proxy copies either.
+5. **Instruments stay honest:** a `static_range` override disables the
+   band release for its duration (`_apply_paged_coverage`); the
+   static_visuals ablation now hides proxies too
+   (`ChunkProxyRenderer.set_globally_visible`) per the Phase 0 "hide ALL
+   static output" contract. Legacy 2×2 bakes are refused at index load
+   (warn + dormant tier) — re-bake required.
+
+Net effect: no tier ever renders a cell's statics while the other does
+(z-fight class deleted), and every cell is covered by exactly one tier at
+all times (gap class deleted), with the swap driven by the same event that
+creates/destroys the MID copies. Costs to verify by ladder: covered types
+render to the ring edge (~460-625 m) instead of 400 m while published, and
+per-cell meshes split some formerly-shared chunk surfaces (partially
+recovered by 4× tighter frustum culling; the bake-time texture atlas
+remains the named lever if the ring cost needs to come down).
+LADDER COMPARABILITY: rung 2 (statics hidden) now hides the proxy ring as
+well — draws drop back near the pre-chunk ~93 baseline; do not compare
+rung-2 draw counts across this change.
+
 **Ladder with the FULL ring (ladder_chunk_tier_v1, sequence complete,
 0 errors):** rung 3 = 77.2 FPS / p95 16.8 / 1,607 draws (vs 93.8 / 14.5 /
 766 with the ring empty) — the populated ring costs ~2.3 ms/frame
