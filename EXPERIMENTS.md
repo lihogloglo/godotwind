@@ -1,6 +1,7 @@
 # Godotwind — Lab Notebook
 
 Most of these started as "I wonder how X works" and ended with implementing X to find out. Expect rough edges !
+Also, it's not exhaustive by any means. Just the stuff I'm thinking about right now.
 
 
 ## Contents
@@ -17,11 +18,24 @@ Most of these started as "I wonder how X works" and ended with implementing X to
 
 ---
 
+
+### FFT ocean
+
+![Ocean](docs/images/ocean.jpg)
+
+Implementation of this great project : https://github.com/2Retr0/GodotOceanWaves/ 
+
+Our version has a few differences. Subsurface scattering, spray particles, clipmap LODs (and projected technique, which doesn't work great at the moment), refraction and reflection, above/underwater split camera, and buoyancy on top.
+
+📄 Deep dive: [ocean.md](docs/systems/ocean.md)
+
+---
+
 ### Analytical shore waves
 
-![Shore waves](docs/images/shore-waves.gif)
+![Shore waves](docs/images/shore.gif)
 
-Those sweet wavelets lapping the beach. The wave model is driven by a distance-to-shore map, so the wavelets actually break where the water meets the sand.
+To get a nice transition from the FFT Ocean and the shore, we transform the plane into gerstner waves. The wave model is driven by a distance-to-shore map, so the wavelets actually break where the water meets the sand.
 
 📄 Deep dive: [shore_overhaul.md](docs/plans/shore_overhaul.md)
 
@@ -33,18 +47,6 @@ Those sweet wavelets lapping the beach. The wave model is driven by a distance-t
 
 Implementation of this shader : https://www.shadertoy.com/view/wXcfWn 
 Morrowind terrain is very smooth and very low-poly, so it needs to be used with moderation.
-
----
-
-### FFT ocean
-
-![Ocean](docs/images/ocean.jpg)
-
-Implementation of this great project : https://github.com/2Retr0/GodotOceanWaves/ 
-
-Our version has a few differences. Subsurface scattering, spray particles, clipmap LODs (and projected technique, which doesn't work great at the moment), refraction and reflection, above/underwater split camera, and buoyancy on top.
-
-📄 Deep dive: [ocean.md](docs/systems/ocean.md)
 
 ---
 
