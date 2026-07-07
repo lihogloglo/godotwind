@@ -551,9 +551,9 @@ For any future shader behavior change:
 1. Clear matching `.godot/imported/<shader-name>-*.res` and `.md5` files for
    edited compute shaders.
 2. Run Godot import:
-   `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+   `<godot-executable> --path <project-path> --import`
 3. Launch Ocean Lab interactively:
-   `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+   `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 4. Do not use automated screenshot/auto-capture for final visual confidence.
 
 For this audit document itself, no shader cache was cleared and no visual
@@ -566,19 +566,19 @@ Session update 2026-05-14:
 - Deleted `.godot/imported/waterline_probe.glsl-*.res` and
   `.godot/imported/waterline_probe.glsl-*.md5`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_underwater_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_underwater_smoke.tscn`
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - Launched Ocean Lab interactively:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 
 Follow-up launch 2026-05-14:
 
 - Launched the same Ocean Lab scene interactively again after the receiver
   waterline toggle/doc updates:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 - No shader files were changed in this follow-up, so no additional shader cache
   clear/import was required.
 - Expected starting state remains surface refraction off, underwater medium off,
@@ -595,7 +595,7 @@ Follow-up recovery instrumentation 2026-05-15:
   active, receiver refraction is active, or advanced waterline underwater
   features are active.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - No shader files changed in this follow-up, so no additional shader cache
   clear/import was required.
 - This is still crash-smoked receiver-path instrumentation, not visual
@@ -621,16 +621,16 @@ Follow-up receiver inspection workflow 2026-05-15:
   inspection state before checking the receiver capture and recovery-mode
   flags.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - No shader files changed in this follow-up, so no additional shader cache
   clear/import was required.
 - This is a diagnostic workflow and crash/plumbing check; visual acceptance of
   the receiver waterline still requires interactive inspection.
 - Launched Ocean Lab interactively for manual inspection:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 - Relaunched Ocean Lab interactively after the `wl_source=warming/ok/missing`
   HUD clarification:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 
 Follow-up shader import/plumbing check 2026-05-15:
 
@@ -651,7 +651,7 @@ Follow-up shader import/plumbing check 2026-05-15:
   water-surface include changed, also deleted `.godot/imported/underwater.glsl-*`
   and `.godot/imported/wet_compositor.glsl-*` generated artifacts.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
   The import process returned non-zero in this workspace while still
   regenerating shader bytecode; the console output also contained unrelated
   editor/plugin cleanup noise.
@@ -659,7 +659,7 @@ Follow-up shader import/plumbing check 2026-05-15:
   non-zero waterline SPIR-V bytecode. The temporary diagnostic script was
   removed after use.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - The crash smoke exercised the `WL Inspect` path with
   `external_source_color_valid=true`, `external_source_depth_valid=true`,
   `external_source_valid=true`, `binary_receiver_mask=true`,
@@ -683,11 +683,11 @@ Follow-up final-mask visualization 2026-05-15:
 - Deleted `.godot/imported/waterline_probe.glsl-*.res` and
   `.godot/imported/waterline_probe.glsl-*.md5`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
   The import process again returned non-zero with the same editor/plugin cleanup
   noise, while regenerating the waterline shader artifact.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - The waterline smoke exited successfully and again reported valid receiver
   source color/depth buffers, binary receiver mask enabled, receiver refraction
   disabled, and advanced waterline feature flags off.
@@ -713,7 +713,7 @@ Follow-up replacement inspection workflow 2026-05-15:
   debug mode 14 after switching to replacement mode; the smoke script was then
   adjusted and rerun.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - The smoke exited successfully. Both phases reported valid receiver
   source color/depth buffers, binary receiver mask enabled, receiver refraction
   disabled, and advanced waterline feature flags off.
@@ -728,7 +728,7 @@ Follow-up replacement inspection workflow 2026-05-15:
   compositor receives debug mode 14 for `WL Inspect`, debug mode 0 for
   `WL Replace`, and receiver source mode 1 for both phases.
 - Reran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - The rerun exited successfully. No shader files changed for the perf/smoke
   guard, so no shader cache clear/import was required.
 
@@ -753,7 +753,7 @@ Follow-up receiver source resolution/latency 2026-05-15:
   source is not full resolution for the current dispatch size or if the reported
   receiver source frame age is outside `0..1`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - The smoke exited successfully with `source_size=(1920, 1080)`,
   `dispatch_size=(1920, 1080)`, `quality_tier=2`, and
   `external_source_frame_age=1` in both `WL Inspect` and `WL Replace` phases.
@@ -789,11 +789,11 @@ Follow-up receiver optical quality pass 2026-05-15:
 - Deleted `.godot/imported/waterline_probe.glsl-*.res` and
   `.godot/imported/waterline_probe.glsl-*.md5`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - Launched Ocean Lab interactively:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 - The smoke exited successfully with the optical switches active, advanced
   waterline underwater feature flags still off, receiver refraction still off,
   and the receiver source path still full-resolution.
@@ -813,11 +813,11 @@ Follow-up receiver foreground-occlusion fix 2026-05-15:
 - Deleted `.godot/imported/waterline_probe.glsl-*.res` and
   `.godot/imported/waterline_probe.glsl-*.md5`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - Launched Ocean Lab interactively:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 
 Follow-up receiver terrain-occlusion fix 2026-05-15:
 
@@ -844,11 +844,11 @@ Follow-up receiver terrain-occlusion fix 2026-05-15:
 - Deleted `.godot/imported/waterline_probe.glsl-*.res` and
   `.godot/imported/waterline_probe.glsl-*.md5`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - Launched Ocean Lab interactively:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`
 
 Follow-up receiver ownership-mask stability fix 2026-05-15:
 
@@ -869,8 +869,8 @@ Follow-up receiver ownership-mask stability fix 2026-05-15:
 - Deleted `.godot/imported/waterline_probe.glsl-*.res` and
   `.godot/imported/waterline_probe.glsl-*.md5`.
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
 - Ran:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab_waterline_smoke.tscn`
 - Launched Ocean Lab interactively:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_ocean_lab.tscn`
+  `<godot-executable> --path <project-path> res://tests/visual/test_ocean_lab.tscn`

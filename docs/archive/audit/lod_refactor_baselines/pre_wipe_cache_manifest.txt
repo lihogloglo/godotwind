@@ -1,6 +1,6 @@
 LOD Refactor B-Wide — Pre-Wipe Cache Manifest
 Captured: 2026-04-09 (Phase A baseline)
-Cache path: C:/Users/metzo/Documents/Godotwind/cache/models/
+Cache path: C:/Users/<user>/Documents/Godotwind/cache/models/
 
 ========================================
 SUMMARY

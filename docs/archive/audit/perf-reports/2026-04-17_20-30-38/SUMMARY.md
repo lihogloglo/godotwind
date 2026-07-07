@@ -3,7 +3,7 @@
 **Branch:** `perf/distant-rendering-2026-04-17`
 **Commits covered:** `8f7d6f9..cdc73f4` (phase 3-7 refactor + handoff commits). Autobench harness itself committed at `392b13d`.
 **Driver:** `claude` (via autonomous-perf-audit prompt in `#audit`).
-**Rules followed:** real-renderer only (`D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path ...`, NOT `--headless`). No visual auto-capture. No patches — verification only. Pre-existing whitelists (shutdown sig 11, 9 paging-kernel test failures) respected.
+**Rules followed:** real-renderer only (`<godot-executable> --path ...`, NOT `--headless`). No visual auto-capture. No patches — verification only. Pre-existing whitelists (shutdown sig 11, 9 paging-kernel test failures) respected.
 
 ## Pass/Fail matrix
 

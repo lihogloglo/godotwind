@@ -44,7 +44,7 @@ memory.
 Use the documented local binary when a visual launch is appropriate:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind <scene-or-test-path>
+<godot-executable> --path <project-path> <scene-or-test-path>
 ```
 
 If a C# file changed, run `dotnet build Godotwind.sln` before launching Godot.
@@ -60,7 +60,7 @@ reimport/recompile:
 
 - For imported compute shaders (`RDShaderFile`, usually `.glsl`), delete the
   matching `.godot/imported/<shader-name>-*.res` and `.md5` files, then run:
-  `D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind --import`
+  `<godot-executable> --path <project-path> --import`
 - For visual `.gdshader` / `.gdshaderinc` changes, clear the relevant
   `.godot/shader_cache/` entries if the edit appears stale, then relaunch the
   test scene.
@@ -303,7 +303,7 @@ Ground truth lives in `docs/STATUS.md`. Don't duplicate here. When in doubt abou
 ## Testing (gdUnit4)
 
 - **Framework:** gdUnit4 v6.1.2 (`addons/gdunit4/`)
-- **Run all tests:** `"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/run_tests.tscn`
+- **Run all tests:** `"<godot-executable>" --path "<project-path>" res://tests/run_tests.tscn`
 - **Exit code:** 0 = all pass, non-zero = failures
 - Opens a window briefly (headless doesn't resolve `class_name` types)
 - **Test directories:**

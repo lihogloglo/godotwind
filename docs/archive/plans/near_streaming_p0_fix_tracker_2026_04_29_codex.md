@@ -240,14 +240,14 @@ Each step must pass:
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --headless --path D:/Gamedev/Godotwind/godotwind --quit
+<godot-executable> --headless --path <project-path> --quit
 ```
 
 Result:
 
 - Crashed after roughly 175 seconds.
 - Crash path: `model_loader.gd:_evict_if_over_budget`.
-- Log: `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot2026-04-29T19.55.13.log`
+- Log: `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot2026-04-29T19.55.13.log`
 
 ### 2026-04-29 Eviction Bridge Smoke
 
@@ -256,7 +256,7 @@ Status: diagnostic route completed; shutdown failed
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=eviction_bridge_probe_2026_04_29_codex --stress-duration=75 --stress-route=dense-loop
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=eviction_bridge_probe_2026_04_29_codex --stress-duration=75 --stress-route=dense-loop
 ```
 
 Result:
@@ -277,9 +277,9 @@ Result:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_eviction_bridge_probe_2026_04_29_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_eviction_bridge_probe_2026_04_29_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_eviction_bridge_probe_2026_04_29_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_eviction_bridge_probe_2026_04_29_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_eviction_bridge_probe_2026_04_29_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_eviction_bridge_probe_2026_04_29_codex.csv`
 
 Interpretation:
 
@@ -301,7 +301,7 @@ Change under test:
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=quit_cleanup_probe_2026_04_29_codex --stress-duration=20 --stress-route=dense-loop
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=quit_cleanup_probe_2026_04_29_codex --stress-duration=20 --stress-route=dense-loop
 ```
 
 Result:
@@ -318,9 +318,9 @@ Result:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_quit_cleanup_probe_2026_04_29_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_quit_cleanup_probe_2026_04_29_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_quit_cleanup_probe_2026_04_29_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_quit_cleanup_probe_2026_04_29_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_quit_cleanup_probe_2026_04_29_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_quit_cleanup_probe_2026_04_29_codex.csv`
 
 Interpretation:
 
@@ -337,7 +337,7 @@ autoload exit
 Commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=final_autoload_exit_probe_2026_04_29_codex --stress-duration=5 --stress-route=dense-loop
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=final_autoload_exit_probe_2026_04_29_codex --stress-duration=5 --stress-route=dense-loop
 ```
 
 Result:
@@ -363,9 +363,9 @@ Result:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_final_autoload_exit_probe_2026_04_29_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot.log`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/logs/crash_report.txt`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_final_autoload_exit_probe_2026_04_29_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot.log`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/logs/crash_report.txt`
 
 Interpretation:
 
@@ -387,7 +387,7 @@ Reviewer request:
 Commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=1
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=1
 ```
 
 Result:
@@ -421,8 +421,8 @@ Result:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot.log`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/logs/crash_report.txt`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot.log`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/logs/crash_report.txt`
 
 Interpretation:
 
@@ -450,8 +450,8 @@ Changes:
 Verification commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=handle_slice_2026_04_29_codex --stress-duration=3 --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=handle_slice_2026_04_29_codex --stress-duration=3 --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -509,8 +509,8 @@ Changes:
 Verification commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=handle_eviction_active_2026_04_30_codex --stress-duration=20 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=handle_eviction_active_2026_04_30_codex --stress-duration=20 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -533,9 +533,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_handle_eviction_active_2026_04_30_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_handle_eviction_active_2026_04_30_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_handle_eviction_active_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_handle_eviction_active_2026_04_30_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_handle_eviction_active_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_handle_eviction_active_2026_04_30_codex.csv`
 
 Next:
 
@@ -556,7 +556,7 @@ Purpose:
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=handle_eviction_active_east_2026_04_30_codex --stress-duration=45 --stress-route=east --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=handle_eviction_active_east_2026_04_30_codex --stress-duration=45 --stress-route=east --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -580,9 +580,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_handle_eviction_active_east_2026_04_30_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_handle_eviction_active_east_2026_04_30_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_handle_eviction_active_east_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_handle_eviction_active_east_2026_04_30_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_handle_eviction_active_east_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_handle_eviction_active_east_2026_04_30_codex.csv`
 
 Interpretation:
 
@@ -597,7 +597,7 @@ Status: user-visible pass
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 Result:
@@ -620,7 +620,7 @@ Status: script/runtime smoke passed; native finalization crash still known
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
 ```
 
 Result:
@@ -644,8 +644,8 @@ Status: startup did not crash within bounded probe
 Command:
 
 ```powershell
-$godot='D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe'
-$proj='D:/Gamedev/Godotwind/godotwind'
+$godot='<godot-executable>'
+$proj='<project-path>'
 $p = Start-Process -FilePath $godot -ArgumentList @('--path',$proj,'scenes/Godotwind.tscn') -PassThru -WindowStyle Hidden
 $exited = $p.WaitForExit(45000)
 if (-not $exited) { Stop-Process -Id $p.Id -Force }
@@ -679,8 +679,8 @@ Changes:
 Verification commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=p03_static_prepare_payload_selector_2026_04_30_codex --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=p03_static_prepare_payload_selector_2026_04_30_codex --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -709,9 +709,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_static_prepare_payload_selector_2026_04_30_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_static_prepare_payload_selector_2026_04_30_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_static_prepare_payload_selector_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_static_prepare_payload_selector_2026_04_30_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_static_prepare_payload_selector_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_static_prepare_payload_selector_2026_04_30_codex.csv`
 
 Interpretation:
 
@@ -736,8 +736,8 @@ Changes:
 Verification commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=p03_child_attach_payload_selector_2026_04_30_codex --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --disable-world-streaming --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision --quit-after-ready=0.5
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=p03_child_attach_payload_selector_2026_04_30_codex --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -774,9 +774,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_child_attach_payload_selector_2026_04_30_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_child_attach_payload_selector_2026_04_30_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_child_attach_payload_selector_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_child_attach_payload_selector_2026_04_30_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_child_attach_payload_selector_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_child_attach_payload_selector_2026_04_30_codex.csv`
 
 Interpretation:
 
@@ -800,7 +800,7 @@ Context:
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=p03_static_prepare_after_child_backout_dense90_2026_04_30_codex --stress-duration=90 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=p03_static_prepare_after_child_backout_dense90_2026_04_30_codex --stress-duration=90 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -821,9 +821,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_static_prepare_after_child_backout_dense90_2026_04_30_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_static_prepare_after_child_backout_dense90_2026_04_30_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_static_prepare_after_child_backout_dense90_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_static_prepare_after_child_backout_dense90_2026_04_30_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_static_prepare_after_child_backout_dense90_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_static_prepare_after_child_backout_dense90_2026_04_30_codex.csv`
 
 Interpretation:
 
@@ -847,7 +847,7 @@ Context:
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=p03_static_prepare_after_child_backout_east60_2026_04_30_codex --stress-duration=60 --stress-route=east --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=p03_static_prepare_after_child_backout_east60_2026_04_30_codex --stress-duration=60 --stress-route=east --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -870,9 +870,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_static_prepare_after_child_backout_east60_2026_04_30_codex.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_static_prepare_after_child_backout_east60_2026_04_30_codex.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_static_prepare_after_child_backout_east60_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_p03_static_prepare_after_child_backout_east60_2026_04_30_codex.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_p03_static_prepare_after_child_backout_east60_2026_04_30_codex.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_p03_static_prepare_after_child_backout_east60_2026_04_30_codex.csv`
 
 Interpretation:
 
@@ -936,8 +936,8 @@ Verification commands:
 
 ```powershell
 git diff --check
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=static_descriptor_slice_2026_04_30_coder --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --quit-after-ready=20 --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=static_descriptor_slice_2026_04_30_coder --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --quit-after-ready=20 --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -982,12 +982,12 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_static_descriptor_slice_2026_04_30_coder.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_static_descriptor_slice_2026_04_30_coder.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_static_descriptor_slice_2026_04_30_coder.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_descriptor_rid_cleanup_2026_04_30_coder.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_descriptor_rid_cleanup_2026_04_30_coder.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_descriptor_rid_cleanup_2026_04_30_coder.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_static_descriptor_slice_2026_04_30_coder.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_static_descriptor_slice_2026_04_30_coder.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_static_descriptor_slice_2026_04_30_coder.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_descriptor_rid_cleanup_2026_04_30_coder.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_descriptor_rid_cleanup_2026_04_30_coder.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_descriptor_rid_cleanup_2026_04_30_coder.csv`
 
 Interpretation:
 
@@ -1015,8 +1015,8 @@ Changes:
 Verification commands:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --quit-after-ready=20 --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --bench-stress=child_attach_diag_dense_2026_04_30_coder --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --quit-after-ready=20 --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --bench-stress=child_attach_diag_dense_2026_04_30_coder --stress-duration=5 --stress-route=dense-loop --disable-jolt-attach --disable-phase-f-prereg --disable-cell-static-collision
 ```
 
 Results:
@@ -1040,9 +1040,9 @@ Results:
 
 Artifacts:
 
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_child_attach_diag_dense_2026_04_30_coder.json`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_child_attach_diag_dense_2026_04_30_coder.csv`
-- `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_child_attach_diag_dense_2026_04_30_coder.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_summary_child_attach_diag_dense_2026_04_30_coder.json`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_events_child_attach_diag_dense_2026_04_30_coder.csv`
+- `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/stress_child_attach_diag_dense_2026_04_30_coder.csv`
 
 Interpretation:
 

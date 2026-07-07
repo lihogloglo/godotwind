@@ -347,17 +347,17 @@ Target:
 
 Files touched or referenced in this research (absolute paths):
 
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/reference_instantiator.gd` — the main-thread instantiate bottleneck
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/native_streaming_manager.gd` — the streaming loop
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/cell_manager.gd` — the per-cell FSM + add_child loop
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/static_object_renderer.gd` — the RS-direct fast path (canonical pattern today)
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/prototype_registry.gd` — world-scoped MultiMesh batching
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/object_paging.gd` — HLOD runtime merger (not NEAR)
-- `D:/Gamedev/Godotwind/godotwind/src/core/world/distance_utils.gd` — NEAR_END / MID_END constants
-- `D:/Gamedev/Godotwind/godotwind/docs/plans/streaming_stutter_2026_04_25.md` + `D:/Gamedev/Godotwind/godotwind/docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md` — the active plan + audit this research informs
-- `D:/Gamedev/Godotwind/godotwind/inspos/openmw/apps/openmw/mwworld/cellpreloader.cpp` — canonical OpenMW preload pipeline
-- `D:/Gamedev/Godotwind/godotwind/inspos/openmw/apps/openmw/mwworld/scene.cpp` — `preloadCells`, `changeCellGrid`, `loadCell`
-- `D:/Gamedev/Godotwind/godotwind/inspos/openmw/apps/openmw/mwrender/objectpaging.cpp` — OpenMW chunk merge (HLOD, not NEAR)
+- `<project-path>/src/core/world/reference_instantiator.gd` — the main-thread instantiate bottleneck
+- `<project-path>/src/core/world/native_streaming_manager.gd` — the streaming loop
+- `<project-path>/src/core/world/cell_manager.gd` — the per-cell FSM + add_child loop
+- `<project-path>/src/core/world/static_object_renderer.gd` — the RS-direct fast path (canonical pattern today)
+- `<project-path>/src/core/world/prototype_registry.gd` — world-scoped MultiMesh batching
+- `<project-path>/src/core/world/object_paging.gd` — HLOD runtime merger (not NEAR)
+- `<project-path>/src/core/world/distance_utils.gd` — NEAR_END / MID_END constants
+- `<project-path>/docs/plans/streaming_stutter_2026_04_25.md` + `<project-path>/docs/audit/godot_46_near_streaming_aaa_audit_2026_04_29_codex.md` — the active plan + audit this research informs
+- `<project-path>/inspos/openmw/apps/openmw/mwworld/cellpreloader.cpp` — canonical OpenMW preload pipeline
+- `<project-path>/inspos/openmw/apps/openmw/mwworld/scene.cpp` — `preloadCells`, `changeCellGrid`, `loadCell`
+- `<project-path>/inspos/openmw/apps/openmw/mwrender/objectpaging.cpp` — OpenMW chunk merge (HLOD, not NEAR)
 
 Sources (external):
 

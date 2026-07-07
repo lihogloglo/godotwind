@@ -11,8 +11,8 @@
 ## 0. Prerequisites
 
 - On branch `refactor/lod-b-wide` (already checked out by `@lods` in Phase A)
-- Godot 4.6 Mono available: `"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe"`
-- Cache at `C:/Users/metzo/Documents/Godotwind/cache/models/` contains 5172 `.res` files (verified via `pre_wipe_cache_manifest.txt`)
+- Godot 4.6 Mono available: `"<godot-executable>"`
+- Cache at `C:/Users/<user>/Documents/Godotwind/cache/models/` contains 5172 `.res` files (verified via `pre_wipe_cache_manifest.txt`)
 - **Do NOT rebake** before running the baseline. The current buggy cache IS the baseline we want to capture. Phase D rebakes everything with the new engine pipeline, and we compare against the current state.
 - The test scene is `tests/visual/test_lod_baseline.tscn`. The script is `tests/visual/test_lod_baseline.gd`.
 
@@ -47,8 +47,8 @@ There are two equivalent paths:
 **Option A — CLI launch with default target (`x_ex_vivec_h_01_nif.res`):**
 
 ```bash
-"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-    --path "D:/Gamedev/Godotwind/godotwind" \
+"<godot-executable>" \
+    --path "<project-path>" \
     res://tests/visual/test_lod_baseline.tscn
 ```
 
@@ -161,13 +161,13 @@ Unchanged from previous versions.
 
 ```bash
 # v1 (removed 2026-04-14, no longer works):
-"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-    --path "D:/Gamedev/Godotwind/godotwind" \
+"<godot-executable>" \
+    --path "<project-path>" \
     res://src/tools/streaming_benchmark.tscn
 ```
 
 **After the run:**
-1. Find the most recent CSV in `C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/`
+1. Find the most recent CSV in `C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/`
 2. Copy it to `docs/audit/lod_refactor_baselines/baseline_perf.csv`
 
 **Critical per memory `feedback_headless_framerates.md`:** do NOT run headless. Real-renderer only.

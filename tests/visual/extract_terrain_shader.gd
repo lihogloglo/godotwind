@@ -59,17 +59,9 @@ func _ready() -> void:
 		file.close()
 		print("SUCCESS: Saved %d chars to %s" % [shader_code.length(), output_path])
 	else:
-		# Try absolute path
-		var abs_path := "D:/Gamedev/Godotwind/godotwind/docs/audit/terrain3d_internal_shader.gdshader"
-		file = FileAccess.open(abs_path, FileAccess.WRITE)
-		if file:
-			file.store_string(shader_code)
-			file.close()
-			print("SUCCESS: Saved %d chars to %s" % [shader_code.length(), abs_path])
-		else:
-			# Print to stdout as fallback
-			print("=== SHADER CODE START ===")
-			print(shader_code)
-			print("=== SHADER CODE END ===")
+		# Print to stdout as fallback
+		print("=== SHADER CODE START ===")
+		print(shader_code)
+		print("=== SHADER CODE END ===")
 
 	get_tree().quit(0)

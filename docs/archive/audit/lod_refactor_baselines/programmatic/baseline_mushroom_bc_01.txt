@@ -4,7 +4,7 @@ Cache file: f_flora_bc_mushroom_01_nif.res
 Output label: baseline_mushroom_bc_01
 Branch: refactor/lod-b-wide (Phase A baseline)
 
-Loading: C:\Users\metzo/Documents/Godotwind/cache/models/f_flora_bc_mushroom_01_nif.res
+Loading: C:\Users\<user>/Documents/Godotwind/cache/models/f_flora_bc_mushroom_01_nif.res
 Format detection: MINIMAL (LOD0 only, no sibling nodes, no embedded chain — small mesh skipped LOD gen)
 
 Per-LOD summary (aggregated across all MeshInstance3D nodes with the matching suffix):

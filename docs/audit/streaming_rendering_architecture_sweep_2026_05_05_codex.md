@@ -532,7 +532,7 @@ The next pass should be runtime, not another static audit. It should use either 
 Suggested command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 Suggested measurements:

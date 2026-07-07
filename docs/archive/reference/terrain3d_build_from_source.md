@@ -40,7 +40,7 @@ Without tessellation, the only alternative for terrain deformation is an overlay
 
 - **Repository:** https://github.com/TokisanGames/Terrain3D
 - **Branch used:** `1.1-godot4.4` (v1.1.0-dev)
-- **Local source (if still present):** `D:/Gamedev/Terrain3D/src/`
+- **Local source (if still present):** `<terrain3d-source>/src/`
 - **Build system:** SCons (GDExtension)
 - **Output DLLs:** `addons/terrain_3d/bin/libterrain.windows.{debug,release}.x86_64.dll`
 - **Docs:** https://terrain3d.readthedocs.io
@@ -116,7 +116,7 @@ Terrain3D v1.1+ crashes in `_grab_camera()` if no Camera3D exists in the viewpor
 
 After reverting code back to v1.0.1 style, terrain was STILL broken until:
 1. Godot was fully quit (DLLs load at startup)
-2. Terrain cache was cleared (`C:/Users/metzo/Documents/Godotwind/cache/terrain/`)
+2. Terrain cache was cleared (`C:/Users/<user>/Documents/Godotwind/cache/terrain/`)
 3. Godot was relaunched (fresh DLL load)
 4. Terrain was rebaked
 
@@ -286,8 +286,8 @@ scons platform=windows target=template_release arch=x86_64
 scons dev_build=yes
 
 # 6. Copy DLLs to Godotwind
-cp bin/libterrain.windows.debug.x86_64.dll D:/Gamedev/Godotwind/godotwind/addons/terrain_3d/bin/
-cp bin/libterrain.windows.release.x86_64.dll D:/Gamedev/Godotwind/godotwind/addons/terrain_3d/bin/
+cp bin/libterrain.windows.debug.x86_64.dll <project-path>/addons/terrain_3d/bin/
+cp bin/libterrain.windows.release.x86_64.dll <project-path>/addons/terrain_3d/bin/
 ```
 
 ### Critical: godot-cpp Version Matching

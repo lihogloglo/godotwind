@@ -359,7 +359,7 @@ For gameplay verification after fixes:
 
 ```powershell
 dotnet build Godotwind.sln
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 Then interactively verify a real exterior door, a rushed approach before preload finishes, an interior exit door, and repeated enter/exit cycles. The existing `--interior-door-smoke` and `--interior-door-smoke-rush` commands are useful crash/regression smokes, but they should not replace an interactive pilot pass for final gameplay acceptance.

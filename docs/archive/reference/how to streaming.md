@@ -225,7 +225,7 @@ that should never touch the scene tree.
 Command run:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --headless --path D:/Gamedev/Godotwind/godotwind --quit
+<godot-executable> --headless --path <project-path> --quit
 ```
 
 Result: the project launched, streamed for roughly 175 seconds, then crashed
@@ -234,7 +234,7 @@ with SIGSEGV.
 Log:
 
 ```text
-C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot2026-04-29T19.55.13.log
+C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/logs/godot2026-04-29T19.55.13.log
 ```
 
 Crash backtrace:
@@ -394,7 +394,7 @@ acceptable final fix.
 Launch interactively:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 Acceptance:
@@ -1289,7 +1289,7 @@ dotnet build Godotwind.sln --configfile NuGet.Config
 2. Launch interactively:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 3. Manually traverse dense exterior cells for 10 minutes.

@@ -35,7 +35,7 @@
 ##   5. Free-cam with WASD + mouse to visually inspect the side-by-side LOD variants
 ##
 ## CLI invocation:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/visual/test_lod_baseline.tscn
+##   "<godot-executable>" --path "<project-path>" res://tests/visual/test_lod_baseline.tscn
 
 extends Node3D
 

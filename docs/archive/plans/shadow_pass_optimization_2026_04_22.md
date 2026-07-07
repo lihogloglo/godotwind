@@ -266,18 +266,18 @@ Key Godot PSSM facts relevant to this optimization, confirmed during Session 2 r
 
 ```bash
 # Baseline (already run, data in autobench_baseline_pre_shadow_optim)
-"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-  --path "D:/Gamedev/Godotwind/godotwind" \
+"<godot-executable>" \
+  --path "<project-path>" \
   --bench-auto=baseline_pre_shadow_optim --start-cell=-2,-9
 
 # Bench-ladder shadow ceiling — rerun this first in next session
-"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-  --path "D:/Gamedev/Godotwind/godotwind" \
+"<godot-executable>" \
+  --path "<project-path>" \
   --bench-ladder=shadow_ceiling --start-cell=-2,-9
 
 # Post-fix (Phase 3, after edits)
-"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-  --path "D:/Gamedev/Godotwind/godotwind" \
+"<godot-executable>" \
+  --path "<project-path>" \
   --bench-auto=p5_post_shadow_optim --start-cell=-2,-9
 ```
 

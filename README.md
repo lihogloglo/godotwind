@@ -33,8 +33,9 @@ Some gameplay systems (dialogs, books, grabbing objects Oblivion-style) have bar
 1. **Install Godot 4.6 Mono** (C# support required)
 2. **Install Terrain3D addon v1.0.1** — Download from [Terrain3D releases](https://github.com/TokisanGames/Terrain3D/releases/tag/v1.0.1), extract and copy the `addons/terrain_3d/` folder into your project's `addons/` directory. Enable via Project > Project Settings > Plugins.
 3. **Configure Morrowind path** — Run `src/tools/settings_tool.tscn`, click Auto-Detect or Browse
-4. **Prebake assets** — Run `src/tools/prebaking/prebaking_ui.tscn` to generate terrain, impostors, shore mask and to import Morrowind models / create LODs.
-5. **Run** — Open `scenes/Godotwind.tscn`
+4. **Prebake assets** — Run `src/tools/prebaking/prebaking_ui.tscn` to generate terrain, impostors, shore mask and to import Morrowind models / create LODs. Expect 10 minutes of baking at least.
+5. **Run** — Open `scenes/Godotwind.tscn` . First seconds might have a lower FPS, around 50 on my laptop, but it should climb up as soon as impostors have appeared on the island.
+6. **Enjoy** — You can fly around. Enter interiors. Play with the toggles. Marvel at the bugs. So many things to do ! 
 
 ## Controls
 
@@ -98,6 +99,3 @@ It would make sense to borrow a lot of good ideas from OpenMW as they already so
 - Strict typing in `src/core/`, relaxed in `src/tools/`
 - Use `Log.info("category", "message")` instead of `print()`
 - Test visually: run `scenes/Godotwind.tscn`, press `` ` `` for console
-
-
-## Contributing

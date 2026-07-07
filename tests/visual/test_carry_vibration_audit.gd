@@ -47,8 +47,8 @@
 ##     lag is not vibration, but it tells us the lerp is off)
 ##
 ## Run:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-##     --path "D:/Gamedev/Godotwind/godotwind" \
+##   "<godot-executable>" \
+##     --path "<project-path>" \
 ##     res://tests/visual/test_carry_vibration_audit.tscn
 ##
 ## WASD walks, mouse looks, E tap/hold. F1-F7 diagnostic toggles.

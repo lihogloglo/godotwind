@@ -626,8 +626,8 @@ Useful commands:
 
 ```powershell
 dotnet build Godotwind.sln
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind res://tests/visual/test_weather.tscn
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> res://tests/visual/test_weather.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 ## Recommended Priority

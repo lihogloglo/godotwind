@@ -17,12 +17,12 @@ activation, and meshes lazy until the world actually needs them.
 Command:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn -- --loading-baseline=first_playable --loading-cache-state=as_is --quit-after-ready=45
+<godot-executable> --path <project-path> scenes/Godotwind.tscn -- --loading-baseline=first_playable --loading-cache-state=as_is --quit-after-ready=45
 ```
 
 Output:
 
-`C:/Users/metzo/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/loading_baseline_first_playable_2026-06-18_15-10-28.json`
+`C:/Users/<user>/AppData/Roaming/Godot/app_userdata/Godotwind/benchmark_results/loading_baseline_first_playable_2026-06-18_15-10-28.json`
 
 Result:
 

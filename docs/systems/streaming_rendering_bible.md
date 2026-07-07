@@ -785,7 +785,7 @@ For any streaming/rendering/performance code change:
 Documented launch:
 
 ```powershell
-D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe --path D:/Gamedev/Godotwind/godotwind scenes/Godotwind.tscn
+<godot-executable> --path <project-path> scenes/Godotwind.tscn
 ```
 
 Phase 2B automated gates:

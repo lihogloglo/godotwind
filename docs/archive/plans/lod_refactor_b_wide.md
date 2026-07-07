@@ -218,7 +218,7 @@ Inventory of every file + function that participates in the LOD scheme. Compiled
 
 ### 3.2 Cache format
 
-`.res` files in `C:/Users/metzo/Documents/Godotwind/cache/models/` currently contain `MergedMesh_0_LOD1`, `_LOD2`, `_LOD3` as child nodes of the main mesh, each with their own `visibility_range_*` properties baked in. **4884 files total**, **217 of which** were re-baked during Session 0's abandoned Layer 1+2 attempt.
+`.res` files in `C:/Users/<user>/Documents/Godotwind/cache/models/` currently contain `MergedMesh_0_LOD1`, `_LOD2`, `_LOD3` as child nodes of the main mesh, each with their own `visibility_range_*` properties baked in. **4884 files total**, **217 of which** were re-baked during Session 0's abandoned Layer 1+2 attempt.
 
 After the refactor, `.res` files contain a single `MeshInstance3D` per mesh object with an `ArrayMesh` whose surfaces have `surface_lod_count > 0`. **Full cache wipe + rebake required** — the format is binary-incompatible with the old layout. This is an unavoidable one-time cost.
 
@@ -313,7 +313,7 @@ Entire function shrinks from 189 lines to ~30. `MeshOptimizer` GDExt is no longe
 
 One `MeshInstance3D` per mesh-bearing prototype node. `ArrayMesh` has `surface_get_lod_count(i) > 0` for any surface with more than `min_triangles_for_lod` triangles. `visibility_range_end = 500` on the `MeshInstance3D`. No sibling `_LODn` children.
 
-Cache wipe is mandatory at Phase B→C transition. `SettingsManager.get_cache_dir()` → `C:/Users/metzo/Documents/Godotwind/cache/models/` — user deletes via `rmdir /s /q` or equivalent, then full rebake via `prebaking_manager`.
+Cache wipe is mandatory at Phase B→C transition. `SettingsManager.get_cache_dir()` → `C:/Users/<user>/Documents/Godotwind/cache/models/` — user deletes via `rmdir /s /q` or equivalent, then full rebake via `prebaking_manager`.
 
 **Current cache state (captured 2026-04-09 as Phase A baseline fingerprint):** 5172 `.res` files, ~3.22 GB total, all files with mtime clustered in a single ~3 min window on 2026-04-08 22:23-22:26. Full manifest in `docs/audit/lod_refactor_baselines/pre_wipe_cache_manifest.txt`. State at capture time is ambiguous between "Session 0 Layer 1+2 partial-rebake experimental pipeline" and "post-Session 0 full rebake on reverted HEAD pipeline" — mtimes don't distinguish. The baseline captures the current observable visual + perf state regardless, which is the only thing that matters for before/after comparison.
 
@@ -429,7 +429,7 @@ Each phase is session-scoped. User approval gate before each phase starts. No ph
 All Phase B-G work happens on branch **`refactor/lod-b-wide`**. `master` stays clean and shippable.
 
 - **Before Phase B starts**: tag `master` as `pre-lod-refactor`. Rollback command is `git checkout pre-lod-refactor` + full rebake. 30 minutes of prep that saves days of "which commit was last good".
-- **Before Phase C cache wipe**: dump current `C:/Users/metzo/Documents/Godotwind/cache/models/` file count + cumulative size + filename manifest to `docs/audit/lod_refactor_baselines/pre_wipe_cache_manifest.txt`. Not the cache itself (5172 files, too large) but enough to verify a post-refactor rebake produces equivalent coverage.
+- **Before Phase C cache wipe**: dump current `C:/Users/<user>/Documents/Godotwind/cache/models/` file count + cumulative size + filename manifest to `docs/audit/lod_refactor_baselines/pre_wipe_cache_manifest.txt`. Not the cache itself (5172 files, too large) but enough to verify a post-refactor rebake produces equivalent coverage.
 - **Phase G closes by merging `refactor/lod-b-wide` → `master`** only after all Phase G exit criteria are met and the final visual + benchmark passes archived.
 
 ### Phase A.5 — NIF Collision Coordinate Fix (bundled pre-LOD-refactor, per `@roaster` msg 203)
@@ -589,7 +589,7 @@ Result: new-format meshes render correctly at all distances in Phase C intermedi
     - Rewrite `_cache_has_lods` to check `ArrayMesh.surface_get_lod_count(0) > 0` (new-format detection for targeted-rebake "is this model already baked with LODs?" heuristic)
     - Delete `_count_lod_nodes` / `_collect_lod_nodes_for_removal` / `_verify_no_lod_nodes_remain` (dead code once no one creates sibling LOD nodes)
 - Verification:
-    - Cache wipe: delete `C:/Users/metzo/Documents/Godotwind/cache/models/` contents (manifest captured in Phase A)
+    - Cache wipe: delete `C:/Users/<user>/Documents/Godotwind/cache/models/` contents (manifest captured in Phase A)
     - Full prebake run via `prebaking_manager` for the 217-model target list from Session 0 (`ex_hlaalu_canton_*`, `ex_velothi_*`, `ex_vivec_*`, `in_vivec_*`, `ex_t_*`, `ex_dwrv_*`, `ex_ashl_*`, `ex_ald_*`)
     - Interactive visual verification at Vivec Canton: walk up to a rebaked canton wall (NEAR tier, 0-150m) — check for missing faces on the up-close geometry. Step back to 200-400m — confirm the MID-tier renders correctly via the fallback-fill + collapse path.
     - Existing runtime loads new-format cache files via the walker's base-case (LOD0 path) with no new code
@@ -945,7 +945,7 @@ Git: `master` at `b89a1f8` (unchanged), `pre-lod-refactor` tag at `b89a1f8`, `re
         - Added `const DU := preload("res://src/core/world/distance_utils.gd")` for the `lod_info` command's constants.
     - `src/tools/mid_tier_debugger.gd::_audit_mid_renderer`: `lod_rids` iteration removed, now spot-checks only the single `instance_rid`. `stats.lod_rids` hard-coded to 0 (stub for the display path at `~line 761`).
 
-8. **Unit test verification.** After every phase, re-ran `tests/run_tests.tscn` via `"D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/run_tests.tscn`. Final result: **35 test cases, 0 errors, 0 failures, exit code 0.** Includes the 2 new `test_importermesh_smoke` cases.
+8. **Unit test verification.** After every phase, re-ran `tests/run_tests.tscn` via `"<godot-executable>" --path "<project-path>" res://tests/run_tests.tscn`. Final result: **35 test cases, 0 errors, 0 failures, exit code 0.** Includes the 2 new `test_importermesh_smoke` cases.
 
 #### Files in working tree at session end (all on `refactor/lod-b-wide` branch)
 
@@ -981,7 +981,7 @@ Git: `master` at `b89a1f8` (unchanged), `pre-lod-refactor` tag at `b89a1f8`, `re
 **Phase A.5 (NIF collision coordinate fix bundle) — still pending.** Per `@roaster` msg 203 the collision fix should land on `refactor/lod-b-wide` before the first interactive visual pass. Not yet executed. Owner TBD.
 
 **Phase G — full rebake, perf validation, doc sync — REQUIRES USER-PILOTED SESSION.** Specifically:
-1. Delete `C:/Users/metzo/Documents/Godotwind/cache/models/` (5172 files ~3.22 GB)
+1. Delete `C:/Users/<user>/Documents/Godotwind/cache/models/` (5172 files ~3.22 GB)
 2. Run `prebaking_manager` full rebake via `src/tools/prebaking/prebaking_ui.tscn` — ~10-20 min
 3. Rerun `tests/visual/test_lod_baseline.tscn` against the 4 baseline targets (`x_ex_vivec_h_01_nif`, `f_flora_tree_01_nif`, `f_flora_bc_mushroom_01_nif`, `d_ex_redoran_hut_01_a_nif`). Expect:
     - H8 PASS (no dropped sub-meshes — the Vivec canton 4-of-5-dropped bug fixes itself)
@@ -1010,7 +1010,7 @@ No phase ran into the architectural cliffs the plan flagged as MEDIUM/HIGH risk 
 
 ### 2026-04-10 — Session 2.5 (Phase G kickoff — full rebake + structural verification + main-scene crash observation)
 
-Direct continuation of Session 2, same day. `@user` cleared `C:/Users/metzo/Documents/Godotwind/cache/models/` manually, asked for the next steps, then delegated the full-rebake execution back to `@lods` ("launch the headless yourself and check the log").
+Direct continuation of Session 2, same day. `@user` cleared `C:/Users/<user>/Documents/Godotwind/cache/models/` manually, asked for the next steps, then delegated the full-rebake execution back to `@lods` ("launch the headless yourself and check the log").
 
 #### What I did
 
@@ -1018,7 +1018,7 @@ Direct continuation of Session 2, same day. `@user` cleared `C:/Users/metzo/Docu
 2. **Ran the full rebake via the new wrapper.** Result:
     - **4884 baked, 0 skipped, 64 failed**, 154 seconds (~32 models/sec)
     - The 64 failures exactly match the pre-existing count from `docs/audit/NIF_UNSUPPORTED.md` (the `NIFReader: Invalid string length 1399410176 ... Unknown record type '' ... parser out of sync` family — the `0x53694E00` 4-byte under-read documented in the NIF parser audit). **Zero LOD-refactor-induced regressions in the bake path.**
-    - Final cache: **4884 `.res` files, 2.9 GB** at `C:/Users/metzo/Documents/Godotwind/cache/models/`
+    - Final cache: **4884 `.res` files, 2.9 GB** at `C:/Users/<user>/Documents/Godotwind/cache/models/`
     - Zero `LODConfigurator` errors, zero parse errors, zero unexpected bake failures.
 3. **Patched `tests/visual/test_lod_baseline.gd`** — the existing scene tried to introspect `ArrayMesh.surface_get_lod_count(0)` which isn't in the 4.6 scripting API, so the post-refactor detection branch was dead. Replaced that path with a walk of all `MeshInstance3D` nodes counting how many carry the `has_lod_chain` meta stamped by `nif_converter._generate_lod_chain`. Added two tracking fields:
     - `_embedded_chain_count: int`
@@ -1038,7 +1038,7 @@ Direct continuation of Session 2, same day. `@user` cleared `C:/Users/metzo/Docu
 
 #### Signal 11 crash observations (open investigation — do NOT commit without resolving)
 
-**Last ~15 events before the crash** (lines 849-879 of `C:\Users\metzo\AppData\Local\Temp\claude\D--Gamedev-Godotwind-godotwind\<session>\tasks\bzqh36xiy.output`):
+**Last ~15 events before the crash** (lines 849-879 of `C:\Users\<user>\AppData\Local\Temp\claude\D--Gamedev-Godotwind-godotwind\<session>\tasks\bzqh36xiy.output`):
 
 ```
 [INFO] [impostors] Benchmark: 63135 impostors, 497 tex layers, 0 pending cells, mm_instances=63135

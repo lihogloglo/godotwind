@@ -26,7 +26,8 @@ var _multi_part_models: Array[String] = [
 func test_multi_surface_materials() -> void:
 	var models_path := SettingsManager.get_models_path() if SettingsManager else ""
 	if models_path.is_empty():
-		models_path = "C:/Users/metzo/Documents/Godotwind/cache/models/"
+		print("  SKIP (no models cache configured — SettingsManager unavailable)")
+		return
 
 	var total_checked := 0
 	var total_broken := 0

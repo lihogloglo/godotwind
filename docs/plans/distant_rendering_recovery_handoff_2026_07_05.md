@@ -135,7 +135,7 @@ really Phase 3).
 ## Verification protocol (hard rules learned today)
 
 - Ladder command (from repo root):
-  `& "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://scenes/Godotwind.tscn -- --bench-ladder=<stamp> --bench-ladder-start-rung=2 --bench-ladder-max-rungs=4`
+  `& "<godot-executable>" --path "<project-path>" res://scenes/Godotwind.tscn -- --bench-ladder=<stamp> --bench-ladder-start-rung=2 --bench-ladder-max-rungs=4`
   → rungs 2-3, ~4.5 min, auto-quits, writes
   `user://benchmark_results/ladder_<stamp>/bench_ladder.json`.
 - **NEVER run a second Godot process (gdUnit included) while a benchmark

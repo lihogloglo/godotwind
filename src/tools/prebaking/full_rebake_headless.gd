@@ -9,7 +9,7 @@
 ## Pass --impostor-model=res/path.nif one or more times for a curated bake.
 ##
 ## Usage:
-##   "Godot" --path "D:/Gamedev/Godotwind/godotwind" res://src/tools/prebaking/full_rebake_headless.tscn -- --impostors-only
+##   "Godot" --path "<project-path>" res://src/tools/prebaking/full_rebake_headless.tscn -- --impostors-only
 @warning_ignore("untyped_declaration")
 extends Node
 

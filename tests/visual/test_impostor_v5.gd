@@ -15,7 +15,7 @@
 ##   ESC / ui_cancel  — release mouse / quit
 ##
 ## Launch:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/visual/test_impostor_v5.tscn
+##   "<godot-executable>" --path "<project-path>" res://tests/visual/test_impostor_v5.tscn
 ## Smoke:
 ##   ... res://tests/visual/test_impostor_v5.tscn -- --impostor-test-smoke
 extends Node3D

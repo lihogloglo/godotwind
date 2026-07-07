@@ -9,7 +9,7 @@
 ##
 ## Automated: camera moves on rails, logs everything. User confirms visually.
 ## Launch: F6 on the .tscn, or CLI:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/visual/test_lod_bwide_verify.tscn
+##   "<godot-executable>" --path "<project-path>" res://tests/visual/test_lod_bwide_verify.tscn
 extends Node3D
 
 const DU := preload("res://src/core/world/distance_utils.gd")

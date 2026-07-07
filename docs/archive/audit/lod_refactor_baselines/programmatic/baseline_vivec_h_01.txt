@@ -4,7 +4,7 @@ Cache file: x_ex_vivec_h_01_nif.res
 Output label: baseline_vivec_h_01
 Branch: refactor/lod-b-wide (Phase A baseline)
 
-Loading: C:\Users\metzo/Documents/Godotwind/cache/models/x_ex_vivec_h_01_nif.res
+Loading: C:\Users\<user>/Documents/Godotwind/cache/models/x_ex_vivec_h_01_nif.res
 Format detection: OLD (sibling _LODn MeshInstance3D nodes, pre-refactor hand-rolled pipeline)
 
 Per-LOD summary (aggregated across all MeshInstance3D nodes with the matching suffix):

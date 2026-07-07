@@ -6,8 +6,8 @@
 ## SubViewport 3D output.
 ##
 ## Launch:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" \
-##     --path "D:/Gamedev/Godotwind/godotwind" \
+##   "<godot-executable>" \
+##     --path "<project-path>" \
 ##     res://tests/prebaking/test_impostor_baker_v3.tscn
 extends Node
 

@@ -7,7 +7,7 @@
 ## fires on the downstream record.
 ##
 ## Usage:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" \
+##   "<godot-executable>" --path "<project-path>" \
 ##     res://src/tools/nif_debug_dump.tscn
 ##
 ## Edit NIF_PATHS below to change which files get dumped. Auto-quits on completion.

@@ -16,7 +16,7 @@
 ## Output: benchmark CSV + per-frame RS instance counts in user://benchmark_results/
 ##
 ## Launch:
-##   "D:/Gamedev/Godot/Godot_v4.6-stable_mono_win64.exe" --path "D:/Gamedev/Godotwind/godotwind" res://tests/visual/test_hlod_benchmark.tscn
+##   "<godot-executable>" --path "<project-path>" res://tests/visual/test_hlod_benchmark.tscn
 
 extends Node3D
 

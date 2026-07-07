@@ -27,7 +27,21 @@ Implementation of this great project : https://github.com/2Retr0/GodotOceanWaves
 
 Our version has a few differences. Subsurface scattering, spray particles, clipmap LODs (and projected technique, which doesn't work great at the moment), refraction and reflection, above/underwater split camera, and buoyancy on top.
 
+Lots of things taken from this project too : https://github.com/Chrisknyfe/boujie_water_shader
+
 📄 Deep dive: [ocean.md](docs/systems/ocean.md)
+
+---
+
+### Character controller
+
+![Ocean](docs/images/fargoth.gif)
+
+Look at him go ! He seems so happy.
+
+Biped character controller is not rocket science in Godot, there are plenty of very good frameworks for this already. But Morrowind is a 2002 game so all the skeleton logic is borked to oblivion (see what I did there ?). Some bodyparts are just slapped on the bones, other are skinned (they deform). Everything is mirrored. Everything is wonky. 
+I wanted to do animation retargeting to use Mixamo animations but... no success so far. Maybe next time.
+
 
 ---
 

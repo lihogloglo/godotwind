@@ -4,7 +4,7 @@ Cache file: d_ex_redoran_hut_01_a_nif.res
 Output label: baseline_redoran_hut
 Branch: refactor/lod-b-wide (Phase A baseline)
 
-Loading: C:\Users\metzo/Documents/Godotwind/cache/models/d_ex_redoran_hut_01_a_nif.res
+Loading: C:\Users\<user>/Documents/Godotwind/cache/models/d_ex_redoran_hut_01_a_nif.res
 Format detection: OLD (sibling _LODn MeshInstance3D nodes, pre-refactor hand-rolled pipeline)
 
 Per-LOD summary (aggregated across all MeshInstance3D nodes with the matching suffix):
