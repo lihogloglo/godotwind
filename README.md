@@ -6,7 +6,7 @@
   <img src="docs/images/hero.jpg" width="800" alt="Morrowind in Godot">
 </p>
 
-An open-world RPG framework for Godot 4.6, using Morrowind as an example (and even then, it's not a faithful port, more like Morrowind if it was made in 2026).
+An open-world RPG framework for Godot 4.6, using Morrowind as an example (and even then, it's not a faithful port, more like Morrowind if it was made in 2026). Everything has been vibecoded : Opus, a little bix of Codex, and Fable more recently. I haven't written a line of code.
 
 > 🧪 **Want the fun stuff?** See [EXPERIMENTS.md](EXPERIMENTS.md) — a lab notebook of the little rendering & simulation experiments.
 
@@ -92,3 +92,6 @@ It would make sense to borrow a lot of good ideas from OpenMW as they already so
 - Strict typing in `src/core/`, relaxed in `src/tools/`
 - Use `Log.info("category", "message")` instead of `print()`
 - Test visually: run `scenes/Godotwind.tscn`, press `` ` `` for console
+
+
+## Contributing
