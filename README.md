@@ -1,6 +1,16 @@
 # Godotwind
 
+<p align="center">
+  <img src="docs/images/logo.png" width="320" alt="Godotwind logo">
+</p>
+
+<p align="center">
+  <img src="docs/images/hero.png" width="640" alt="Morrowind in Godot">
+</p>
+
 An open-world RPG framework for Godot 4.6, using Morrowind as an example (and even then, it's not a faithful port, more like Morrowind if it was made in 2026).
+
+> 🧪 **Want the fun stuff?** See [EXPERIMENTS.md](EXPERIMENTS.md) — a lab notebook of the little rendering & simulation experiments.
 
 The long-term goal: a general-purpose open-world RPG framework for Godot, where Morrowind is just one "mod" that implements abstract interfaces for terrain, NPCs, dialogue, inventory, and quests.
 
