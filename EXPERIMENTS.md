@@ -1,6 +1,6 @@
 # Godotwind — Lab Notebook
 
-Most of these started as "I wonder how X works" and ended with implementing X to find out. Expect rough edges.
+Most of these started as "I wonder how X works" and ended with implementing X to find out. Expect rough edges !
 
 
 ## Contents
@@ -38,7 +38,7 @@ Morrowind terrain is very smooth and very low-poly, so it needs to be used with 
 
 ### FFT ocean
 
-![Ocean](docs/images/ocean.gif)
+![Ocean](docs/images/ocean.jpg)
 
 Implementation of this great project : https://github.com/2Retr0/GodotOceanWaves/ 
 
@@ -48,20 +48,28 @@ Our version has a few differences. Subsurface scattering, spray particles, clipm
 
 ---
 
-### Flowing rivers
+### Finding rivers
 
-![Rivers](hydrology.jpg)
+![Rivers](docs/images/hydrology.jpg)
 
 Morrowind has just one plane of water for everything. Rivers, lakes, ocean = the same infinite plane.
 To fix this, we need a way to automatically categorize where rivers should be, where lakes are etc. Of course, this could be done by hand, but it's more fun to see how to do it algorithmically :) 
 
 ---
 
+### Flowing water
+
+![Rivers](docs/images/rivers.gif)
+
+Procedural planes with flow maps and buoyancy. Some objects stay, other float, their presence deforms the texture too. 
+
+---
+
 ### Wetness maps
 
-![Wetness](docs/images/wetness.gif)
+![Wetness](docs/images/wetness.jpg)
 
-<!-- Short note: surfaces darken/gloss when the tide or rain touches them -->
+Where objects touch the water, objects get darker and shinier. Also works on the terrain.
 
 📄 Deep dive: [wetness_system.md](docs/plans/wetness_system.md)
 
@@ -81,20 +89,29 @@ Heavily inspired by this great mod for OpenMW : https://www.nexusmods.com/morrow
 
 ---
 
-### Morrowind night sky
+### Distant lighting
 
-![Night sky](docs/images/night-sky.gif)
+![Night sky](docs/images/distantlighting.jpg)
 
-<!-- Short note -->
+Inspired by this PR for OpenMW  : https://gitlab.com/OpenMW/openmw/-/merge_requests/5212 
 
-📄 Deep dive: [morrowind_night_sky_2026_07_06.md](docs/plans/morrowind_night_sky_2026_07_06.md)
+Having distant cities being lit isn't impossible in Godot (clustered forward rendering).
+Super WIP so needs a lot of work still.
+
+---
+
+### Merged chunks
+
+![Night sky](docs/images/chunks.png)
+
+To display distant geometries, a classic trick is to get the engine to merge chunks of the static models (trees, buildings, the big stuff that will visible from far away). As we get closer, these chunks are then replaced by the respective LODs of the models.
 
 ---
 
 ### Octahedral impostors
 
-![Impostors](docs/images/impostors.gif)
+![Impostors](docs/images/impostors.jpg)
 
-<!-- Short note: single MultiMesh draw call per page for very distant landmarks -->
+For the very far away objects (1km and beyond), big objects are shown as impostors with their normal maps. These impostors are pre-rendered, and they load/render super fast.
 
 📄 Deep dive: [impostor_streaming_rendering.md](docs/systems/impostor_streaming_rendering.md)

@@ -5,7 +5,7 @@
 </p>
 
 <p align="center">
-  <img src="docs/images/hero.png" width="640" alt="Morrowind in Godot">
+  <img src="docs/images/hero.jpg" width="640" alt="Morrowind in Godot">
 </p>
 
 An open-world RPG framework for Godot 4.6, using Morrowind as an example (and even then, it's not a faithful port, more like Morrowind if it was made in 2026).
