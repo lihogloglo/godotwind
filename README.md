@@ -1,11 +1,9 @@
 # Godotwind
 
-<p align="center">
-  <img src="docs/images/logo.png" width="320" alt="Godotwind logo">
-</p>
+
 
 <p align="center">
-  <img src="docs/images/hero.jpg" width="640" alt="Morrowind in Godot">
+  <img src="docs/images/hero.jpg" width="800" alt="Morrowind in Godot">
 </p>
 
 An open-world RPG framework for Godot 4.6, using Morrowind as an example (and even then, it's not a faithful port, more like Morrowind if it was made in 2026).
@@ -18,6 +16,11 @@ The current goal : a nice laboratory to do many fun experiments and learn how ga
 
 **Current state:** World streaming and rendering are okay I guess. Character animations are still WIP, there's a character controller with IK and animation blending.
 Some gameplay systems (dialogs, books, grabbing objects Oblivion-style) have barely been started, while others (combat, quests) are not started.
+
+
+<p align="center">
+  <img src="docs/images/logo.png" width="320" alt="Godotwind logo">
+</p>
 
 ## Quick Start
 
