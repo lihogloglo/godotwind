@@ -6,9 +6,15 @@
   <img src="docs/images/hero.jpg" width="800" alt="Morrowind in Godot">
 </p>
 
-An open-world RPG framework for Godot 4.6, using Morrowind as an example (and even then, it's not a faithful port, more like Morrowind if it was made in 2026). Everything has been vibecoded : Opus, a little bix of Codex, and Fable more recently. I haven't written a line of code.
+An open-world RPG framework for Godot 4.6, using Morrowind as an example. Not a faithful port, more like Morrowind if it was made in 2026. 
+Everything has been vibecoded : Opus, a little bix of Codex, and Fable more recently. I haven't written a line of code.
+The goal was to see how well these frontier models could handle something quite ambitious (open world games architecture !) while being guided by someone who has just a surface knowledge of how these things work under the hood. 
+And also to provide something useful for the gamedev community, maybe. 
+My mind has been blown away AND I learned a thing or two so I'd call this whole project a success already. All mistakes are my own etc.
 
-> 🧪 **Want the fun stuff?** See [EXPERIMENTS.md](EXPERIMENTS.md) — a lab notebook of the little rendering & simulation experiments.
+Feel free to contribute or to scavenge what you find interesting.
+
+> 🧪 **Want the fun stuff?** See [EXPERIMENTS.md](EXPERIMENTS.md) — a notebook of the little rendering & simulation experiments.
 
 The long-term goal: a general-purpose open-world RPG framework for Godot, where Morrowind is just one "mod" that implements abstract interfaces for terrain, NPCs, dialogue, inventory, and quests.
 

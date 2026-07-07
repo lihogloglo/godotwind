@@ -43,7 +43,7 @@ To get a nice transition from the FFT Ocean and the shore, we transform the plan
 
 ### Terrain erosion shader
 
-![Erosion](docs/images/erosion.jpg)
+![Erosion](docs/images/erosion.gif)
 
 Implementation of this shader : https://www.shadertoy.com/view/wXcfWn 
 Morrowind terrain is very smooth and very low-poly, so it needs to be used with moderation.
