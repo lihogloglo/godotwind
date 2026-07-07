@@ -72,6 +72,13 @@ uniform float refraction_edge_guard_strength : hint_range(0.0, 1.0) = 0.0;
 uniform float refraction_weather_visibility : hint_range(0.0, 1.0) = 1.0;
 uniform float refraction_optical_fade_power : hint_range(0.25, 4.0) = 1.35;
 uniform float refraction_extinction_blur_lod : hint_range(0.0, 8.0) = 3.0;
+// Incident scene light: sun+moon light_color × light_energy, pushed per frame
+// by OceanFFTProvider. Scales the unlit optical constants (medium/shallow/deep
+// water body, SSS emission) so the water darkens with the day/night cycle —
+// EMISSION ignores scene lights, so without this the water body glows at its
+// daytime calibration all night ("exposure circle" around the camera).
+// Defaults to full daylight for scenes that never push it.
+uniform vec3 scene_light_color = vec3(1.0);
 uniform float sea_level = 0.0;
 
 group_uniforms visual;
@@ -338,9 +345,15 @@ void fragment() {
 	float screen_lod = depth_blend_power * 2.5 + ROUGHNESS * 8.0;
 	screen_lod += (1.0 - refracted_refraction_visibility) * refraction_extinction_blur_lod;
 	vec3 screen_color = textureLod(screen_texture, screen_uv, screen_lod).rgb;
-	screen_color = screen_color * transmittance + medium_color * (vec3(1.0) - transmittance);
-	vec3 shallow_screen_color = mix(screen_color, color_shallow, 0.55);
-	vec3 deep_water_color = mix(color_deep, medium_color, 0.82);
+	// The screen sample is already lit by the renderer; only the water-body
+	// constants mixed into it need the incident-light scale.
+	screen_color = screen_color * transmittance + medium_color * scene_light_color * (vec3(1.0) - transmittance);
+	// Shallow tint gated by optical depth: at zero depth the refracted scene
+	// reads through untinted (Beer-Lambert above already colors the column).
+	// The old unconditional 0.55 mix flattened every underwater surface into a
+	// textureless color card regardless of how shallow the water was.
+	vec3 shallow_screen_color = mix(screen_color, color_shallow * scene_light_color, 0.55 * depth_blend);
+	vec3 deep_water_color = mix(color_deep, medium_color, 0.82) * scene_light_color;
 	vec3 deep_screen_color = mix(screen_color, deep_water_color, 0.88);
 	if (FRONT_FACING) {
 		screen_color = mix(shallow_screen_color, deep_screen_color, depth_blend_power);
@@ -410,7 +423,7 @@ void fragment() {
 	} else {
 		ALBEDO = final_col;
 		EMISSION = screen_color * screen_read_blend_amount;
-		EMISSION += color_sub_surface * scatter * sss_emission_strength * (1.0 - foam_factor * 0.5);
+		EMISSION += color_sub_surface * scene_light_color * scatter * sss_emission_strength * (1.0 - foam_factor * 0.5);
 	}
 
 	if (foam_factor > 0.01) {
@@ -445,7 +458,8 @@ void light() {
 	float view_mask = smith_masking_shadowing(dot_nv, spec_alpha);
 	float microfacet_distribution = ggx_distribution(dot(NORMAL, halfway), spec_alpha);
 	float geometric_attenuation = 1.0 / (1.0 + light_mask + view_mask);
-	SPECULAR_LIGHT += fresnel * microfacet_distribution * geometric_attenuation / (4.0 * dot_nv + 0.1) * ATTENUATION;
+	// LIGHT_COLOR required (canonical Cook-Torrance) — see ocean_fft_common.
+	SPECULAR_LIGHT += fresnel * microfacet_distribution * geometric_attenuation / (4.0 * dot_nv + 0.1) * ATTENUATION * LIGHT_COLOR;
 
 	float half_lambert = dot_nl * 0.5 + 0.5;
 	vec3 diffuse_base = vec3(half_lambert * 0.9);

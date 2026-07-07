@@ -2,12 +2,14 @@
 ##
 ## 1. REAL point lights (150-600 m): server-direct RS omni lights for the most
 ##    significant nearby-distant lights. Godot Forward+ is a clustered-forward
-##    renderer (the same architecture OpenMW adopted in MR 5212 "volume tiled
-##    forward shading") — a few hundred unshadowed omnis are cheap. Budgeted
+##    renderer (clustered / "volume tiled forward shading") — a few hundred
+##    unshadowed omnis are cheap. Budgeted
 ##    nearest-first, faded in over the NEAR_END boundary to crossfade with the
 ##    NEAR tier's OmniLight3D distance fade (both are zero at exactly 150 m).
-## 2. Billboard MultiMesh glow sprites (150 m - FAR_END): the corona/halo layer,
+## 2. Billboard MultiMesh glow sprites (~55 m - FAR_END): the corona/halo layer,
 ##    one draw call per page, carries the "town glitter" out to view distance.
+##    Persists (shrunken) down to the NEAR 60 m spawn gate so towns don't dim
+##    on approach; crossfades with the spawned lantern's emissive + bloom.
 ##
 ## Canonical Godot pattern:
 ## - Use MultiMesh for many simple instances.
@@ -20,6 +22,7 @@ extends RefCounted
 
 const DU := preload("res://src/core/world/distance_utils.gd")
 const WorldObjectRecordScript := preload("res://src/core/world/world_object_record.gd")
+const LightTuning := preload("res://src/core/world/light_tuning.gd")
 
 #region Configuration
 
@@ -28,6 +31,16 @@ const MAX_DISTANCE: float = DU.FAR_END
 const FADE_MARGIN: float = 30.0
 const BASE_SPRITE_SIZE: float = 3.0
 const MIN_SCREEN_FACTOR: float = 0.005
+## Billboard corona near handoff (2026-07-06 Balmora fix). The corona used to
+## hard-fade at 120-180 m while the near lantern look (spawned mesh emissive +
+## bloom) only starts at NEAR's 60 m lazy-spawn gate — the 60-120 m band had
+## NEITHER, so towns visibly "turned off" on approach. The corona now persists
+## down to the handoff, shrinking as it nears (see shader size_taper) so it
+## reads as the lantern's halo rather than a floating ball. Zero at 55 m =
+## REAL_LIGHT_NEAR_MIN_SMALL_M, 5 m inside the 60 m spawn gate — the swap is
+## covered on both ends.
+const BILLBOARD_NEAR_FADE_CENTER_M: float = 70.0
+const BILLBOARD_NEAR_FADE_HALF_M: float = 15.0
 const MAX_INSTANCES: int = 4096
 const DUSK_THRESHOLD: float = 0.15
 const NIGHT_THRESHOLD: float = -0.05
@@ -49,13 +62,18 @@ const PAGE_AABB_MARGIN: float = 32.0
 ## 350 m per-surface lighting is near sub-pixel and the billboard glow
 ## carries the visual alone.
 const REAL_LIGHT_MAX_DISTANCE_M: float = 350.0
-## Only lights with a meaningful radius get a real light at distance —
-## 2 m Godot ≈ 140 MW units, which keeps street lanterns and up, and drops
-## candles/clutter whose contribution is invisible past NEAR anyway.
-const REAL_LIGHT_MIN_RADIUS_M: float = 2.0
-## Hard cap on simultaneous real distant lights (nearest-first). Kept small
-## for the same cluster-density reason as the distance cap.
-const REAL_LIGHT_BUDGET: int = 64
+## Only lights with a meaningful radius get a real light at distance. data.radius
+## is now real metres (units fix 2026-07-07: MW_LIGHT_SCALE was 70/64 ≈ MW-units,
+## so this gate compared metres against ~50-500 and every light wrongly passed).
+## 1 m ≈ 70 MW units — keeps lanterns/torches, drops only the tiniest candles, so
+## more of a town's lights illuminate on approach (Solution 2: lower the gate).
+const REAL_LIGHT_MIN_RADIUS_M: float = 1.0
+## Hard cap on simultaneous real distant lights (nearest-first). Raised 64→128
+## after the units fix (2026-07-07): correctly-scaled ranges (a few metres, not
+## the old ~100-500 m monsters) cost far less per light in the Forward+ clusters,
+## so a dense town can afford more overlapping pools. Nearest-first ordering
+## fills these with the closest (cheapest, best-distributed) lights first.
+const REAL_LIGHT_BUDGET: int = 128
 ## Crossfade half-width at the big-light handoff and the far cutoff.
 ## Matches FADE_MARGIN used by the billboard shader's near fade.
 const REAL_LIGHT_FADE_M: float = 30.0
@@ -76,6 +94,44 @@ const REAL_LIGHT_UPDATE_INTERVAL_S: float = 0.5
 ## otherwise create the full budget in one 0.5s tick (measured 5-13 ms spikes
 ## in the streaming autopsy on first boot, 2026-07-06).
 const REAL_LIGHT_MAX_CREATES_PER_TICK: int = 24
+## Selection is purely a function of camera position, so re-running the
+## candidate gather + nearest-N sort while the camera is stationary is wasted
+## work. Skip re-selection until the camera has moved this far since the last
+## one. Zeroes out the steady-state cost (standing/looking around) and caps the
+## moving-case cadence. 4 m gives ~6 energy re-evals across the 30 m crossfade
+## bands — smooth enough for a subtle distant glow (2026-07-06 perf fix).
+const REAL_LIGHT_RESELECT_MOVE_M: float = 4.0
+
+## Aggregate town-glow layer (light LOD — the direct analog of mesh HLOD/CHUNK).
+## One dim, large-range proxy omni per LIT PAGE (4×4 cells) fakes a whole
+## settlement's combined illumination at distance: it crossfades IN as the
+## individual real lights fade OUT (~320-400 m), restoring the "warm town from
+## afar" SURFACE glow that the old units bug produced by accident. Few proxies
+## (only lit pages, budgeted) so the Forward+ cluster cost stays bounded —
+## unlike extending 128 individual lights out to 1.2 km, which is the +30 ms
+## cluster trap the REAL_LIGHT_MAX_DISTANCE_M cap exists to avoid.
+const AGGREGATE_ENABLED: bool = true
+## Fade band: fully individual below _FADE_M, fully aggregate above the live
+## LightTuning.aggregate_near_full_m. _FADE_M sits ~70 m under
+## REAL_LIGHT_MAX_DISTANCE_M so the crossfade with the individual lights' own
+## far-fade (320-350 m) overlaps rather than gapping.
+const AGGREGATE_NEAR_FADE_M: float = 250.0
+## Far cutoff — matches the CHUNK/impostor horizon; beyond this the page is
+## usually outside the light stream ring anyway.
+const AGGREGATE_FAR_FULL_M: float = 1000.0
+const AGGREGATE_FAR_CUTOFF_M: float = 1200.0
+## Proxy range = light spread within the page + LightTuning.aggregate_range_margin_m
+## (min floor), so a compact town gets a tight glow and a spread page a wider one.
+const AGGREGATE_RANGE_MIN_M: float = 120.0
+## Count factor: brightness scales with the page's light count (clamped) so a
+## dense town glows more than a lone roadside lantern. Base energy is the live
+## LightTuning.aggregate_energy_base.
+const AGGREGATE_COUNT_NORM: float = 8.0
+const AGGREGATE_COUNT_FACTOR_MIN: float = 0.3
+const AGGREGATE_COUNT_FACTOR_MAX: float = 1.6
+## Hard cap on simultaneous proxies (nearest-first). Lit pages are sparse, so
+## this rarely binds — it's a safety rail against a light-dense worldspace.
+const AGGREGATE_BUDGET: int = 48
 
 #endregion
 
@@ -99,6 +155,14 @@ class LightPage:
 	var multimesh: MultiMesh
 	var instance_rid: RID
 	var light_ids: Array[int] = []
+	## Aggregate town-glow proxy params, recomputed on every page rebuild.
+	var agg_centroid: Vector3 = Vector3.ZERO
+	var agg_color: Color = Color.BLACK
+	var agg_spread: float = 0.0
+	var agg_range: float = 0.0
+	var agg_count: int = 0
+	var agg_dirty: bool = true
+	var agg_light: RealLight = null
 
 
 ## Server-direct RS omni light + its scenario instance for one distant light.
@@ -146,6 +210,18 @@ var _real_lights: Dictionary[int, RealLight] = {}
 ## the full 4096-light billboard set.
 var _real_light_candidates: Dictionary[int, bool] = {}
 var _real_light_next_update_s: float = 0.0
+## Camera position at the last selection pass. Sentinel-far so the first tick
+## always runs. Drives the movement gate in _update_real_lights.
+var _real_light_last_select_pos: Vector3 = Vector3(1e9, 1e9, 1e9)
+## True while the per-tick creation cap left selected lights uncreated. Keeps
+## the movement gate open so the backlog drains even if the camera is static
+## after arriving somewhere dense (otherwise only the first cap-worth spawn).
+var _real_light_creates_pending: bool = false
+## Last camera position seen by update(). Lets refresh_tunables re-run the
+## selection + aggregate passes synchronously on a slider change (instant),
+## instead of waiting on the deadline-gated 0.5 s streaming tick.
+var _last_camera_pos: Vector3 = Vector3.ZERO
+var _has_camera_pos: bool = false
 
 var _center_cell: Vector2i = Vector2i(999999, 999999)
 var _radius_cells: int = 0
@@ -170,6 +246,7 @@ var _stats: Dictionary = {
 	"distant_light_rebuild_max_us": 0,
 	"distant_light_full_enum_us": 0,
 	"distant_light_full_enum_cells": 0,
+	"distant_light_aggregates": 0,
 }
 
 #endregion
@@ -213,6 +290,9 @@ func update(camera_pos: Vector3, sun_elevation_rad: float, deadline_usec: int = 
 	if not _is_setup or not _streaming_enabled:
 		return
 
+	_last_camera_pos = camera_pos
+	_has_camera_pos = true
+
 	if _deadline_exhausted(deadline_usec):
 		return
 	_process_full_ring_enum(deadline_usec)
@@ -238,6 +318,8 @@ func update(camera_pos: Vector3, sun_elevation_rad: float, deadline_usec: int = 
 	if now_s >= _real_light_next_update_s and not _deadline_exhausted(deadline_usec):
 		_real_light_next_update_s = now_s + REAL_LIGHT_UPDATE_INTERVAL_S
 		_update_real_lights(camera_pos)
+		if AGGREGATE_ENABLED:
+			_update_page_aggregates(camera_pos)
 
 
 func clear() -> void:
@@ -246,6 +328,33 @@ func clear() -> void:
 	_center_cell = Vector2i(999999, 999999)
 	_radius_cells = 0
 	_refresh_stats()
+
+
+## Re-apply live LightTuning values to already-created distant lights (called by
+## the Lighting UI on a slider change). Re-applies RANGE in place (no free/recreate
+## — that thrashes when a slider fires 60×/s during a drag) and forces the next
+## 0.5 s tick to re-push energy; aggregate energy/reach are read live already, only
+## the range MARGIN needs recomputing from the cached spread.
+func refresh_tunables() -> void:
+	var mult := LightTuning.radius_multiplier
+	for id: int in _real_lights:
+		var data: LightData = _lights.get(id)
+		var real: RealLight = _real_lights[id]
+		if data != null and real.light_rid.is_valid():
+			RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_RANGE, data.radius * mult)
+			real.current_energy = -1.0  # force energy re-push on the next selection tick
+	_real_light_last_select_pos = Vector3(1e9, 1e9, 1e9)  # open the movement gate so energy recomputes
+	for page: LightPage in _pages.values():
+		if page.agg_count > 0:
+			page.agg_range = maxf(page.agg_spread + LightTuning.aggregate_range_margin_m, AGGREGATE_RANGE_MIN_M)
+			page.agg_dirty = true
+	# Drive the selection + aggregate passes NOW (synchronous, cached camera pos)
+	# so distant energy + town-glow update the instant a slider moves, instead of
+	# waiting on the deadline-gated 0.5 s streaming tick (which may be starved).
+	if _has_camera_pos:
+		_update_real_lights(_last_camera_pos)
+		if AGGREGATE_ENABLED:
+			_update_page_aggregates(_last_camera_pos)
 
 
 func set_enabled(enabled: bool) -> void:
@@ -517,9 +626,9 @@ func _create_material() -> void:
 	_material.set_shader_parameter("night_factor", 0.0)
 	_material.set_shader_parameter("base_size", BASE_SPRITE_SIZE)
 	_material.set_shader_parameter("min_screen_factor", MIN_SCREEN_FACTOR)
-	_material.set_shader_parameter("min_distance", MIN_DISTANCE)
+	_material.set_shader_parameter("min_distance", BILLBOARD_NEAR_FADE_CENTER_M)
 	_material.set_shader_parameter("max_distance", MAX_DISTANCE)
-	_material.set_shader_parameter("fade_margin", FADE_MARGIN)
+	_material.set_shader_parameter("fade_margin", BILLBOARD_NEAR_FADE_HALF_M)
 
 
 func _create_quad_mesh() -> void:
@@ -571,6 +680,7 @@ func _free_page(page_key: Vector2i) -> void:
 	if page_key not in _pages:
 		return
 	var page: LightPage = _pages[page_key]
+	_free_page_aggregate(page)
 	if page.instance_rid.is_valid():
 		RenderingServer.free_rid(page.instance_rid)
 		page.instance_rid = RID()
@@ -651,8 +761,12 @@ func _rebuild_page(page_key: Vector2i) -> void:
 	var aabb_min := Vector3.ZERO
 	var aabb_max := Vector3.ZERO
 	var has_aabb := false
+	var agg_pos_sum := Vector3.ZERO
+	var agg_col_sum := Color(0.0, 0.0, 0.0, 0.0)
 	for i: int in range(live_ids.size()):
 		var data: LightData = _lights[live_ids[i]]
+		agg_pos_sum += data.position
+		agg_col_sum += data.color
 		var size_scale := clampf(data.radius / 3.0, 0.5, 4.0)
 		var local_pos := data.position - page.center
 		var is_fire := 1.0 if data.is_fire else 0.0
@@ -698,6 +812,20 @@ func _rebuild_page(page_key: Vector2i) -> void:
 		page.multimesh.custom_aabb = aabb
 		if page.instance_rid.is_valid():
 			RenderingServer.instance_set_custom_aabb(page.instance_rid, aabb)
+
+	# Aggregate town-glow proxy params (light LOD). Centroid + mean colour of the
+	# page's lights; range = their spread + margin. Cached so _update_page_aggregates
+	# only reads per tick. agg_dirty forces the live proxy to re-apply these.
+	var count := live_ids.size()
+	page.agg_count = count
+	page.agg_centroid = agg_pos_sum / float(count)
+	page.agg_color = agg_col_sum / float(count)
+	var spread := 0.0
+	for id: int in live_ids:
+		spread = maxf(spread, _lights[id].position.distance_to(page.agg_centroid))
+	page.agg_spread = spread
+	page.agg_range = maxf(spread + LightTuning.aggregate_range_margin_m, AGGREGATE_RANGE_MIN_M)
+	page.agg_dirty = true
 
 
 func _page_key_for_position(position: Vector3) -> Vector2i:
@@ -769,33 +897,57 @@ func _update_real_lights(camera_pos: Vector3) -> void:
 	if not _scenario.is_valid():
 		return
 
-	var select_max := REAL_LIGHT_MAX_DISTANCE_M
-	var select_max_sq := select_max * select_max
+	# Movement gate: the nearest-N selection and its crossfade energies only
+	# change as the camera moves. Standing still (or a tiny look-around jitter)
+	# re-runs the exact same result — skip it. This zeroes the steady-state cost
+	# that the streaming autopsy pinned at 13-17 ms spikes (2026-07-06). Stays
+	# open while a creation backlog is draining so all selected lights spawn even
+	# if the camera stops the instant it arrives.
+	if not _real_light_creates_pending \
+			and camera_pos.distance_squared_to(_real_light_last_select_pos) < REAL_LIGHT_RESELECT_MOVE_M * REAL_LIGHT_RESELECT_MOVE_M:
+		return
+	_real_light_last_select_pos = camera_pos
+
+	var select_max_sq := REAL_LIGHT_MAX_DISTANCE_M * REAL_LIGHT_MAX_DISTANCE_M
 	var small_min_sq := REAL_LIGHT_NEAR_MIN_SMALL_M * REAL_LIGHT_NEAR_MIN_SMALL_M
 	var big_min := MIN_DISTANCE - REAL_LIGHT_FADE_M
 	var big_min_sq := big_min * big_min
 
-	# Gather candidates: [distance_sq, id] pairs from the radius-gated subset.
-	var candidates: Array[Vector2] = []
+	# Gather candidates as packed keys so the nearest-N cull uses the engine's
+	# native (C++) sort instead of a per-comparison GDScript lambda — the lambda
+	# sort was the 13-17 ms main-thread spike in dense towns. Key = integer
+	# distance² in bits 40+ (max 350² = 122500 → 17 bits) OR'd with the light id
+	# in the low 40 bits. Sorting ascending orders by distance first, id as a
+	# stable tie-break. Sub-metre distance ties resolving by id is irrelevant for
+	# picking nearest distant coronas.
+	var packed: PackedInt64Array = PackedInt64Array()
+	var stale_ids: Array[int] = []
 	for id: int in _real_light_candidates.keys():
 		var data: LightData = _lights.get(id)
 		if data == null:
-			_real_light_candidates.erase(id)
+			stale_ids.append(id)
 			continue
 		var d_sq := camera_pos.distance_squared_to(data.position)
 		var min_sq := big_min_sq if data.radius >= REAL_LIGHT_BIG_RADIUS_M else small_min_sq
 		if d_sq < min_sq or d_sq > select_max_sq:
 			continue
-		candidates.append(Vector2(d_sq, float(id)))
+		packed.append((int(d_sq) << 40) | (id & 0xFFFFFFFFFF))
+	for id: int in stale_ids:
+		_real_light_candidates.erase(id)
 
-	if candidates.size() > REAL_LIGHT_BUDGET:
-		candidates.sort_custom(func(a: Vector2, b: Vector2) -> bool: return a.x < b.x)
-		candidates.resize(REAL_LIGHT_BUDGET)
+	if packed.size() > REAL_LIGHT_BUDGET:
+		packed.sort()
+		packed.resize(REAL_LIGHT_BUDGET)
 
 	# Diff: free real lights that fell out of selection (or whose data unloaded).
+	# Exact distance is recomputed per surviving light below (≤ budget count),
+	# so the integer-truncated key distance never feeds the crossfade math.
 	var selected: Dictionary[int, float] = {}
-	for c: Vector2 in candidates:
-		selected[int(c.y)] = sqrt(c.x)
+	for key: int in packed:
+		var id := key & 0xFFFFFFFFFF
+		var data: LightData = _lights.get(id)
+		if data != null:
+			selected[id] = camera_pos.distance_to(data.position)
 	for id: int in _real_lights.keys():
 		if id not in selected or id not in _lights:
 			_real_lights[id].free_rids()
@@ -803,6 +955,7 @@ func _update_real_lights(camera_pos: Vector3) -> void:
 
 	# Create missing (capped per tick) + drive crossfade energy.
 	var creates_left := REAL_LIGHT_MAX_CREATES_PER_TICK
+	var creates_pending := false
 	for id: int in selected.keys():
 		var data: LightData = _lights.get(id)
 		if data == null:
@@ -810,6 +963,7 @@ func _update_real_lights(camera_pos: Vector3) -> void:
 		var real: RealLight = _real_lights.get(id)
 		if real == null:
 			if creates_left <= 0:
+				creates_pending = true
 				continue
 			creates_left -= 1
 			real = _create_real_light(data)
@@ -819,11 +973,12 @@ func _update_real_lights(camera_pos: Vector3) -> void:
 		if data.radius >= REAL_LIGHT_BIG_RADIUS_M:
 			near_ramp = smoothstep(MIN_DISTANCE, MIN_DISTANCE + REAL_LIGHT_FADE_M, dist)
 		var far_ramp := 1.0 - smoothstep(REAL_LIGHT_MAX_DISTANCE_M - REAL_LIGHT_FADE_M, REAL_LIGHT_MAX_DISTANCE_M, dist)
-		var energy := real.base_energy * near_ramp * far_ramp
+		var energy := real.base_energy * LightTuning.distant_energy_multiplier * near_ramp * far_ramp
 		if not is_equal_approx(energy, real.current_energy):
 			real.current_energy = energy
 			RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_ENERGY, energy)
 
+	_real_light_creates_pending = creates_pending
 	_stats["distant_real_light_count"] = _real_lights.size()
 
 
@@ -832,7 +987,10 @@ func _create_real_light(data: LightData) -> RealLight:
 	real.base_energy = 1.2 if data.is_fire else 0.8
 
 	real.light_rid = RenderingServer.omni_light_create()
-	RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_RANGE, data.radius)
+	# Global light-radius multiplier ("light bounds multiplier"): scales the
+	# real-world pool so lanterns overlap into a warm town glow. Same knob the NEAR
+	# tier applies, so a lamp's near and distant pools match across the handoff.
+	RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_RANGE, data.radius * LightTuning.radius_multiplier)
 	RenderingServer.light_set_param(real.light_rid, RenderingServer.LIGHT_PARAM_ATTENUATION, 1.0)
 	RenderingServer.light_set_color(real.light_rid, data.color)
 	RenderingServer.light_set_shadow(real.light_rid, false)
@@ -852,6 +1010,90 @@ func _free_all_real_lights() -> void:
 		real.free_rids()
 	_real_lights.clear()
 	_stats["distant_real_light_count"] = 0
+
+#endregion
+
+
+#region Aggregate town-glow (light LOD)
+
+## Drive the per-page proxy omnis. Same 0.5 s cadence as the real lights. Lit
+## pages are sparse, so iterating them is cheap; each gets one proxy whose energy
+## ramps so it crossfades IN as the individual real lights fade OUT near 320-400 m,
+## and fades OUT again toward the 1.2 km horizon. Budgeted nearest-first.
+func _update_page_aggregates(camera_pos: Vector3) -> void:
+	if not _scenario.is_valid():
+		return
+
+	var in_band: Array[Vector2i] = []
+	for page_key: Vector2i in _pages.keys():
+		var page: LightPage = _pages[page_key]
+		if page.agg_count <= 0:
+			continue
+		var dist := camera_pos.distance_to(page.agg_centroid)
+		if dist < AGGREGATE_NEAR_FADE_M or dist >= AGGREGATE_FAR_CUTOFF_M:
+			_free_page_aggregate(page)
+			continue
+		in_band.append(page_key)
+
+	if in_band.size() > AGGREGATE_BUDGET:
+		in_band.sort_custom(func(a: Vector2i, b: Vector2i) -> bool:
+			return camera_pos.distance_squared_to(_pages[a].agg_centroid) \
+				< camera_pos.distance_squared_to(_pages[b].agg_centroid))
+		for i: int in range(AGGREGATE_BUDGET, in_band.size()):
+			_free_page_aggregate(_pages[in_band[i]])
+		in_band.resize(AGGREGATE_BUDGET)
+
+	var active := 0
+	for page_key: Vector2i in in_band:
+		var page: LightPage = _pages[page_key]
+		var dist := camera_pos.distance_to(page.agg_centroid)
+		var near_full := maxf(AGGREGATE_NEAR_FADE_M + 10.0, LightTuning.aggregate_near_full_m)
+		var near_ramp := smoothstep(AGGREGATE_NEAR_FADE_M, near_full, dist)
+		var far_ramp := 1.0 - smoothstep(AGGREGATE_FAR_FULL_M, AGGREGATE_FAR_CUTOFF_M, dist)
+		var count_factor := clampf(float(page.agg_count) / AGGREGATE_COUNT_NORM,
+			AGGREGATE_COUNT_FACTOR_MIN, AGGREGATE_COUNT_FACTOR_MAX)
+		var energy := LightTuning.aggregate_energy_base * count_factor * near_ramp * far_ramp
+		if energy <= 0.0001:
+			_free_page_aggregate(page)
+			continue
+		if page.agg_light == null:
+			_create_aggregate_light(page)
+		elif page.agg_dirty:
+			_apply_aggregate_params(page)
+		if not is_equal_approx(energy, page.agg_light.current_energy):
+			page.agg_light.current_energy = energy
+			RenderingServer.light_set_param(page.agg_light.light_rid, RenderingServer.LIGHT_PARAM_ENERGY, energy)
+		active += 1
+	_stats["distant_light_aggregates"] = active
+
+
+func _create_aggregate_light(page: LightPage) -> void:
+	var proxy := RealLight.new()
+	proxy.light_rid = RenderingServer.omni_light_create()
+	RenderingServer.light_set_shadow(proxy.light_rid, false)
+	RenderingServer.light_set_bake_mode(proxy.light_rid, RenderingServer.LIGHT_BAKE_DISABLED)
+	RenderingServer.light_set_param(proxy.light_rid, RenderingServer.LIGHT_PARAM_ATTENUATION, 1.0)
+	proxy.instance_rid = RenderingServer.instance_create()
+	RenderingServer.instance_set_base(proxy.instance_rid, proxy.light_rid)
+	RenderingServer.instance_set_scenario(proxy.instance_rid, _scenario)
+	page.agg_light = proxy
+	_apply_aggregate_params(page)
+
+
+## Push the cached centroid / colour / range onto the proxy's RIDs.
+func _apply_aggregate_params(page: LightPage) -> void:
+	if page.agg_light == null:
+		return
+	RenderingServer.light_set_color(page.agg_light.light_rid, page.agg_color)
+	RenderingServer.light_set_param(page.agg_light.light_rid, RenderingServer.LIGHT_PARAM_RANGE, page.agg_range)
+	RenderingServer.instance_set_transform(page.agg_light.instance_rid, Transform3D(Basis.IDENTITY, page.agg_centroid))
+	page.agg_dirty = false
+
+
+func _free_page_aggregate(page: LightPage) -> void:
+	if page.agg_light != null:
+		page.agg_light.free_rids()
+		page.agg_light = null
 
 #endregion
 
@@ -894,12 +1136,21 @@ void vertex() {
 		flicker = 0.7 + 0.3 * (sin(t) * sin(t * 2.7 + 1.3) * 0.5 + 0.5);
 	}
 
+	// Corona glow is a NIGHT-ONLY phenomenon (2026-07-06). MW placed lights
+	// have no glow halos; they stay lit 24/7 but wash out in daylight.
+	// The old `is_fire -> 0.3` floor kept our halos glowing in full sun, which
+	// read as "lights on during the day". Drive visibility purely by
+	// night_factor so halos fade out as the sun rises and return at dusk.
 	float visibility = night_factor;
-	if (is_fire > 0.5) {
-		visibility = max(visibility, 0.3);
-	}
 
-	float final_size = max(base_size, dist * min_screen_factor);
+	// Near fade → ZERO (2026-07-07). The old 0.45 floor dated from when the
+	// corona was the only source of ambient town warmth; with the units-fixed
+	// real-light layer (55-350 m) + aggregated town-glow omnis (320 m-1.2 km)
+	// carrying real illumination, a floored corona reads as a naked floating
+	// ball up close (user report). Fade to zero across the 55-85 m handoff —
+	// the NEAR lantern mesh (60 m spawn) + its real light take over.
+	float size_taper = mix(0.5, 1.0, smoothstep(min_distance - fade_margin, 200.0, dist));
+	float final_size = max(base_size * size_taper, dist * min_screen_factor);
 	float near_fade = smoothstep(min_distance - fade_margin, min_distance + fade_margin, dist);
 	float far_fade = 1.0 - smoothstep(max_distance - 500.0, max_distance, dist);
 	float brightness = visibility * flicker * near_fade * far_fade;

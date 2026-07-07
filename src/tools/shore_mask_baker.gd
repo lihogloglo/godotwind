@@ -10,7 +10,7 @@
 ## - A = water membership + raw normalized water-side distance
 ##   (land = 0, water = 0.5 + 0.5 * raw_norm)
 ##
-## This is used for wave dampening near coastlines (OpenMW-style approach).
+## This is used for wave dampening near coastlines.
 ##
 ## Usage:
 ##   var baker := ShoreMaskBaker.new()

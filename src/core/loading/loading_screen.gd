@@ -16,9 +16,9 @@
 class_name SceneLoadingScreen
 extends CanvasLayer
 
-## Fade duration (s). 0.5 s matches OpenMW's exterior-teleport fade
-## (see inspos/openmw/apps/openmw/mwworld/scene.cpp:936) — long enough to
-## read as a transition, short enough to not feel sluggish on cold boot.
+## Fade duration (s). 0.5 s matches the classic exterior-teleport fade —
+## long enough to read as a transition, short enough to not feel sluggish
+## on cold boot.
 const FADE_DURATION: float = 0.5
 
 ## z-ordering — must beat the existing in-game UI (stats panel,

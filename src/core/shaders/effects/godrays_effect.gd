@@ -1,6 +1,5 @@
 ## GodraysEffect - Screen-space god rays post-processing
 ##
-## Ported from Rafael's godrays.omwfx for OpenMW.
 ## Uses a 4-pass compute pipeline:
 ##   Pass 0: Sky mask (depth-based sun occlusion, half res)
 ##   Pass 1: Radial blur (smooth the mask along sun direction)
@@ -79,7 +78,7 @@ func update_weather_cache() -> void:
 		_cached_weather_transition = result.transition_factor
 		_cached_sun_vis = 1.0  # TODO: derive from weather result sun intensity
 		# Map MW fog_depth (0.69=clear → 3.5=blizzard) to sharpness ratio (1=sharp → 0=soft)
-		# OpenMW uses fogNear/480 where fogNear is a distance. Our fog_depth is a density multiplier.
+		# The reference uses fogNear/480 where fogNear is a distance. Our fog_depth is a density multiplier.
 		_cached_fog_near_ratio = clampf(1.0 - (result.fog_depth - 0.5), 0.0, 1.0)
 		_cached_fog_far = 5000.0 / maxf(result.fog_depth, 0.1)  # denser fog = shorter visibility
 		_cached_weather_active = true
@@ -92,7 +91,7 @@ func _init() -> void:
 
 	effect_name = "godrays"
 	display_name = "God Rays"
-	description = "Screen-space god rays with sun disc, weather-aware occlusion, and blue noise dithering. Ported from Rafael's godrays.omwfx for OpenMW."
+	description = "Screen-space god rays with sun disc, weather-aware occlusion, and blue noise dithering."
 	category = "Atmosphere"
 	render_priority = 11  # After fog (10), before color grading (100)
 
@@ -166,7 +165,7 @@ func on_effect_added() -> void:
 
 
 func _load_blue_noise() -> void:
-	var path := "res://inspos/RafaelsShaderPack/Textures/bluenoise.png"
+	var path := "res://assets/shaders/noise/bluenoise.png"
 	if ResourceLoader.exists(path):
 		_blue_noise_texture = load(path)
 	else:
@@ -243,7 +242,7 @@ func _create_internal_textures(full_size: Vector2i, half_size: Vector2i) -> void
 	_free_internal_textures()
 
 	# Mask and blur at FULL resolution for sharp silhouette edges
-	# (matches Rafael's RT_Stretch/RT_Blur at width_ratio=1.0)
+	# (RT_Stretch/RT_Blur at width_ratio=1.0)
 	var fmt_full := RDTextureFormat.new()
 	fmt_full.width = full_size.x
 	fmt_full.height = full_size.y

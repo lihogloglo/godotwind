@@ -34,7 +34,7 @@ class MeshData:
 	var node_transform: Transform3D = Transform3D.IDENTITY  # Accumulated NIF hierarchy transform (in Godot space)
 	var parent_bone_name: String = ""  # Parent NiNode name (bone to attach static meshes to)
 
-	## BoneOffset (from NIF "BoneOffset" NiNode, per OpenMW convention)
+	## BoneOffset (from NIF "BoneOffset" NiNode, per MW convention)
 	var bone_offset_position: Vector3 = Vector3.ZERO  # Translation from BoneOffset node
 	var has_bone_offset: bool = false
 
@@ -89,7 +89,7 @@ static func extract_from_buffer(buffer: PackedByteArray, path_hint: String = "")
 static func _extract_from_reader(reader: NIFReader, source_path: String) -> Array[MeshData]:
 	var meshes: Array[MeshData] = []
 
-	# Search for BoneOffset node in the NIF (per OpenMW convention)
+	# Search for BoneOffset node in the NIF (per MW convention)
 	# BoneOffset provides a translation offset for non-skinned body parts
 	var bone_offset := Vector3.ZERO
 	var found_bone_offset := false
@@ -117,13 +117,13 @@ static func _extract_from_reader(reader: NIFReader, source_path: String) -> Arra
 	return meshes
 
 
-## Search for a "BoneOffset" NiNode in the NIF hierarchy (per OpenMW convention)
+## Search for a "BoneOffset" NiNode in the NIF hierarchy (per MW convention)
 ## Returns the converted translation vector, or null if not found
 static func _find_bone_offset(reader: NIFReader, record: NIFDefs.NIFRecord) -> Variant:
 	if record is NIFDefs.NiNode:
 		var node := record as NIFDefs.NiNode
 		if node.name and node.name.to_lower() == "boneoffset":
-			# Extract translation only (OpenMW ignores rotation/scale on BoneOffset)
+			# Extract translation only (rotation/scale on BoneOffset are ignored)
 			var transform := _get_node_transform(node)
 			return CS.vector_to_godot(transform.origin)
 

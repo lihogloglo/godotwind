@@ -12,9 +12,9 @@
 ## against per-object MID culling had an irreducible ±radius error —
 ## z-fight shimmer leaning one way, cell-sized holes the other (both
 ## user-verified 2026-07-05). Canonical pattern: UE World Partition HLOD
-## (one HLOD per streaming cell, swapped on cell load/unload) + OpenMW
+## (one HLOD per streaming cell, swapped on cell load/unload) + distance
 ## object paging (active-grid content exclusion, chunks re-keyed on grid
-## change — see inspos/openmw objectpaging.cpp).
+## change).
 ##
 ## Consequences:
 ## - Near visibility band DELETED (begin = 0): proxies double as instant

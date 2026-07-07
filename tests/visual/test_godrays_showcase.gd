@@ -204,17 +204,17 @@ func _enable_godrays() -> void:
 	ShaderManager.attach_to(_world_env)
 	ShaderManager.set_sun(_sun)
 
-	# Use Rafael's original default params (tuned for natural look)
+	# Default params (tuned for natural look)
 	var godrays_effect := ShaderManager.get_effect("godrays")
 	if godrays_effect:
-		godrays_effect.set_param("ray_strength", 1.85)     # Rafael default
-		godrays_effect.set_param("ray_radius", 0.25)       # Rafael default
-		godrays_effect.set_param("iterations", 16.0)       # Rafael default
-		godrays_effect.set_param("ray_brightness", 1.0)    # Rafael default
-		godrays_effect.set_param("sun_disc_brightness", 1.2)  # Rafael default
-		godrays_effect.set_param("ray_falloff", 1.1)       # Rafael default
-		godrays_effect.set_param("center_vis", 0.35)       # Rafael default
-		godrays_effect.set_param("ray_occlude", 0.75)      # Rafael default
+		godrays_effect.set_param("ray_strength", 1.85)     # default
+		godrays_effect.set_param("ray_radius", 0.25)       # default
+		godrays_effect.set_param("iterations", 16.0)       # default
+		godrays_effect.set_param("ray_brightness", 1.0)    # default
+		godrays_effect.set_param("sun_disc_brightness", 1.2)  # default
+		godrays_effect.set_param("ray_falloff", 1.1)       # default
+		godrays_effect.set_param("center_vis", 0.35)       # default
+		godrays_effect.set_param("ray_occlude", 0.75)      # default
 
 	ShaderManager.enable_effect("godrays", 0.0)  # instant on
 	Log.info("testing", "Godrays showcase started — boosted params")

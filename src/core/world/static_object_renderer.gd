@@ -102,7 +102,7 @@ var _globally_visible: bool = true
 ## band RELEASED — the streaming-ring unload is their far cutoff and the
 ## per-cell proxy swap covers everything beyond. Canonical pattern: UE World
 ## Partition HLOD (sources render while their cell is streamed in, the HLOD
-## renders when it is not) + OpenMW object-paging content exclusion.
+## renders when it is not) + distance object-paging content exclusion.
 ## 0.0 = coverage off (chunk tier disabled, legacy bake, or a `static_range`
 ## debug override in force — the streaming manager owns this value).
 var _paged_coverage_min_radius: float = 0.0

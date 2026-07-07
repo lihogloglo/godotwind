@@ -113,6 +113,7 @@ var ambient_transition_speed: float = 0.5
 
 var _current_sky_contribution: float = 1.0
 var _current_ambient_energy: float = 1.0
+var _current_sdfgi_energy: float = 1.0
 
 # ---- Cirrus Clouds ----
 
@@ -296,7 +297,13 @@ func _initialize() -> void:
 	_environment.tonemap_white = 8.0
 
 	# SDFGI — cascaded signed-distance-field global illumination
-	_environment.sdfgi_enabled = true
+	# DEFAULT OFF (2026-07-06): SDFGI cascades are camera-centered, so at night
+	# the GI-lit patch around the camera stays lit while the rest of the world
+	# drops to the night ambient floor — a bright bubble that follows the camera.
+	# Also a known frame-time cost on open terrain. Params below stay configured
+	# so on_sdfgi_toggled (Rendering tab) can switch it on cleanly; when it does,
+	# _update_lights dims sdfgi_energy with the day/night cycle to avoid the halo.
+	_environment.sdfgi_enabled = false
 	_environment.sdfgi_cascades = 4
 	_environment.sdfgi_y_scale = Environment.SDFGI_Y_SCALE_75_PERCENT
 	_environment.sdfgi_use_occlusion = true
@@ -566,6 +573,18 @@ func _update_lights() -> void:
 
 		_environment.ambient_light_sky_contribution = _current_sky_contribution
 		_environment.ambient_light_energy = _current_ambient_energy
+
+		# SDFGI injects indirect/sky light only inside its camera-centered
+		# cascades. Its energy must dim with the same day/night factor as the
+		# ambient floor, or the GI-lit patch around the camera stays lit while
+		# the rest of the world darkens — a bright bubble that follows the
+		# camera. Track the same 1.0→night_ambient_energy curve ambient uses so
+		# the near-field GI floor matches the far-field ambient floor. Only
+		# touched when SDFGI is enabled (off by default; Rendering tab turns it on).
+		if _environment.sdfgi_enabled:
+			var target_sdfgi_energy: float = lerpf(1.0, night_ambient_energy, is_night)
+			_current_sdfgi_energy = lerpf(_current_sdfgi_energy, target_sdfgi_energy, lerp_speed)
+			_environment.sdfgi_energy = _current_sdfgi_energy
 
 
 ## True when a shadow-casting light should be re-oriented: first update ever,

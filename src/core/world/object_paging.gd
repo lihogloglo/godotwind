@@ -1,4 +1,4 @@
-## ObjectPaging — OpenMW-style distance-adaptive chunk paging
+## ObjectPaging — distance-adaptive chunk paging
 ##
 ## Phase 4b of docs/audit/OBJECT_PAGING_PLAN.md §11: evolves from a single-tier
 ## HLOD cell merger (phases 1-3) into a multi-tier adaptive pager. Chunks are
@@ -261,7 +261,7 @@ var _warmup_pending_async: Dictionary = {}
 ## missing/corrupt cache entries from requeueing the same HLOD chunk forever.
 var _warmup_failed: Dictionary = {}
 
-## Phase 2 — SizeCache for the projected-size filter (OpenMW ObjectPaging §2.2).
+## Phase 2 — SizeCache for the projected-size filter (ObjectPaging §2.2).
 ## Key = ref_num (int). Value = radius²×scale² at last rejection. Mesh-invariant
 ## value — re-tested against current dist²×min_size² without re-reading AABB.
 var _size_cache: Dictionary = {}  # int (ref_num) -> float
@@ -1399,9 +1399,9 @@ func _sort_by_chunk_priority(a: Vector3i, b: Vector3i) -> bool:
 #endregion
 
 
-#region Phase 3a — record-type eligibility (OpenMW ObjectPaging §2.4)
+#region Phase 3a — record-type eligibility (ObjectPaging §2.4)
 
-## Contract (matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:55-75`):
+## Contract:
 ##   STAT, DOOR, ACTI            → always eligible
 ##   CONT                        → eligible only at size_level == 0 (1×1 chunks)
 ##   LIGH, NPC_, CREA, inventory → never eligible
@@ -1430,12 +1430,12 @@ static func _category_eligible(category: int, size_level: int) -> bool:
 			return false
 
 
-## Phase 2 — projected-size test (OpenMW ObjectPaging §2.2).
+## Phase 2 — projected-size test (ObjectPaging §2.2).
 ##
-## Contract (matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:793-799`):
+## Contract:
 ##   keep iff  mesh_radius² × scale² >= dist² × min_size²
 ##
-## **Divergence from OpenMW:** `mesh_radius_sq == 0` returns `true` (conservative
+## **Divergence:** `mesh_radius_sq == 0` returns `true` (conservative
 ## keep). Caller guards this case if strict parity is required.
 static func _is_size_worthy(mesh_radius_sq: float, scale_f: float, dist_sq: float, min_size_sq: float) -> bool:
 	if mesh_radius_sq <= 0.0 or dist_sq <= 0.0:

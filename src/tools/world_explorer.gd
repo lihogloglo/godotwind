@@ -48,6 +48,7 @@ const PlayerControllerScript := preload("res://src/core/player/player_controller
 const ConsoleScript := preload("res://src/core/console/console.gd")
 const ExplorerPanelsScript := preload("res://src/tools/ui/explorer_panels.gd")
 const CellBrowserScript := preload("res://src/tools/ui/cell_browser.gd")
+const LightTuning := preload("res://src/core/world/light_tuning.gd")
 const InteriorPocketManagerScript := preload("res://src/core/world/interior_pocket_manager.gd")
 # Debug/diagnostic scripts — lazy-loaded on first use to speed up startup
 var _AutomatedTestRunnerScript: GDScript
@@ -195,9 +196,6 @@ var _is_loading: bool = true  # Blocks input until startup complete
 var _perf_overlay_visible: bool = true
 var _current_view_distance: int = StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS
 var _hlod_flyby_mode: bool = false
-var _hlod_ui_transition_until_msec: int = 0
-var _hlod_ui_last_toggle_msec: int = -100000
-const HLOD_UI_COOLDOWN_MSEC := 1500
 var _character_assets_preloaded: bool = false  # Deferred until characters first enabled
 var _water_render_root: Node3D = null
 var _river_render_nodes_by_body_id: Dictionary[StringName, Node3D] = {}
@@ -2116,7 +2114,8 @@ func _setup_visibility_toggles() -> void:
 		"time_of_day_changed": _weather_controls.on_time_of_day_changed,
 		"time_scale_changed": _weather_controls.on_time_scale_changed,
 		"time_pause_toggled": _weather_controls.on_time_pause_toggled,
-		"fog_density_changed": _weather_controls.on_fog_density_changed,
+		"depth_fog_strength_changed": _weather_controls.on_depth_fog_strength_changed,
+		"volumetric_fog_strength_changed": _weather_controls.on_volumetric_fog_strength_changed,
 		"cloud_renderer_changed": _weather_controls.on_cloud_renderer_changed,
 		"cloud_coverage_changed": _weather_controls.on_cloud_coverage_changed,
 		"cloud_density_changed": _weather_controls.on_cloud_density_changed,
@@ -2149,15 +2148,21 @@ func _setup_visibility_toggles() -> void:
 		"ssao_toggled": _env_controls.on_ssao_toggled,
 		"ssil_toggled": _env_controls.on_ssil_toggled,
 		"glow_toggled": _env_controls.on_glow_toggled,
+		"sdfgi_toggled": _env_controls.on_sdfgi_toggled,
 		"godrays_toggled": _env_controls.on_godrays_toggled,
 		"native_vfog_toggled": _env_controls.on_native_volumetric_fog_toggled,
 		"depth_fog_toggled": _env_controls.on_depth_fog_toggled,
+		"ground_fog_toggled": func(on: bool) -> void:
+			_env_controls.on_ground_fog_toggled(on)
+			if on and _panels:
+				_panels.push_ground_fog_params(),
+		"ground_fog_param": _env_controls.on_ground_fog_param_changed,
 		"tonemapper_changed": _env_controls.on_tonemapper_changed,
 		"shadow_cascades_toggled": _env_controls.on_shadow_cascades_toggled,
 		"quality_pretty_preset": _on_quality_pretty_preset,
 		"quality_balanced_preset": _on_quality_balanced_preset,
 		"quality_fast_preset": _on_quality_fast_preset,
-		# VAIO fog/clouds removed from UI — redundant with depth/volumetric fog + SunshineClouds2
+		# Ground fog/clouds removed from UI — redundant with depth/volumetric fog + SunshineClouds2
 		"color_grading_toggled": _env_controls.on_color_grading_toggled,
 		"morrowind_preset": _env_controls.on_morrowind_color_preset,
 		"dramatic_preset": _env_controls.on_dramatic_color_preset,
@@ -2169,8 +2174,12 @@ func _setup_visibility_toggles() -> void:
 		"near_gameplay_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("near_gameplay", enabled),
 		"static_visuals_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("static_visuals", enabled),
 		"far_impostors_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("far_impostors", enabled),
-		"hlod_toggled": _on_hlod_ui_toggled,
+		"chunk_toggled": _on_chunk_ui_toggled,
 		"distant_lights_toggled": func(enabled: bool) -> void: _set_subsystem_toggle_from_ui("distant_lights", enabled),
+		"light_tuning_param": func(value: float, param: String) -> void:
+			LightTuning.set_param(param, value)
+			if native_streaming_manager and native_streaming_manager.has_method("refresh_light_tuning"):
+				native_streaming_manager.refresh_light_tuning(),
 		"lod_mode_pressed": _on_lod_mode_pressed,
 		"dump_profiling": func() -> void:
 			if _profiling_report:
@@ -2191,7 +2200,7 @@ func _setup_visibility_toggles() -> void:
 		"near_gameplay": true,
 		"static_visuals": SettingsManager.get_distant_rendering_enabled(),
 		"far_impostors": SettingsManager.get_distant_rendering_enabled(),
-		"hlod": false,
+		"chunk": false,
 		"distant_lights": SettingsManager.get_distant_rendering_enabled(),
 	}
 	_panels = ExplorerPanelsScript.new(callbacks, initial_state)
@@ -2307,17 +2316,18 @@ func _set_subsystem_toggle_from_ui(name: String, enabled: bool) -> void:
 				native_streaming_manager.set_distant_lights_visible(enabled)
 
 
-func _on_hlod_ui_toggled(enabled: bool) -> void:
-	var now := Time.get_ticks_msec()
-	if now - _hlod_ui_last_toggle_msec < HLOD_UI_COOLDOWN_MSEC:
-		if _panels and _panels.hlod_toggle:
-			_panels.hlod_toggle.set_pressed_no_signal(not enabled)
-		_log("[color=yellow]HLOD toggle cooling down; wait %.1fs[/color]" % [float(HLOD_UI_COOLDOWN_MSEC - (now - _hlod_ui_last_toggle_msec)) / 1000.0])
+## UI toggle for the CHUNK tier (offline-baked merged ring proxies). Routes
+## straight to the renderer — parallel to the `chunks_enable` console command —
+## and reflects the effective state, which stays OFF when no bake is on disk.
+func _on_chunk_ui_toggled(enabled: bool) -> void:
+	if not native_streaming_manager:
 		return
-	_hlod_ui_last_toggle_msec = now
-	_hlod_ui_transition_until_msec = now + HLOD_UI_COOLDOWN_MSEC
-	_update_hlod_ui_status("Starting" if enabled else "Stopping")
-	_set_subsystem_toggle_from_ui("hlod", enabled)
+	var effective: bool = bool(native_streaming_manager.set_chunk_tier_enabled(enabled))
+	if enabled and not effective:
+		if _panels and _panels.chunk_toggle:
+			_panels.chunk_toggle.set_pressed_no_signal(false)
+		_log("[color=yellow]CHUNK tier unavailable — no bake on disk (run chunk_proxy_bake_runner.tscn)[/color]")
+	_update_chunk_ui_status("On" if effective else "Off")
 
 
 func _sync_distance_toggle_widgets() -> void:
@@ -2329,31 +2339,29 @@ func _sync_distance_toggle_widgets() -> void:
 		_panels.static_visuals_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("static_visuals"))
 	if _panels.far_impostors_toggle:
 		_panels.far_impostors_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("far_impostors"))
-	if _panels.hlod_toggle:
-		_panels.hlod_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("hlod"))
 	if _panels.distant_lights_toggle:
 		_panels.distant_lights_toggle.set_pressed_no_signal(_subsystem_toggles.get_flag("distant_lights"))
-	_update_hlod_ui_status("On" if _subsystem_toggles.get_flag("hlod") else "Off")
+	_update_chunk_ui_status()
 
 
 func _on_subsystem_flag_changed(_name: String, _enabled: bool) -> void:
 	_sync_distance_toggle_widgets()
 
 
-func _update_hlod_ui_status(state: String = "") -> void:
-	if not _panels or not _panels.hlod_status_label:
+## Refresh the CHUNK status label + keep the checkbox in sync with the real
+## renderer state (console chunks_enable/disable and no-bake refusals all land
+## here). Pass an explicit state string to force the label during a transition.
+func _update_chunk_ui_status(state: String = "") -> void:
+	if not _panels or not _panels.chunk_status_label:
 		return
-	var stats: Dictionary = native_streaming_manager.get_hlod_stats() if native_streaming_manager else {}
-	var active := bool(stats.get("enabled", false))
-	var pending := int(stats.get("pending_merges", 0)) + int(stats.get("cached_publish_queue_size", 0)) + int(stats.get("merge_queue_size", 0))
-	var cells := int(stats.get("active_cells", 0))
-	var label_state := state
-	if label_state.is_empty():
-		if Time.get_ticks_msec() < _hlod_ui_transition_until_msec:
-			label_state = "Starting" if active else "Stopping"
-		else:
-			label_state = "On" if active else "Off"
-	_panels.hlod_status_label.text = "HLOD: %s | chunks %d | pending %d" % [label_state, cells, pending]
+	var enabled: bool = native_streaming_manager.is_chunk_tier_enabled() if native_streaming_manager else false
+	if state.is_empty() and _panels.chunk_toggle and _panels.chunk_toggle.button_pressed != enabled:
+		_panels.chunk_toggle.set_pressed_no_signal(enabled)
+	var stats: Dictionary = native_streaming_manager.get_chunk_tier_stats() if native_streaming_manager else {}
+	var active := int(stats.get("chunk_tier_active", 0))
+	var queued := int(stats.get("chunk_tier_queue", 0))
+	var label_state := state if not state.is_empty() else ("On" if enabled else "Off")
+	_panels.chunk_status_label.text = "CHUNK: %s | active %d | queue %d" % [label_state, active, queued]
 
 
 ## Toggle characters (NPCs/creatures) visibility
@@ -4368,7 +4376,7 @@ func _process(delta: float) -> void:
 	# Update stats periodically
 	if Engine.get_frames_drawn() % 30 == 0:
 		_update_stats()
-		_update_hlod_ui_status()
+		_update_chunk_ui_status()
 	var wa_end := Time.get_ticks_usec()
 
 	if wa_end - wa_t0 > 8_000 and Engine.get_frames_drawn() - _wa_last_warn_frame > 60:
@@ -4758,7 +4766,7 @@ func _on_interior_transition_started(_cell_name: String) -> void:
 	# Always kill the fallback directional light on interior entry, regardless
 	# of whether sky was on (toggling sky off would have turned it on; sky
 	# already off means it was on as the sole exterior light). Interior wants
-	# zero directional light — matches OpenMW interior handling.
+	# zero directional light — matches classic interior handling.
 	if _env_controls:
 		var fb_light: DirectionalLight3D = _env_controls.get_fallback_light()
 		if fb_light:

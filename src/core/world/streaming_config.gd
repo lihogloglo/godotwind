@@ -39,7 +39,7 @@ const VIEW_DISTANCE_STEP_METERS := 50
 ## to feed the fixed MID bridge band.
 const MAX_SCENE_LOAD_RADIUS_CELLS := 4
 
-## Playable NEAR-only cell footprint. This matches the OpenMW-style exterior
+## Playable NEAR-only cell footprint. This matches the classic exterior
 ## load distance of 1 cell: current cell plus immediate neighbors. MID disabled
 ## must not keep loading the 300m bridge ring.
 const NEAR_ONLY_SCENE_LOAD_RADIUS_CELLS := 1
@@ -457,10 +457,10 @@ const ENABLE_PROFILING := true
 # pre-registration dispatched BEFORE the cell enters active load radius. When
 # the cell actually loads, the data phase is a cache hit, instantiation runs
 # fast-path. LRU-bounded memory; entries expire after EXPIRY_DELAY_MS.
-# OpenMW defaults; see research doc §8.3 + §8.4.
+# Canonical streaming defaults; see research doc §8.3 + §8.4.
 
 ## LRU expiry — cells untouched for this many ms are candidates for eviction
-## (if cache size exceeds MIN_CACHE_CELLS). 5 s matches OpenMW default.
+## (if cache size exceeds MIN_CACHE_CELLS). 5 s is the canonical default.
 const PRELOAD_EXPIRY_DELAY_MS: int = 5000
 
 ## Minimum cache size — never evict below this, even if all entries are stale.
@@ -473,7 +473,7 @@ const PRELOAD_MAX_CACHE_CELLS: int = 20
 
 ## Base prediction window (seconds). Speed-scaled at runtime per §8.3 formula:
 ## `t_predict = clamp(PRELOAD_PREDICTION_TIME_S / max(speed, 1.0), 0.3, 4.0)`.
-## 1.0 s is the OpenMW baseline; empirically matches the ResourceLoader warm
+## 1.0 s is the canonical baseline; empirically matches the ResourceLoader warm
 ## time per cell (~0.8–1.0 s) on the current machine.
 const PRELOAD_PREDICTION_TIME_S: float = 1.0
 

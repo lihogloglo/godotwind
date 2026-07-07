@@ -4,8 +4,8 @@
 ##
 ## Purpose: eliminate the 20–50ms `PackedScene.instantiate` + tree-walk spike
 ## that `StaticShapeCache.get_shapes` otherwise incurs on first sight of each
-## unique prototype during cell transition. OpenMW avoids the spike entirely by
-## reading `bhkPackedNiTriStripsShape` bytes directly into `btBvhTriangleMeshShape`;
+## unique prototype during cell transition. Reading `bhkPackedNiTriStripsShape`
+## bytes directly into `btBvhTriangleMeshShape` avoids the spike entirely;
 ## we approximate that with a tiny Resource sidecar so `ResourceLoader.load`
 ## returns the extracted shape list in sub-ms without touching the scene system.
 ##

@@ -1,6 +1,6 @@
 ## ControlledRefractionSource
 ##
-## Ocean Lab vertical slice for an OpenMW-style refraction source: a named
+## Ocean Lab vertical slice for a refraction source: a named
 ## receiver-only color/depth pair captured through PrewaterCaptureRenderer.
 class_name ControlledRefractionSource
 extends Node

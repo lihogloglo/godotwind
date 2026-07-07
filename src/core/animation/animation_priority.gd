@@ -1,10 +1,9 @@
 ## AnimationPriority - Manages animation priority and conflict resolution
 ##
-## Based on OpenMW's Animation::AnimPriority system
 ## Higher priority animations override lower priority ones
 ## Same priority animations can blend based on mask
 ##
-## Priority Levels (from OpenMW):
+## Priority Levels:
 ## - 0: None/Idle
 ## - 1: Movement (walk, run)
 ## - 2: Combat Idle

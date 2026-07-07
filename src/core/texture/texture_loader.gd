@@ -116,7 +116,7 @@ static func load_texture(texture_path: String) -> ImageTexture:
 ## 2. If path doesn't start with "textures\", prepend it
 ## 3. Try multiple extensions (.dds, .tga, .bmp, .png)
 ##
-## Priority order (OpenMW-style):
+## Priority order:
 ## 1. External texture directories (later dirs override earlier - mod support)
 ## 2. BSA archives (vanilla game files)
 ##

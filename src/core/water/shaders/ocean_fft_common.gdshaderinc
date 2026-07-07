@@ -33,7 +33,7 @@ uniform vec4 map_scales[MAX_CASCADES];
 
 // Water colors
 group_uniforms water_color;
-uniform vec3 color_shallow : source_color = vec3(0.09, 0.12, 0.13);  // OpenMW-matched: dark, desaturated
+uniform vec3 color_shallow : source_color = vec3(0.09, 0.12, 0.13);  // Morrowind-matched: dark, desaturated
 uniform vec3 color_deep : source_color = vec3(0.02, 0.04, 0.06);
 uniform vec3 color_sky_tint : source_color = vec3(0.3, 0.38, 0.45);
 uniform float sky_tint_strength : hint_range(0.0, 1.0) = 0.5;  // Weather-driven: calm=0.8, storm=0.3
@@ -184,6 +184,11 @@ uniform float scatter_choppiness_max : hint_range(0.1, 3.0) = 0.75;
 // Sun direction in WORLD space (pointing FROM sun TO world). Set per-frame by
 // WaterSystem from the scene's DirectionalLight3D. Default (down) = noon.
 uniform vec3 sun_dir_world = vec3(0.0, -1.0, 0.0);
+// Incident scene light: sun+moon light_color × light_energy, pushed per frame
+// by OceanFFTProvider. Scales the unlit SSS emission so it darkens with the
+// day/night cycle instead of glowing at daytime calibration all night.
+// Defaults to full daylight for scenes that never push it.
+uniform vec3 scene_light_color = vec3(1.0);
 
 // Varyings — populated by vertex() in each .gdshader, read by fragment() here.
 varying float wave_height;
@@ -750,7 +755,7 @@ void fragment() {
 		SPECULAR = 0.0;
 	} else {
 		ALBEDO = final_col;
-		EMISSION = color_sub_surface * scatter * sss_emission_strength * (1.0 - foam_factor * 0.5);
+		EMISSION = color_sub_surface * scene_light_color * scatter * sss_emission_strength * (1.0 - foam_factor * 0.5);
 	}
 	// Foam perturbs normal for rough micro-detail (foam isn't mirror-smooth)
 	if (foam_factor > 0.01) {
@@ -801,7 +806,10 @@ void light() {
 	float view_mask = smith_masking_shadowing(dot_nv, spec_alpha);
 	float microfacet_distribution = ggx_distribution(dot(NORMAL, halfway), spec_alpha);
 	float geometric_attenuation = 1.0 / (1.0 + light_mask + view_mask);
-	SPECULAR_LIGHT += fresnel * microfacet_distribution * geometric_attenuation / (4.0 * dot_nv + 0.1) * ATTENUATION;
+	// LIGHT_COLOR is mandatory here (canonical Cook-Torrance: spec × light color
+	// × intensity). Its omission was invisible with a near-white sun but turned
+	// the distant-lantern glints WHITE instead of orange (2026-07-06 bug).
+	SPECULAR_LIGHT += fresnel * microfacet_distribution * geometric_attenuation / (4.0 * dot_nv + 0.1) * ATTENUATION * LIGHT_COLOR;
 
 	// --- DIFFUSE --- half-lambert + foam mix
 	float half_lambert = dot_nl * 0.5 + 0.5;

@@ -2,7 +2,7 @@
 #version 450
 
 // Light Glow Compute Shader — Point Light Fog Halos
-// Ported from VAIO's CalculateLights (Rafael's Shader Pack) for OpenMW.
+// Point-light glow (CalculateLights) pass.
 //
 // Accumulates per-pixel glow from nearby point lights, creating halos
 // through fog. Light radius expands in foggier conditions. Glow fades
@@ -51,7 +51,7 @@ vec3 get_world_position(vec2 uv, float depth) {
     return view_pos.xyz;
 }
 
-// ─── Light Glow Calculation (adapted from VAIO's CalculateLights) ───
+// ─── Light Glow Calculation ───
 
 void main() {
     ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
@@ -76,7 +76,7 @@ void main() {
     float world_distance = is_sky ? 10000.0 : length(world_pos - params.camera_position.xyz);
     vec3 view_dir = normalize(world_pos - params.camera_position.xyz);
 
-    // Fog-based radius expansion (VAIO: lightRadius *= (fogginess + 1.0))
+    // Fog-based radius expansion (lightRadius *= (fogginess + 1.0))
     float fogginess = params.fog_params.y;  // 0 = clear, ~5 = very foggy
 
     // Sun-based intensity reduction (lights less visible in bright daylight)
@@ -116,18 +116,18 @@ void main() {
         float fade_dist = 13000.0;  // LightsFadeDistanceEnd default
         intensity *= smoothstep(fade_dist, fade_dist * 0.9, light_dist);
 
-        // Reduce in bright fog (VAIO: smoothstep(5.0, 0.0, fogginess) * 0.75 + 0.25)
+        // Reduce in bright fog (smoothstep(5.0, 0.0, fogginess) * 0.75 + 0.25)
         intensity *= 0.75 * smoothstep(5.0, 0.0, fogginess) + 0.25;
 
         // Directional occlusion: reduce glow when looking away from the light
         if (dist_to_light > 0.0)
             intensity *= 1.0 - max(0.0, dot(view_dir, (light_pos - projected_pos) / dist_to_light));
 
-        // Smooth falloff (VAIO: 1 - sqrt(distanceRatio), then pow with per-channel exponents)
+        // Smooth falloff (1 - sqrt(distanceRatio), then pow with per-channel exponents)
         dist_ratio = 1.0 - sqrt(max(dist_ratio, 0.0));
         vec3 light_color = col_intensity.rgb * pow(vec3(dist_ratio), vec3(1.3, 1.4, 1.5)) * intensity;
 
-        // Additive accumulation with saturation (VAIO pattern)
+        // Additive accumulation with saturation
         sum_color = clamp(light_color * (1.0 - sum_color) + sum_color, 0.0, 1.0);
     }
 

@@ -1,6 +1,6 @@
 ## LightGlowEffect - Point light fog halos
 ##
-## Ported from VAIO's RT_Lights pass (Rafael's Shader Pack).
+## RT_Lights point-light glow pass.
 ## Accumulates per-pixel glow from nearby OmniLight3D nodes,
 ## creating atmospheric halos through fog. Light glow radius
 ## expands in foggier conditions.
@@ -50,7 +50,7 @@ func _init() -> void:
 
 	effect_name = "light_glow"
 	display_name = "Light Glow"
-	description = "Point light fog halos. Lights create atmospheric glow through fog. Ported from VAIO's RT_Lights pass."
+	description = "Point light fog halos. Lights create atmospheric glow through fog."
 	category = "Atmosphere"
 	render_priority = 12  # After godrays (11), before color grading (100)
 
@@ -138,7 +138,7 @@ func update_weather_cache() -> void:
 		var result: WeatherTypes.WeatherResult = WeatherManager.get_weather_result()
 		_cached_fog_intensity = result.fog_depth
 		# Fogginess: 0 = clear, higher = more fog glow expansion
-		# Derive from weather fog density (VAIO: 5.0 * saturate(fogAmount - 1.0))
+		# Derive from weather fog density (5.0 * saturate(fogAmount - 1.0))
 		var fog_amount: float = 2.0 * result.fog_depth
 		_cached_fogginess = 5.0 * clampf(fog_amount - 1.0, 0.0, 1.0)
 	else:

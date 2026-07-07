@@ -4,8 +4,8 @@
 ## streaming pipeline ticking via `PROCESS_MODE_WHEN_PAUSED` on the
 ## streaming manager, hold the fullscreen `LoadingScreen` overlay visible
 ## until a caller-supplied exit predicate returns true (or a timeout
-## fires), then unpause. Mirrors OpenMW's `Loading::ScopedLoad` scope
-## guard in shape — see docs/audit/LOADING_STATE_MACHINE_DESIGN.md for
+## fires), then unpause. Shaped like a `ScopedLoad` scope
+## guard — see docs/audit/LOADING_STATE_MACHINE_DESIGN.md for
 ## the side-by-side.
 ##
 ## Two triggers on the gameplay side today:

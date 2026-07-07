@@ -1,7 +1,7 @@
 ## Weather Data — Default Morrowind weather parameters
 ##
-## All values ported from OpenMW openmw.cfg fallback defaults, which match
-## the original Morrowind.ini. Colors are RGB 0-255 for 4 time-of-day phases:
+## All values ported from Morrowind's fallback defaults (Morrowind.ini).
+## Colors are RGB 0-255 for 4 time-of-day phases:
 ## [sunrise, day, sunset, night].
 ##
 ## This is a static data class — no instances needed.

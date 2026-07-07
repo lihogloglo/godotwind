@@ -236,7 +236,7 @@ static func _resolve_material(sm: SubMeshInput, surface_index: int) -> Material:
 ##   • `Dictionary[mesh_id -> Dictionary{merge: bool, min_size_merged_sq: float}]` —
 ##     Phase 5 rich form. When `min_size_merged_sq > 0` AND the ref's `rs2`
 ##     and `dist_sq` are both set, `rs2 < dist_sq × min_size_merged_sq`
-##     rejects the ref (second-pass size filter, OpenMW §2.5).
+##     rejects the ref (second-pass size filter, §2.5).
 ## Empty mask = keep everything (no cost-benefit pass).
 static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask: Dictionary = {}) -> Array:
 	var triplets: Array = []
@@ -284,9 +284,9 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask
 	return triplets
 
 
-## Phase 3b — cost-benefit analyze (OpenMW ObjectPaging §2.3).
+## Phase 3b — cost-benefit analyze (ObjectPaging §2.3).
 ##
-## Matches `inspos/openmw/apps/openmw/mwrender/objectpaging.cpp:823-836`:
+## Reference formula:
 ##     mergeCost    = numVerts × size            (larger chunks pay more)
 ##     mergeBenefit = avgStateSetReuse × mergeFactor
 ##     merge        = mergeBenefit > mergeCost
@@ -295,14 +295,14 @@ static func _flatten_to_triplets(inputs: Array, chunk_origin: Vector3, keep_mask
 ##     mergeBenefit_type = ref_count_in_chunk × shared_material_count
 ## where `shared_material_count` is the number of distinct materials on this
 ## mesh-type that are also used by ≥2 distinct mesh-types in the chunk (the
-## Godotwind proxy for OpenMW's StateSet reuse average). A mesh-type whose
+## Godotwind proxy for the StateSet reuse average). A mesh-type whose
 ## materials appear nowhere else has shared_material_count = 0 →
 ## mergeBenefit = 0 → merge=false → stays as individual RS instances.
 ##
 ## Returns `Dictionary[mesh_instance_id: int -> Dictionary{merge: bool,
 ## min_size_merged_sq: float}]` — the keep-mask consumed by
 ## `_flatten_to_triplets`. `min_size_merged_sq` is the squared threshold for
-## the Phase 5 second-pass filter (OpenMW §2.5 `minSizeMergeFactor`) computed
+## the Phase 5 second-pass filter (§2.5 `minSizeMergeFactor`) computed
 ## from the per-type mergeBenefit / mergeCost ratio. It is `0.0` when merge
 ## is rejected (filter is a no-op for unmerged types).
 ##
@@ -343,8 +343,8 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 
 	# Compute merge decision + Phase 5 per-type min-size threshold.
 	#
-	# OpenMW formula: mergeBenefit = MERGE_FACTOR × avgStateSetReuse × numRefs
-	# `avgStateSetReuse` in OpenMW is INTRA-NIF: nodes within one NIF sharing
+	# Reference formula: mergeBenefit = MERGE_FACTOR × avgStateSetReuse × numRefs
+	# `avgStateSetReuse` is INTRA-NIF: nodes within one NIF sharing
 	# the same material state. Godotwind's original implementation mis-ported
 	# this as CROSS-NIF material sharing (different mesh types sharing a Material
 	# instance), which is essentially zero for Morrowind content (each model has
@@ -353,19 +353,19 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 	# Fix: use surface_count as a proxy for intra-NIF state reuse. A model with
 	# N surfaces that all share materials has high intra-NIF reuse. We clamp to
 	# max(1, distinct_mat_count) to avoid zero-benefit when a model has 1 surface.
-	# This matches OpenMW's intent: multi-surface models with shared state are
+	# This matches the intent: multi-surface models with shared state are
 	# worth merging; single-surface unique models are also merged if ref_count
 	# is high enough to overcome the vertex cost.
 	var result: Dictionary = {}
 	var cost_multiplier: float = float(size_level + 1)
 	for mesh_id: int in groups:
 		var group: Dictionary = groups[mesh_id]
-		# OpenMW cost-benefit (objectpaging.cpp §823-836):
+		# Cost-benefit (§823-836):
 		#   mergeCost    = verts_per_instance × (size_level + 1)
 		#   mergeBenefit = ref_count × avgStateSetReuse × MERGE_FACTOR
 		# `avgStateSetReuse` proxy: distinct material count within this mesh type
 		# (clamped to 1). A model with 1 surface has reuse=1; one with many
-		# surfaces sharing fewer materials has higher reuse. This matches OpenMW's
+		# surfaces sharing fewer materials has higher reuse. This matches the
 		# intra-NIF sharing metric more closely than the old cross-NIF approach.
 		var mat_count: int = maxi(1, group["mats"].size())
 		var verts_per_instance: int = group["verts_per_instance"]
@@ -382,7 +382,7 @@ static func _analyze_chunk(inputs: Array, size_level: int) -> Dictionary:
 	return result
 
 
-## Phase 5 — OpenMW `minSizeMerged` formula (objectpaging.cpp:833-836).
+## Phase 5 — `minSizeMerged` formula (§833-836).
 ## Returns the SQUARED threshold for direct comparison with `rs2 / dist_sq`.
 ## Benefit==0 collapses to `MIN_SIZE²` (base filter) — merge is rejected in
 ## that case anyway, so this branch only trips for caller parity tests.

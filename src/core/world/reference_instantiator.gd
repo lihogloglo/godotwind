@@ -14,6 +14,7 @@ extends RefCounted
 # Dependencies
 const CS := preload("res://src/core/coordinate_system.gd")
 const DU := preload("res://src/core/world/distance_utils.gd")
+const LightTuning := preload("res://src/core/world/light_tuning.gd")
 const CharacterFactoryV2 := preload("res://src/core/animation/character_factory_v2.gd")
 const ImpostorCandidatesScript := preload("res://src/core/world/impostor_candidates.gd")
 const MeshVisibilityUtils := preload("res://src/core/world/mesh_visibility_utils.gd")
@@ -235,7 +236,7 @@ const SOURCE_LIGHT_RADIUS_SCALE: float = CS.SCALE_FACTOR
 
 ## Lazy-spawn distance for interactive refs (containers, doors, activators,
 ## carryables). Refs beyond this distance are deferred and re-queued on camera
-## approach. OpenMW pattern: Node3D creation for 12-20 ms/ref interactives is
+## approach. Lazy-spawn pattern: Node3D creation for 12-20 ms/ref interactives is
 ## skipped until gameplay can plausibly interact — eliminates 70-80% of the
 ## `inst:` overrun during cell-crossing bursts while preserving the invariant
 ## "containers appear before you can touch them." Keep this comfortably above
@@ -248,6 +249,13 @@ const INTERACTIVE_PROXIMITY_THRESHOLD_M: float = 25.0
 const DOOR_VISUAL_PROXY_ENABLED: bool = true
 const CONTAINER_VISUAL_PROXY_ENABLED: bool = true
 const CONTAINER_VISUAL_PROXY_RANGE_M: float = DU.NEAR_END
+## Light-source MESHES are scene fixtures, not gameplay: the MW convention
+## is mesh always rendered with the cell, only the light emitter distance-
+## gated (settings: 'maximum light distance' 8192 MW units ≈ 117 m). Gating
+## the whole light node behind the 60 m lazy-spawn made lanterns invisible in
+## the 60-150 m band (user-reported, 2026-07-06). The proxy carries the mesh;
+## the gameplay node (light + animation + boost) stays proximity-gated.
+const LIGHT_VISUAL_PROXY_ENABLED: bool = true
 
 ## Win 4a (NEAR refactor 2026-04-25) — lazy-spawn distance for OmniLight3D refs.
 ##
@@ -572,6 +580,7 @@ func ensure_source_visual_proxy_for_record(
 		return false
 	var source_key := _record_source_key(record, type_name)
 	if source_key.is_empty():
+		_log_proxy_fail_once(type_name, str(record.get("model_path")), "empty_source_key")
 		return false
 	return _ensure_visual_proxy(
 		source_key,
@@ -1068,14 +1077,17 @@ func _ensure_visual_proxy(
 		if transform.origin.distance_squared_to(camera_position) > CONTAINER_VISUAL_PROXY_RANGE_M * CONTAINER_VISUAL_PROXY_RANGE_M:
 			return false
 	if static_renderer == null or model_loader == null:
+		_log_proxy_fail_once(type_name, model_path, "no_renderer_or_loader")
 		return false
 	if not static_renderer.has_method("add_visual_proxy"):
+		_log_proxy_fail_once(type_name, model_path, "renderer_missing_api")
 		return false
 	if static_renderer.has_method("is_proxy_dirty") and bool(static_renderer.call("is_proxy_dirty", source_key)):
 		return false
 
 	var normalized := model_path.to_lower().replace("/", "\\")
 	if not _ensure_visual_proxy_type_registered(normalized, model_path, cache_item_id):
+		_log_proxy_fail_once(type_name, model_path, "no_cached_packed_scene(item='%s')" % cache_item_id)
 		return false
 
 	var add_start := Time.get_ticks_usec()
@@ -1092,9 +1104,29 @@ func _ensure_visual_proxy(
 	)
 	last_static_add_us += Time.get_ticks_usec() - add_start
 	if instance_id < 0:
+		_log_proxy_fail_once(type_name, model_path, "add_visual_proxy_rejected")
 		return false
 	stats["visual_proxies_created"] = int(stats.get("visual_proxies_created", 0)) + 1
+	if type_name == "light" and not _proxy_diag_logged.has("light_ok"):
+		_proxy_diag_logged["light_ok"] = true
+		Log.info("streaming", "Light visual proxy path CONFIRMED live (first: %s)" % model_path)
 	return true
+
+
+## One-shot diagnostic (2026-07-06, missing-lantern hunt): the proxy chain has
+## several silent `return false` exits — log each unique failure reason once so
+## a single flight tells us which guard rejects light proxies.
+var _proxy_diag_logged: Dictionary[String, bool] = {}
+
+
+func _log_proxy_fail_once(type_name: String, model_path: String, reason: String) -> void:
+	if type_name != "light":
+		return
+	var key := "%s|%s" % [reason, model_path]
+	if _proxy_diag_logged.has(key):
+		return
+	_proxy_diag_logged[key] = true
+	Log.warn("streaming", "Light proxy FAILED [%s] model='%s'" % [reason, model_path])
 
 
 func _ensure_visual_proxy_type_registered(type_name: String, model_path: String, cache_item_id: String = "") -> bool:
@@ -1129,6 +1161,8 @@ static func _uses_visual_proxy(type_name: String) -> bool:
 			return DOOR_VISUAL_PROXY_ENABLED
 		"container":
 			return CONTAINER_VISUAL_PROXY_ENABLED
+		"light":
+			return LIGHT_VISUAL_PROXY_ENABLED
 		_:
 			return false
 
@@ -1159,6 +1193,10 @@ func _instantiate_light(record: RefCounted, light_record: LightRecord) -> Node3D
 		var model_load_start := Time.get_ticks_usec()
 		var model_instance: Node3D = model_loader.call("get_model", light_record.model)
 		last_model_load_us = Time.get_ticks_usec() - model_load_start
+		if model_instance == null:
+			# Diagnostic (2026-07-06 missing-lantern hunt): a null here means the
+			# light SPAWNS (illumination visible) but its lantern mesh never loads.
+			_log_proxy_fail_once("light", light_record.model, "light_model_load_null")
 		if model_instance:
 			model_instance.name = "Model"
 			_hide_lod_nodes(model_instance)  # Hide materialless meshes only
@@ -1245,13 +1283,16 @@ func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) 
 	var omni := OmniLight3D.new()
 	omni.name = "Light"
 
-	# Convert MW radius to Godot range — enforce 0.125m min per OpenMW.
-	var godot_range: float = maxf(light_record.radius * SOURCE_LIGHT_RADIUS_SCALE, 0.125)
-	omni.omni_range = godot_range
+	# Convert MW radius to Godot range — enforce 0.125m min. base_range /
+	# base_energy are the UN-multiplied values, stashed for live re-tuning (see
+	# _register_tunable_light + NativeStreamingManager.reapply_near_lights).
+	var base_range: float = light_record.radius * SOURCE_LIGHT_RADIUS_SCALE
+	var base_energy: float = 1.2 if light_record.is_fire() else 0.8
+	omni.omni_range = maxf(base_range * LightTuning.radius_multiplier, 0.125)
 	omni.light_color = light_record.color
 	if light_record.is_negative():
 		omni.light_negative = true
-	omni.light_energy = 1.2 if light_record.is_fire() else 0.8
+	omni.light_energy = base_energy * LightTuning.near_energy_multiplier
 	omni.shadow_enabled = false  # managed by LightShadowBudget if present
 	omni.omni_attenuation = 1.0
 	# Distance fade: 120m begin, 150m end (matches NEAR tier boundary).
@@ -1263,6 +1304,16 @@ func _attach_animated_omni_light(light_node: Node3D, light_record: LightRecord) 
 	omni.set_meta("base_energy", omni.light_energy)
 
 	light_node.add_child(omni)
+	_register_tunable_light(light_node, base_range, base_energy)
+
+
+## Tag a spawned NEAR light so the Lighting UI can re-apply LightTuning to it live
+## (group walk in NativeStreamingManager.reapply_near_lights). Stores the
+## un-multiplied base range/energy so the walk can recompute with new multipliers.
+func _register_tunable_light(light_node: Node3D, base_range: float, base_energy: float) -> void:
+	light_node.set_meta("gw_base_range", base_range)
+	light_node.set_meta("gw_base_energy", base_energy)
+	light_node.add_to_group("gw_tunable_lights")
 
 
 func _attach_carryable_light_source(instance: Node3D, light_record: LightRecord) -> void:
@@ -1302,8 +1353,11 @@ func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) 
 	# Create the omni light data RID.
 	rids.light_rid = RenderingServer.omni_light_create()
 
-	# Range — MW radius scaled to meters with 0.125m floor (OpenMW convention).
-	var godot_range: float = maxf(light_record.radius * SOURCE_LIGHT_RADIUS_SCALE, 0.125)
+	# Range — MW radius scaled to meters with 0.125m floor (MW convention).
+	# base_range / base_energy are the UN-multiplied values, stashed for live tuning.
+	var base_range: float = light_record.radius * SOURCE_LIGHT_RADIUS_SCALE
+	var base_energy: float = 1.2 if light_record.is_fire() else 0.8
+	var godot_range: float = maxf(base_range * LightTuning.radius_multiplier, 0.125)
 	RenderingServer.light_set_param(rids.light_rid, RenderingServer.LIGHT_PARAM_RANGE, godot_range)
 
 	RenderingServer.light_set_color(rids.light_rid, light_record.color)
@@ -1311,7 +1365,7 @@ func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) 
 	if light_record.is_negative():
 		RenderingServer.light_set_negative(rids.light_rid, true)
 
-	var energy: float = 1.2 if light_record.is_fire() else 0.8
+	var energy: float = base_energy * LightTuning.near_energy_multiplier
 	RenderingServer.light_set_param(rids.light_rid, RenderingServer.LIGHT_PARAM_ENERGY, energy)
 
 	# Attenuation 1.0 matches OmniLight3D default.
@@ -1344,6 +1398,10 @@ func _attach_server_direct_light(light_node: Node3D, light_record: LightRecord) 
 	# Metadata-attach the RID holder so cell_node.queue_free → light_node
 	# .queue_free → meta release → LightRids destructor → RS.free_rid.
 	light_node.set_meta("rs_light_rids", rids)
+	# gw_light_rid lets reapply_near_lights re-tune the light without touching the
+	# LightRids type; valid as long as the node is alive (i.e. in the group).
+	light_node.set_meta("gw_light_rid", rids.light_rid)
+	_register_tunable_light(light_node, base_range, base_energy)
 
 
 ## Instantiate an NPC or Creature
@@ -1864,7 +1922,7 @@ func _apply_transform(node: Node3D, ref: Variant, _apply_model_rotation: bool) -
 	node.scale = CS.scale_to_godot(ref.scale)
 
 	# Rotation conversion via CoordinateSystem
-	# Uses esm_rotation_to_godot_basis() which matches OpenMW's makeOsgQuat
+	# Uses esm_rotation_to_godot_basis() for MW-to-Godot rotation conversion
 	node.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
 
 

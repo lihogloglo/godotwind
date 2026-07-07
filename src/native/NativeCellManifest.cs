@@ -26,7 +26,11 @@ public partial class NativeCellManifest : RefCounted
 {
     // "GWM1" little-endian.
     private const uint Magic = 0x314D5747;
-    private const ushort FormatVersion = 1;
+    // Bumped 1→2 (2026-07-07): light_radius semantics changed from MW-units-ish
+    // (raw × 70/64) to real metres (raw / 70). Old .gwm files hold the wrong
+    // scale, so reject them — LoadFromFile returns FileCorrupt and the source
+    // falls back to a runtime build (corrected scale) until the worldspace is re-cooked.
+    private const ushort FormatVersion = 2;
 
     private struct Rec
     {

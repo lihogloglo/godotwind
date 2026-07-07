@@ -1,7 +1,7 @@
 ## ShaderManager - Hot-swappable post-processing shader management
 ##
 ## Provides runtime loading, enabling/disabling, and configuration of
-## post-processing effects. Inspired by OpenMW's post-processor system.
+## post-processing effects.
 ##
 ## Usage:
 ## [codeblock]

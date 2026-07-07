@@ -6,7 +6,12 @@ const CarryableRegistryScript := preload("res://src/core/interaction/carryable_r
 const RecordScript := preload("res://src/core/world/world_object_record.gd")
 const ManifestScript := preload("res://src/core/world/world_cell_manifest.gd")
 
-const MW_LIGHT_SCALE: float = 70.0 / 64.0
+## MW light radius (raw ESM units) → Godot metres. Uses the SAME scale as every
+## other length (CS.SCALE_FACTOR = 1/UNITS_PER_METER) so a lamp's distant pool
+## matches its NEAR OmniLight3D (reference_instantiator.SOURCE_LIGHT_RADIUS_SCALE).
+## Was 70/64 ≈ 1.09 — a units bug that treated MW units as metres, making distant
+## light ranges ~76× too large (fixed 2026-07-07).
+const MW_LIGHT_SCALE: float = CS.SCALE_FACTOR
 const LIGHT_PROXIMITY_RADIUS_M: float = 60.0
 const INTERACTIVE_PROXIMITY_RADIUS_M: float = 25.0
 const ACTOR_PROXIMITY_RADIUS_M: float = 150.0

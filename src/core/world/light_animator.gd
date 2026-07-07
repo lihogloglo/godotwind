@@ -83,7 +83,7 @@ func _process(delta: float) -> void:
 	if _lights.is_empty():
 		return
 
-	# Effective 15 FPS with temporal smoothing (matches OpenMW)
+	# Effective 15 FPS with temporal smoothing
 	var raw_ticks: float = delta * 15.0
 	var smoothed_ticks: float = raw_ticks * 0.25 + _prev_ticks * 0.75
 	_prev_ticks = smoothed_ticks

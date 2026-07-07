@@ -1,6 +1,5 @@
 ## Cell Manager - Loads and instantiates Morrowind cells in Godot
 ## Handles loading cells and placing provider-supplied model objects
-## Ported from OpenMW apps/openmw/mwworld/cellstore.cpp and scene.cpp
 ##
 ## Supports both synchronous and asynchronous cell loading:
 ## - load_exterior_cell() / load_cell() - Synchronous, blocks until complete
@@ -818,7 +817,7 @@ var _diag_per_type_last_log_msec: int = 0
 ## Proximity-deferred interactives (containers, doors, activators, carryables).
 ## Each entry mirrors `InstantiationEntry` but lives off the main queue until
 ## the camera approaches the ref. Re-queued by `tick_proximity_deferred`.
-## OpenMW lazy-spawn pattern: Node3D interactives at 12-20 ms/ref don't
+## Lazy-spawn pattern: Node3D interactives at 12-20 ms/ref don't
 ## instantiate until gameplay can plausibly interact (< 25 m from camera for
 ## generic interactives; lights use their wider light threshold).
 var _proximity_deferred: Array[InstantiationEntry] = []
@@ -2786,7 +2785,7 @@ func resume_request_publish(request_id: int) -> void:
 ## is_instance_valid guard handles orphaned entries).
 ##
 ## This is the exterior-cell counterpart to `cancel_async_request`. Canonical
-## state-reversal pattern per UE5 World Partition + OpenMW UnrefQueue: keep
+## state-reversal pattern per UE5 World Partition + deferred unref queue: keep
 ## request + queue intact through the unload-container limbo so reclaim can
 ## reverse the transition without losing pending instantiation work.
 func finalize_unloaded_cell(request_id: int) -> void:

@@ -1,6 +1,6 @@
 # TerrainTextureNameParser.gd
 # Automatically parses texture filenames to assign deformation heights
-# Designed for Morrowind/OpenMW texture naming conventions
+# Designed for Morrowind texture naming conventions
 
 class_name TerrainTextureNameParser
 extends RefCounted

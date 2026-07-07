@@ -2,7 +2,7 @@
 #version 450
 
 // Godrays Compute Shader — Screen-Space God Rays
-// Based on Rafael's godrays.omwfx for OpenMW, adapted for Godot 4.6 CompositorEffect.
+// Adapted for Godot 4.6 CompositorEffect.
 //
 // 4-pass architecture (selected by pass_id push constant):
 //   Pass 0 (Sky Mask):     Depth-based sun occlusion detection (full res)
@@ -44,7 +44,7 @@ const int PASS_COMBINE     = 3;
 // ═══════════════════════════════════════════════════════════════════
 
 void sky_mask() {
-	// Full resolution for sharp silhouette edges (matches Rafael's RT_Stretch)
+	// Full resolution for sharp silhouette edges (RT_Stretch)
 	vec2 full_res = params.extra_params.xy;
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= int(full_res.x) || pixel.y >= int(full_res.y))
@@ -73,7 +73,7 @@ void sky_mask() {
 // ═══════════════════════════════════════════════════════════════════
 
 void radial_blur() {
-	// Full resolution for edge-precise blur (matches Rafael's RT_Blur)
+	// Full resolution for edge-precise blur (RT_Blur)
 	vec2 full_res = params.extra_params.xy;
 	ivec2 pixel = ivec2(gl_GlobalInvocationID.xy);
 	if (pixel.x >= int(full_res.x) || pixel.y >= int(full_res.y))

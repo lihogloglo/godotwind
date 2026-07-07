@@ -22,8 +22,10 @@ extends RefCounted
 var _cb: Dictionary = {}
 var _active: bool = false
 
-## User-adjustable fog density multiplier (1.0 = Morrowind default)
-var fog_density_multiplier: float = 1.0
+## Independent per-fog strength multipliers (1.0 = Morrowind/weather default).
+## Each fog is tuned separately; they are no longer tied to one master slider.
+var depth_fog_strength: float = 1.0
+var volumetric_fog_strength: float = 1.0
 
 
 func _init(callbacks: Dictionary) -> void:
@@ -109,14 +111,15 @@ func _apply_depth_fog(env: Environment, result: WeatherTypes.WeatherResult) -> v
 	if not env.fog_enabled:
 		return
 
-	# Base density from weather, multiplied by storm_fog_multiplier and user slider
-	var density: float = result.depth_fog_density * result.storm_fog_multiplier * fog_density_multiplier
+	# Base density from weather, multiplied by storm_fog_multiplier and the
+	# depth-fog strength slider (independent of the other fog systems)
+	var density: float = result.depth_fog_density * result.storm_fog_multiplier * depth_fog_strength
 	env.fog_density = density
 	env.fog_light_color = result.fog_color
 
 	# Height fog — pools at sea level and in valleys
 	env.fog_height = result.fog_height
-	env.fog_height_density = result.fog_height_density * fog_density_multiplier
+	env.fog_height_density = result.fog_height_density * depth_fog_strength
 
 	# Sun inscattering and aerial perspective
 	env.fog_sun_scatter = result.fog_sun_scatter
@@ -132,8 +135,9 @@ func _apply_volumetric_fog(env: Environment, result: WeatherTypes.WeatherResult)
 	if not env.volumetric_fog_enabled:
 		return
 
-	# Density from weather, scaled by storm multiplier and user slider
-	var density: float = result.volumetric_density * result.storm_fog_multiplier * fog_density_multiplier
+	# Density from weather, scaled by storm multiplier and the volumetric-fog
+	# strength slider (independent of the other fog systems)
+	var density: float = result.volumetric_density * result.storm_fog_multiplier * volumetric_fog_strength
 	env.volumetric_fog_density = density
 
 	# Color tint (ash=brown, blight=red, blizzard=white, clear=neutral)

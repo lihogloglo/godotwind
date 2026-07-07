@@ -130,16 +130,16 @@ static func quaternion_to_mw(godot: Quaternion) -> Quaternion:
 ## Convert ESM cell reference rotation to Godot basis
 ## Use for: Placing objects from ESM CELL records
 ##
-## This matches OpenMW's makeOsgQuat in components/misc/convert.hpp:
+## ESM rotation composes as:
 ##   Quat(rot[2], (0,0,-1)) * Quat(rot[1], (0,-1,0)) * Quat(rot[0], (-1,0,0))
 ##
-## OpenMW applies rotations around NEGATIVE axes in ZYX order.
-## We replicate this exactly, then convert the result to Godot space.
+## Rotations are applied around NEGATIVE axes in ZYX order.
+## We build this in MW space, then convert the result to Godot space.
 ##
 ## MW coordinate system: X=East, Y=North (forward), Z=Up
 ## ESM rotation: rot.x=pitch, rot.y=roll, rot.z=yaw (all in radians)
 static func esm_rotation_to_godot_basis(rot: Vector3) -> Basis:
-	# Build quaternion in MW space exactly like OpenMW does
+	# Build quaternion in MW space (negative-axis ZYX order)
 	var mw_quat_z := Quaternion(Vector3(0, 0, -1), rot.z)  # Around -Z (down)
 	var mw_quat_y := Quaternion(Vector3(0, -1, 0), rot.y)  # Around -Y (south)
 	var mw_quat_x := Quaternion(Vector3(-1, 0, 0), rot.x)  # Around -X (west)

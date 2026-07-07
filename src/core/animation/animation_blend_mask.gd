@@ -1,6 +1,5 @@
 ## AnimationBlendMask - Defines which bones are affected by an animation layer
 ##
-## Based on OpenMW's BlendMask system (animation.cpp)
 ## Morrowind uses 4 blend masks:
 ## - Lower body (legs, pelvis) - for locomotion
 ## - Torso (spine, chest) - for upper body actions
@@ -11,7 +10,7 @@
 class_name AnimationBlendMask
 extends RefCounted
 
-# Predefined mask types matching OpenMW
+# Predefined mask types
 enum MaskType {
 	LOWER_BODY = 0,    # Legs and pelvis
 	TORSO = 1,         # Spine chain

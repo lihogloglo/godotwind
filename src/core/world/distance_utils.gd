@@ -35,7 +35,7 @@ const HLOD_END: float = 1000.0
 
 ## CHUNK tier (decision 2026-07-05, user-approved): OFFLINE-baked merged +
 ## simplified chunk proxies fill MID_END → CHUNK_END with real geometry —
-## the MGE XE / OpenMW pattern for this content (merged low-poly originals;
+## the MGE XE distant-land pattern for this content (merged low-poly originals;
 ## MW's bottleneck is draw count, not triangles). Impostors are the wrong
 ## tool at this range (baked lighting vs dynamic sun, parallax flatness on
 ## architecture); they retreat to CHUNK_END when this tier ships.
@@ -43,7 +43,7 @@ const HLOD_END: float = 1000.0
 const CHUNK_START: float = MID_END
 const CHUNK_END: float = 1200.0
 
-## CHUNK proxy min-size gate: OpenMW's `object paging min size` ratio (0.01 =
+## CHUNK proxy min-size gate: the `object paging min size` ratio (0.01 =
 ## world radius must be ≥ 1% of the viewing distance) evaluated at CHUNK_START.
 ## SHARED single source of truth for both sides of the MID↔CHUNK content
 ## selection (2026-07-06): the offline baker uses it to decide which refs
@@ -93,25 +93,23 @@ const FADE_MARGIN_LOD3_FAR: float = FADE_MARGIN_RENDER_FAR
 ## Smaller meshes at distance project below a screen-space threshold and
 ## don't contribute visually — they're skipped.
 ##
-## PROVENANCE CORRECTED 2026-07-05 (audit): OpenMW's `object paging min size`
+## PROVENANCE CORRECTED 2026-07-05 (audit): the `object paging min size`
 ## default is **0.01**, not 0.14 as previously claimed here. The threshold is
 ## a radius/distance RATIO — dimensionless — so no MW-units-to-meters
-## conversion applies; OpenMW's 0.01 means "radius ≥ 1% of distance" in any
-## unit system (e.g. radius ≥ 4m at 400m). Source:
-## openmw.readthedocs.io → Terrain Settings → "object paging min size".
-## Our 0.003 is therefore ~3× MORE permissive than OpenMW (radius ≥ 1.2m at
+## conversion applies; 0.01 means "radius ≥ 1% of distance" in any
+## unit system (e.g. radius ≥ 4m at 400m).
+## Our 0.003 is therefore ~3× MORE permissive (radius ≥ 1.2m at
 ## 400m), tuned against the misremembered 0.14 baseline. Retune against the
 ## real 0.01 is scheduled with the Phase 2 candidacy work
 ## (docs/plans/distant_rendering_recovery_2026_07.md).
 const PAGING_MIN_SIZE: float = 0.003
 const PAGING_MIN_SIZE_SQ: float = PAGING_MIN_SIZE * PAGING_MIN_SIZE
 
-## Cost-benefit merge decision multiplier (OpenMW `mObjectPagingMergeFactor`).
+## Cost-benefit merge decision multiplier (`mObjectPagingMergeFactor`).
 ## A mesh-type is merged when `mergeBenefit × PAGING_MERGE_FACTOR > mergeCost`,
 ## where mergeBenefit = ref_count × shared_material_count and
-## mergeCost = total_verts × (size_level + 1). 256.0 is OpenMW's canonical
-## default for Morrowind content (inspos/openmw/components/settings/
-## categories/terrain.hpp:32). Raise → merge more aggressively; lower →
+## mergeCost = total_verts × (size_level + 1). 256.0 is the canonical
+## default for Morrowind content. Raise → merge more aggressively; lower →
 ## leave more types as individual RS instances.
 const PAGING_MERGE_FACTOR: float = 256.0
 
@@ -166,16 +164,18 @@ const SHADOW_CUTOFF_MAX: float = 200.0
 ## per-frame toggle thrash when a camera sits exactly at the boundary.
 const SHADOW_CUTOFF_HYSTERESIS: float = 5.0
 
-## Phase 5 — second-pass `minSizeMergeFactor` (OpenMW canonical defaults).
+## Phase 5 — second-pass `minSizeMergeFactor` (canonical defaults).
 ## After the cost-benefit decision accepts a mesh type, its refs face a
 ## second size filter whose threshold scales with how merge-beneficial the
 ## type turned out to be. Formula (matches `objectpaging.cpp:833-836`):
 ##     factor2               = clamp(mergeCost × cost_multiplier / mergeBenefit, 0, 1)  [or 1 if benefit == 0]
 ##     minSizeMergeFactor2   = (1 − factor2) × MIN_SIZE_MERGE_FACTOR + factor2
 ##     minSizeMerged         = MIN_SIZE × minSizeMergeFactor2
-## Source: `inspos/openmw/components/settings/categories/terrain.hpp:35-39`.
 const PAGING_MIN_SIZE_MERGE_FACTOR: float = 0.5
 const PAGING_MIN_SIZE_COST_MULTIPLIER: float = 1.0
+
+## Light-radius / energy multipliers moved to LightTuning (live-editable from the
+## Lighting UI tab). See src/core/world/light_tuning.gd.
 
 #endregion
 

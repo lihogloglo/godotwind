@@ -49,9 +49,18 @@ var _visual_state: Dictionary = {
 	"volumetric_fog": false,
 	# Depth fog defaults ON (2026-07-06): the terrain heightmap is a finite
 	# square slab — from altitude its edge/corners are visible without a
-	# horizon-closing haze. MGE XE / OpenMW distant land use the same fix.
+	# horizon-closing haze. MGE XE distant land uses the same fix.
 	"depth_fog": true,
-	"sdfgi": true,
+	# Independent per-fog strength (Fog panel sliders). Multiply the fixed
+	# weather-off densities; WeatherRenderer applies its own copies while weather
+	# is active. Tracked here so they survive sky <-> fallback swaps.
+	"depth_fog_strength": 1.0,
+	"volumetric_fog_strength": 1.0,
+	# SDFGI default OFF (2026-07-06): camera-centered cascades produce a bright
+	# GI bubble around the camera at night, plus a frame-time cost on open
+	# terrain. When enabled from the Rendering tab, SkyManager dims its energy
+	# with the day/night cycle so the halo doesn't return.
+	"sdfgi": false,
 	"tonemap_mode": Environment.TONE_MAPPER_FILMIC,
 	"shadow_cascades": false,
 }
@@ -194,6 +203,22 @@ func on_godrays_toggled(enabled: bool) -> void:
 	_log("God Rays: %s" % ("ON" if enabled else "OFF"))
 
 
+## Ground fog + cloud banks — the raymarch effect (valley fog that
+## also covers the sky, altitude-band cloud deck). Distinct from the engine
+## froxel volumetric fog handled by on_native_volumetric_fog_toggled.
+func on_ground_fog_toggled(enabled: bool) -> void:
+	ensure_shader_manager_attached()
+	if enabled:
+		ShaderManager.enable_effect("volumetric_fog", 0.5)
+	else:
+		ShaderManager.disable_effect("volumetric_fog", 0.5)
+	_log("Ground Fog + Cloud Banks: %s" % ("ON" if enabled else "OFF"))
+
+
+func on_ground_fog_param_changed(value: float, param_name: String) -> void:
+	ShaderManager.set_effect_param("volumetric_fog", param_name, value)
+
+
 func on_color_grading_toggled(enabled: bool) -> void:
 	ensure_shader_manager_attached()
 	if enabled:
@@ -327,7 +352,7 @@ func _apply_visual_state(env: Environment) -> void:
 ## Apply default volumetric fog parameters to an Environment.
 ## Single source of truth — called by _apply_visual_state() and on_native_volumetric_fog_toggled().
 func _apply_volumetric_fog_defaults(env: Environment) -> void:
-	env.volumetric_fog_density = 0.0015
+	env.volumetric_fog_density = 0.0015 * float(_visual_state["volumetric_fog_strength"])
 	env.volumetric_fog_albedo = Color(0.95, 0.95, 0.98)
 	env.volumetric_fog_emission = Color.BLACK
 	env.volumetric_fog_anisotropy = 0.55
@@ -346,7 +371,7 @@ func _apply_depth_fog_defaults(env: Environment) -> void:
 	# 0.00025: ~74% visibility at the CHUNK boundary (1.2km), ~8% at 10km —
 	# geometry is fully hazed out before the terrain-data edge (~8-15km) so
 	# the square map boundary can't be seen from altitude.
-	env.fog_density = 0.00025
+	env.fog_density = 0.00025 * float(_visual_state["depth_fog_strength"])
 	env.fog_light_color = Color(0.7, 0.75, 0.82)
 	env.fog_light_energy = 1.0
 	env.fog_sun_scatter = 0.5
@@ -355,7 +380,7 @@ func _apply_depth_fog_defaults(env: Environment) -> void:
 	env.fog_aerial_perspective = 1.0
 	env.fog_sky_affect = 0.15
 	env.fog_height = 0.0
-	env.fog_height_density = 0.003
+	env.fog_height_density = 0.003 * float(_visual_state["depth_fog_strength"])
 
 
 ## Re-assert fog defaults after weather deactivation.
@@ -471,6 +496,12 @@ func on_glow_toggled(enabled: bool) -> void:
 	_log("Glow: %s" % ("ON" if enabled else "OFF"))
 
 
+## Engine froxel volumetric fog ONLY — light scattering near the camera that
+## lets the sun/lights form shafts (god rays). This toggle used to ALSO enable
+## the ground-fog compute effect ("volumetric_fog" in ShaderManager), which
+## is why turning volumetric fog on silently brought the ground fog + cloud banks
+## with it. The two are now fully separate: ground fog has its own toggle
+## (on_ground_fog_toggled).
 func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 	_visual_state["volumetric_fog"] = enabled
 	var env := _get_active_environment()
@@ -483,13 +514,30 @@ func on_native_volumetric_fog_toggled(enabled: bool) -> void:
 	# Boost sun's volumetric fog energy for stronger god rays
 	if not weather_active:
 		_set_sun_volumetric_energy(6.0 if enabled else 1.0)
-	# Enable custom VAIO fog (animated, swirling, weather-aware) on top of native fog
-	ensure_shader_manager_attached()
-	if enabled:
-		ShaderManager.enable_effect("volumetric_fog", 0.3)
-	else:
-		ShaderManager.disable_effect("volumetric_fog", 0.3)
-	_log("Volumetric Fog: %s" % ("ON" if enabled else "OFF"))
+	_log("Volumetric Fog (engine froxel): %s" % ("ON" if enabled else "OFF"))
+
+
+## Set the Depth Fog strength (independent per-fog). Writes the Environment only
+## when weather is off — WeatherRenderer owns the density while weather is active.
+func set_depth_fog_strength(value: float) -> void:
+	_visual_state["depth_fog_strength"] = value
+	if weather_active:
+		return
+	var env := _get_active_environment()
+	if env and _visual_state["depth_fog"]:
+		env.fog_density = 0.00025 * value
+		env.fog_height_density = 0.003 * value
+
+
+## Set the Volumetric (froxel) Fog strength (independent per-fog). Weather-off
+## only; WeatherRenderer owns the density while weather is active.
+func set_volumetric_fog_strength(value: float) -> void:
+	_visual_state["volumetric_fog_strength"] = value
+	if weather_active:
+		return
+	var env := _get_active_environment()
+	if env and _visual_state["volumetric_fog"]:
+		env.volumetric_fog_density = 0.0015 * value
 
 
 func on_depth_fog_toggled(enabled: bool) -> void:

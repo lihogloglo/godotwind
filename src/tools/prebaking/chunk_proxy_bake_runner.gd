@@ -4,7 +4,7 @@ extends Node
 ## Plan: docs/plans/distant_rendering_recovery_2026_07.md.
 ##
 ## Bakes PER-CELL merged + simplified chunk proxies covering the world out to
-## CHUNK_END — the MGE XE / OpenMW pattern: merged low-poly REAL geometry,
+## CHUNK_END — the MGE XE distant-land pattern: merged low-poly REAL geometry,
 ## min-size gate, LOD chain at bake time, one RS instance per cell at runtime.
 ## Per-cell granularity is load-bearing: the runtime hides each cell's proxy
 ## while that cell's MID static buckets are published (content selection, not
@@ -32,7 +32,7 @@ const DU := preload("res://src/core/world/distance_utils.gd")
 ## equal the streaming publication unit so the runtime can swap proxy↔MID per
 ## cell in lockstep with static-bucket presence (the MID↔CHUNK boundary fix —
 ## UE World Partition bakes one HLOD per streaming cell for the same reason,
-## and OpenMW re-keys paged chunks on the active grid). Range-fencing a 2×2
+## re-keying paged chunks on the active grid). Range-fencing a 2×2
 ## merged chunk against per-object MID culling had an irreducible ±radius
 ## error: z-fight shimmer leaning one way, cell-sized holes the other.
 const CHUNK_CELLS := 1
@@ -40,8 +40,7 @@ const CHUNK_CELLS := 1
 ## Min-size gate ratio — shared with the runtime coverage logic in
 ## StaticObjectRenderer (single source of truth in DistanceUtils). At
 ## CHUNK_START=400m this keeps objects with world radius ≥ 4m — the MGE XE
-## "skip smaller meshes" rule. Provenance: openmw.readthedocs.io Terrain
-## Settings (verified 2026-07-05 in the distant-rendering audit).
+## "skip smaller meshes" rule (verified 2026-07-05 in the distant-rendering audit).
 const MIN_SIZE_RATIO := DU.CHUNK_PROXY_MIN_SIZE_RATIO
 
 var _model_submesh_cache: Dictionary = {}  # model_path -> Array of sub-mesh dicts

@@ -706,4 +706,4 @@ static func load_cached_animations(anim_path: String) -> AnimationLibrary:
 
 
 ## HLOD baking removed — ObjectPaging (src/core/world/object_paging.gd)
-## handles runtime merging, OpenMW-style. No disk prebake needed.
+## handles runtime merging. No disk prebake needed.

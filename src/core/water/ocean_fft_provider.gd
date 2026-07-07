@@ -178,7 +178,7 @@ var _readback_frame: int = 0  # Last frame we did a readback
 
 # Cached directional light for SSS sun-backlight uniform. Scanned lazily so we
 # don't walk the scene tree every frame. Cleared when the node disappears.
-var _cached_sun_light: DirectionalLight3D = null
+var _cached_directional_lights: Array[DirectionalLight3D] = []
 var _last_sun_scan_frame: int = -1
 
 # Signals
@@ -754,11 +754,13 @@ func set_debug_mode(mode: int) -> void:
 	mat.set_shader_parameter("debug_mode", clampi(mode, 0, 20))
 
 
-## Push the directional light's world-space forward direction to the ocean
-## shader so the SSS pass can do a sun-backlight term. Scans the scene tree
-## lazily (at most once per 60 frames) and pushes every frame while the sun is
-## known — rotations follow a day/night cycle in real time, so caching the
-## node alone isn't enough.
+## Push directional-light state to the ocean shader: the dominant light's
+## world-space forward direction for the SSS backlight term (sun by day, moon
+## by night), and the summed light_color × light_energy as `scene_light_color`
+## so the water's unlit optical constants follow the day/night cycle. Scans the
+## scene tree lazily (at most once per 60 frames) and pushes every frame while
+## lights are known — energies and rotations follow the day/night cycle in
+## real time, so caching the nodes alone isn't enough.
 func _update_sun_uniform() -> void:
 	if not _ocean_mesh:
 		return
@@ -767,17 +769,46 @@ func _update_sun_uniform() -> void:
 		return
 
 	var frame := Engine.get_process_frames()
-	if _cached_sun_light == null or not is_instance_valid(_cached_sun_light):
-		if frame - _last_sun_scan_frame >= 60:
-			_last_sun_scan_frame = frame
-			var tree := get_tree()
-			if tree:
-				_cached_sun_light = _find_node_by_class(tree.root, "DirectionalLight3D") as DirectionalLight3D
+	var cache_valid := not _cached_directional_lights.is_empty()
+	for light in _cached_directional_lights:
+		if not is_instance_valid(light) or not light.is_inside_tree():
+			cache_valid = false
+			break
+	if not cache_valid and frame - _last_sun_scan_frame >= 60:
+		_last_sun_scan_frame = frame
+		_cached_directional_lights.clear()
+		var tree := get_tree()
+		if tree:
+			_collect_directional_lights(tree.root, _cached_directional_lights)
 
-	if _cached_sun_light and is_instance_valid(_cached_sun_light):
-		# DirectionalLight3D forward = -basis.z (points FROM sun TO world).
-		var sun_dir: Vector3 = -_cached_sun_light.global_basis.z
-		mat.set_shader_parameter("sun_dir_world", sun_dir.normalized())
+	var incident := Color.BLACK
+	var dominant: DirectionalLight3D = null
+	var dominant_energy := -1.0
+	for light in _cached_directional_lights:
+		if not is_instance_valid(light) or not light.is_inside_tree() or not light.visible:
+			continue
+		incident += light.light_color * light.light_energy
+		if light.light_energy > dominant_energy:
+			dominant_energy = light.light_energy
+			dominant = light
+
+	if dominant:
+		# DirectionalLight3D forward = -basis.z (points FROM light TO world).
+		mat.set_shader_parameter("sun_dir_world", (-dominant.global_basis.z).normalized())
+		# Clamp to 1 per channel: full daylight keeps the calibrated look,
+		# only darkness scales the water optics down.
+		mat.set_shader_parameter("scene_light_color", Vector3(
+			minf(incident.r, 1.0), minf(incident.g, 1.0), minf(incident.b, 1.0)))
+	# No directional light found (sky disabled, bare test scene): leave the
+	# shader defaults (full daylight) instead of pushing black.
+
+
+func _collect_directional_lights(node: Node, out: Array[DirectionalLight3D]) -> void:
+	var light := node as DirectionalLight3D
+	if light:
+		out.append(light)
+	for child in node.get_children():
+		_collect_directional_lights(child, out)
 
 
 func _push_ocean_time_uniform() -> void:
@@ -2462,7 +2493,7 @@ func release_runtime_resources() -> void:
 	if _shore_mask:
 		_shore_mask.queue_free()
 		_shore_mask = null
-	_cached_sun_light = null
+	_cached_directional_lights.clear()
 	_system_initialized = false
 
 
@@ -2748,7 +2779,7 @@ func _apply_weather_fft(result: WeatherTypes.WeatherResult, wind_t: float) -> vo
 		ocean_wind, wind_dir_deg, foam_base, whitecap_val, disp_scale])
 
 
-## Water colors — dark and desaturated like OpenMW. Visual character comes from
+## Water colors — dark and desaturated, Morrowind-matched. Visual character comes from
 ## reflections (probe/sky), not albedo. Bright/turquoise water = wrong.
 const _SHALLOW_CALM := Color(0.09, 0.12, 0.13)
 const _SHALLOW_STORM := Color(0.06, 0.08, 0.09)

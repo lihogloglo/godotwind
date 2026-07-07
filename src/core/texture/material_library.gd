@@ -50,7 +50,7 @@ class MaterialProperties:
 	var roughness: float = 1.0
 	var metallic: float = 0.0
 	var albedo_color: Color = Color.WHITE
-	## MW convention (OpenMW nifloader): specular is OFF unless the shape has
+	## MW NIF convention: specular is OFF unless the shape has
 	## an enabled NiSpecularProperty. NIF paths must set this explicitly;
 	## defaults to true so non-NIF callers keep Godot's standard look.
 	var specular_enabled: bool = true
@@ -143,7 +143,7 @@ static func get_or_create_material(props: MaterialProperties) -> StandardMateria
 		mat.metallic_specular = props.specular
 		mat.roughness = props.roughness
 	else:
-		# MW convention (OpenMW nifloader): no enabled NiSpecularProperty means
+		# MW NIF convention: no enabled NiSpecularProperty means
 		# no specular highlight at all — kill dielectric specular AND keep the
 		# surface fully rough so sky/SSR reflections don't wash it out.
 		mat.metallic_specular = 0.0

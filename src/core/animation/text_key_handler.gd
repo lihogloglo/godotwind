@@ -8,7 +8,7 @@
 ## - "start" / "stop" - Animation boundaries
 ## - "loop start" / "loop stop" - Loop section markers
 ##
-## Based on OpenMW's animation.cpp TextKeyListener implementation
+## Dispatches NIF animation text-key events to listeners
 class_name TextKeyHandler
 extends RefCounted
 
@@ -22,7 +22,7 @@ signal loop_start(animation_name: String, time: float)
 signal loop_stop(animation_name: String, time: float)
 signal custom_key(key_name: String, value: String, time: float)
 
-# Text key types (matches OpenMW conventions)
+# Text key types (MW animation conventions)
 enum KeyType {
 	UNKNOWN,
 	SOUND,

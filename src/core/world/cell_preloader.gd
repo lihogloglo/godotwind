@@ -14,8 +14,8 @@
 ##                       fast-path.
 ##
 ## Replaces `native_streaming_manager._predict_and_prequeue_cells` (naive
-## 1-cell-ahead predictor). OpenMW's `CellPreloader` is the canonical
-## reference: speed-scaled lookahead, LRU cache, teleport abort.
+## 1-cell-ahead predictor). Uses the canonical streaming-preloader
+## pattern: speed-scaled lookahead, LRU cache, teleport abort.
 ##
 ## Ownership: owned by NativeStreamingManager. No autoload. `_process` calls
 ## `update(camera_cell, camera_pos, velocity_xz)` each frame; `teleport_happened`
@@ -194,7 +194,7 @@ func get_stats_snapshot() -> Dictionary:
 ## preload for a cell the camera just jumped away from is wasted work and
 ## blocks the worker pool from serving the actual destination's preloads.
 ##
-## Research §8.8 mirrors OpenMW's `abortTerrainPreloadExcept`.
+## Research §8.8 mirrors the canonical `abortTerrainPreloadExcept` pattern.
 func abort_all() -> void:
 	_cache.clear()
 

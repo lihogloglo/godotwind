@@ -175,7 +175,7 @@ theme_override_constants/separation = 10
 [node name="Label" type="Label" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer"]
 layout_mode = 2
 theme_override_font_sizes/font_size = 16
-text = "External Texture Packs (OpenMW-style)"
+text = "External Texture Packs"
 
 [node name="TexturePacksInfoLabel" type="Label" parent="MarginContainer/VBoxContainer/TexturePacksPanel/VBoxContainer"]
 layout_mode = 2

@@ -163,7 +163,7 @@ class DoorInfo:
 
 	## Player-facing yaw-only basis — use for teleport destinations.
 	## DODT rotation is the player's facing direction. Only Z (yaw) matters
-	## for actors (OpenMW ignores X/Y for player rotation).
+	## for actors (MW ignores X/Y for player rotation).
 	## MW builds yaw as Quaternion(Vector3(0,0,-1), angle) — rotation around
 	## NEGATIVE Z. quaternion_to_godot() swaps (x,z,-y,w), which negates
 	## the Y component, effectively giving Basis(UP, -angle) in Godot space.

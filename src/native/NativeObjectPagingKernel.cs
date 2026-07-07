@@ -4,7 +4,7 @@ using System.Collections.Generic;
 namespace Godotwind.Native;
 
 /// <summary>
-/// Hot merge math for chunk-level geometry merging (OpenMW ObjectPaging pattern).
+/// Hot merge math for chunk-level geometry merging (ObjectPaging pattern).
 /// GDScript side owns the orchestration (ESM iteration, LRU cache, RS instance
 /// management, ImporterMesh LOD generation); this class owns the per-vertex
 /// transform loops, material-hash grouping, and PackedArray concatenation —

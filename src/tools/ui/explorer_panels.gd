@@ -1,10 +1,18 @@
 ## Builds tabbed UI panels for WorldExplorer.
 ##
-## Organizes all controls into a 4-tab layout:
-##   Environment — Sky & time, weather, ocean, terrain, NPCs
-##   Rendering   — Quality presets, post-processing, fog, color grading, resolution
-##   Navigation  — Camera info, view distance, teleport buttons
-##   Debug       — Performance stats, LOD overlays, profiling
+## Organizes all controls into a 7-tab layout:
+##   Sky      — time of day, celestial, cirrus
+##   Weather  — weather system, fog (depth / engine volumetric / ground fog + cloud banks), god rays
+##   Clouds   — SunshineClouds2 / cheap skydome renderer
+##   Water    — ocean, underwater effects
+##   Distance — rendering tiers, view distance, teleports
+##   Render   — quality presets, post-processing, color grading, resolution
+##   Debug    — performance stats, LOD overlays, profiling
+##
+## NOTE (2026-07-06): the pre-tab legacy builders (_build_environment_tab,
+## _build_navigation_tab) were dead code — never called, but re-assigning the
+## same widget vars as the live tabs. They have been DELETED. If a control
+## seems to have no effect, check it isn't being built twice.
 ##
 ## A pinned FPS overlay sits above the tabs (always visible).
 ## Section headers (HSeparator + bold Label) separate groups within tabs.
@@ -20,6 +28,7 @@ extends RefCounted
 
 const FoldablePanelScript := preload("res://src/tools/ui/foldable_panel.gd")
 const StreamingConfig := preload("res://src/core/world/streaming_config.gd")
+const LightTuning := preload("res://src/core/world/light_tuning.gd")
 
 # ── Public widget references (read by world_explorer for dynamic updates) ──
 
@@ -64,6 +73,7 @@ var taa_toggle: CheckBox = null
 var ssao_toggle: CheckBox = null
 var ssil_toggle: CheckBox = null
 var glow_toggle: CheckBox = null
+var sdfgi_toggle: CheckBox = null
 var native_vfog_toggle: CheckBox = null
 var depth_fog_toggle: CheckBox = null
 var shadow_cascade_toggle: CheckBox = null
@@ -75,8 +85,13 @@ var color_grading_toggle: CheckBox = null
 ## Weather panel widgets
 var weather_enabled_toggle: CheckBox = null
 var weather_type_btn: OptionButton = null  # Unified weather dropdown (Auto + 11 types)
-var fog_density_slider: HSlider = null
+var depth_fog_strength_slider: HSlider = null
+var vfog_strength_slider: HSlider = null
 var cloud_renderer_dropdown: OptionButton = null
+
+## Ground fog / cloud banks (raymarch effect) — param name -> HSlider
+var ground_fog_toggle: CheckBox = null
+var ground_fog_sliders: Dictionary = {}
 var cloud_coverage_slider: HSlider = null
 var cloud_density_slider: HSlider = null
 var cloud_sharpness_slider: HSlider = null
@@ -111,9 +126,9 @@ var water_status_label: Label = null
 var near_gameplay_toggle: CheckBox = null
 var static_visuals_toggle: CheckBox = null
 var far_impostors_toggle: CheckBox = null
-var hlod_toggle: CheckBox = null
+var chunk_toggle: CheckBox = null
 var distant_lights_toggle: CheckBox = null
-var hlod_status_label: Label = null
+var chunk_status_label: Label = null
 
 ## Debug panel widgets
 var lod_mode_btn: Button = null
@@ -135,6 +150,7 @@ var _weather_vbox: VBoxContainer = null
 var _clouds_vbox: VBoxContainer = null
 var _water_vbox: VBoxContainer = null
 var _distance_vbox: VBoxContainer = null
+var _lighting_vbox: VBoxContainer = null
 
 
 func _init(callbacks: Dictionary, initial_state: Dictionary = {}) -> void:
@@ -195,6 +211,9 @@ func build(vbox: VBoxContainer) -> void:
 	var distance_scroll := _make_tab_scroll("Distance")
 	_distance_vbox = distance_scroll.get_child(0) as VBoxContainer
 
+	var lighting_scroll := _make_tab_scroll("Lighting")
+	_lighting_vbox = lighting_scroll.get_child(0) as VBoxContainer
+
 	var render_scroll := _make_tab_scroll("Render")
 	_render_vbox = render_scroll.get_child(0) as VBoxContainer
 
@@ -206,6 +225,7 @@ func build(vbox: VBoxContainer) -> void:
 	tab_container.add_child(clouds_scroll)
 	tab_container.add_child(water_scroll)
 	tab_container.add_child(distance_scroll)
+	tab_container.add_child(lighting_scroll)
 	tab_container.add_child(render_scroll)
 	tab_container.add_child(debug_scroll)
 
@@ -214,6 +234,7 @@ func build(vbox: VBoxContainer) -> void:
 	_build_clouds_tab(_clouds_vbox)
 	_build_water_tab(_water_vbox)
 	_build_distance_tab(_distance_vbox)
+	_build_lighting_tab(_lighting_vbox)
 	_build_rendering_tab(_render_vbox)
 	_build_debug_tab(_debug_vbox)
 
@@ -268,8 +289,29 @@ func _add_section(parent: VBoxContainer, title: String) -> void:
 	parent.add_child(label)
 
 
-## Helper to create a labeled slider row
-func create_slider_row(parent: Control, label_text: String, min_val: float, max_val: float, default_val: float, callback: Callable) -> HSlider:
+## Ground-fog slider helper: binds the shared "ground_fog_param" callback with
+## the effect parameter name and registers the slider for push_ground_fog_params.
+func _add_ground_fog_slider(parent: VBoxContainer, label_text: String, min_val: float, max_val: float, default_val: float, step: float, param_name: String, tooltip: String) -> void:
+	var cbv: Callable = _cb.get("ground_fog_param", Callable())
+	var bound := cbv.bind(param_name) if cbv.is_valid() else Callable()
+	var slider := create_slider_row(parent, label_text, min_val, max_val, default_val, bound, step)
+	slider.tooltip_text = tooltip
+	ground_fog_sliders[param_name] = slider
+
+
+## Push every ground-fog slider's current value to the effect. Called when the
+## toggle turns ON so the effect matches the panel instead of its own defaults.
+func push_ground_fog_params() -> void:
+	var cbv: Callable = _cb.get("ground_fog_param", Callable())
+	if not cbv.is_valid():
+		return
+	for param_name: String in ground_fog_sliders:
+		cbv.call((ground_fog_sliders[param_name] as HSlider).value, param_name)
+
+
+## Helper to create a labeled slider row. The value label tracks the slider
+## automatically, with precision derived from the step (0.0002 → 4 decimals).
+func create_slider_row(parent: Control, label_text: String, min_val: float, max_val: float, default_val: float, callback: Callable, step: float = 1.0) -> HSlider:
 	var row := HBoxContainer.new()
 
 	var label := Label.new()
@@ -282,21 +324,38 @@ func create_slider_row(parent: Control, label_text: String, min_val: float, max_
 	slider.min_value = min_val
 	slider.max_value = max_val
 	slider.value = default_val
-	slider.step = 1.0
+	slider.step = step
 	slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
 	slider.custom_minimum_size.x = 120
-	slider.value_changed.connect(callback)
 	row.add_child(slider)
 
 	var value_label := Label.new()
 	value_label.name = "Value"
-	value_label.text = "%.1f" % default_val
+	value_label.text = _format_slider_value(default_val, step)
 	value_label.custom_minimum_size.x = 35
 	value_label.add_theme_font_size_override("font_size", 11)
 	row.add_child(value_label)
 
+	var refresh_label := func() -> void:
+		value_label.text = _format_slider_value(slider.value, slider.step)
+	slider.value_changed.connect(func(_v: float) -> void: refresh_label.call())
+	if callback.is_valid():
+		slider.value_changed.connect(callback)
+
+	# Some callers adjust slider.step after creation — re-render the label once
+	# the current call stack has finished so its precision matches the step.
+	refresh_label.call_deferred()
+
 	parent.add_child(row)
 	return slider
+
+
+## Step-aware value formatting: step 5 → "140", step 0.05 → "0.90", step 0.0002 → "0.0030"
+static func _format_slider_value(value: float, step: float) -> String:
+	var decimals := 0
+	if step > 0.0 and step < 1.0:
+		decimals = clampi(ceili(-log(step) / log(10.0)), 0, 4)
+	return "%.*f" % [decimals, value]
 
 
 ## Update value label next to slider
@@ -304,7 +363,7 @@ func update_slider_label(slider: HSlider, value: float) -> void:
 	var row: HBoxContainer = slider.get_parent()
 	var value_label: Label = row.get_node_or_null("Value")
 	if value_label:
-		value_label.text = "%.1f" % value
+		value_label.text = _format_slider_value(value, slider.step)
 
 
 func _build_sky_tab(vbox: VBoxContainer) -> void:
@@ -371,21 +430,54 @@ func _build_weather_tab(vbox: VBoxContainer) -> void:
 	weather_row.add_child(weather_type_btn)
 	vbox.add_child(weather_row)
 
-	fog_density_slider = create_slider_row(vbox, "Fog:", 0.1, 3.0, 1.0, _cb.get("fog_density_changed", Callable()))
-	fog_density_slider.step = 0.1
+	# --- Fog — each system has its own independent Strength slider ----------
+	_add_section(vbox, "Fog")
 	depth_fog_toggle = CheckBox.new()
 	depth_fog_toggle.text = "Depth Fog"
+	depth_fog_toggle.tooltip_text = "Engine exponential distance fog — hazes far geometry into the horizon"
 	depth_fog_toggle.button_pressed = true
 	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
 	vbox.add_child(depth_fog_toggle)
+	depth_fog_strength_slider = create_slider_row(vbox, "Strength:", 0.0, 3.0, 1.0, _cb.get("depth_fog_strength_changed", Callable()), 0.05)
+	depth_fog_strength_slider.tooltip_text = "Depth fog strength only — independent of the volumetric and ground fog"
 	native_vfog_toggle = CheckBox.new()
 	native_vfog_toggle.text = "Volumetric Fog"
+	native_vfog_toggle.tooltip_text = "Engine froxel fog — light scattering near the camera; lets the sun and lights form shafts. Does NOT enable the ground fog below."
 	native_vfog_toggle.toggled.connect(_cb.get("native_vfog_toggled", Callable()))
 	vbox.add_child(native_vfog_toggle)
+	vfog_strength_slider = create_slider_row(vbox, "Strength:", 0.0, 3.0, 1.0, _cb.get("volumetric_fog_strength_changed", Callable()), 0.05)
+	vfog_strength_slider.tooltip_text = "Volumetric (froxel) fog strength only — independent of the depth and ground fog"
 	godrays_toggle = CheckBox.new()
 	godrays_toggle.text = "God Rays"
+	godrays_toggle.tooltip_text = "Screen-space radial sun shafts"
 	godrays_toggle.toggled.connect(_cb.get("godrays_toggled", Callable()))
 	vbox.add_child(godrays_toggle)
+
+	# --- Ground fog + cloud banks (analytic layer 2026-07-06) ----
+	# Analytic exponential height fog (closed-form optical depth) + raymarched
+	# noise detail and an altitude-band cloud deck. World-anchored: pools in
+	# valleys, closes the horizon geometrically, covers the sky — unlike the
+	# engine froxel fog it has no range cap.
+	_add_section(vbox, "Ground Fog + Cloud Banks")
+	ground_fog_toggle = CheckBox.new()
+	ground_fog_toggle.text = "Enable"
+	ground_fog_toggle.button_pressed = false
+	ground_fog_toggle.toggled.connect(_cb.get("ground_fog_toggled", Callable()))
+	ground_fog_toggle.tooltip_text = "World-anchored fog layer: foggy valleys, hazy horizon, mountain-hugging cloud banks"
+	vbox.add_child(ground_fog_toggle)
+
+	_add_ground_fog_slider(vbox, "Strength:", 0.0, 3.0, 1.0, 0.05, "fog_intensity", "Overall ground fog opacity (0 = off). Independent of the depth and volumetric fog")
+	_add_ground_fog_slider(vbox, "Fog Dist:", 200.0, 8000.0, 1000.0, 50.0, "fog_distance", "How far away the ground fog builds into a solid misty wall (the 'curtain'). Higher = see further before it closes in; lower brings the wall in close")
+	_add_ground_fog_slider(vbox, "Base Alt:", -100.0, 400.0, 0.0, 5.0, "fog_base_height", "World altitude (m) where fog is full density; 0 = sea level")
+	_add_ground_fog_slider(vbox, "Layer Height:", 10.0, 500.0, 60.0, 5.0, "fog_layer_height", "Fog thins with altitude over this many meters — small = shallow ground fog, large = tall fog bank")
+	_add_ground_fog_slider(vbox, "Detail:", 0.0, 1.0, 0.6, 0.05, "fog_detail", "Animated noise texture in the fog (0 = perfectly smooth)")
+	_add_ground_fog_slider(vbox, "Detail Dist:", 500.0, 12000.0, 2000.0, 100.0, "detail_distance", "How far the noise + cloud deck reach before dissolving into smooth fog. Raise it to push the detail/deck edge out; raise Ray Steps too if it looks blocky")
+	_add_ground_fog_slider(vbox, "Ray Steps:", 12.0, 96.0, 24.0, 4.0, "ray_steps", "Detail/deck sampling quality. Higher = smoother at long Detail Dist, costs performance")
+	_add_ground_fog_slider(vbox, "Wind:", 0.0, 25.0, 8.0, 0.5, "fog_speed", "How fast the fog detail drifts")
+	_add_ground_fog_slider(vbox, "Deck Height:", 0.0, 600.0, 140.0, 5.0, "cloud_height", "Altitude of the cloud deck center (m)")
+	_add_ground_fog_slider(vbox, "Deck Thick:", 0.0, 400.0, 90.0, 5.0, "cloud_thickness", "Vertical extent of the cloud deck (m)")
+	_add_ground_fog_slider(vbox, "Deck Cover:", 0.0, 1.0, 0.35, 0.02, "cloud_coverage", "How much of the deck is filled (0 = no clouds)")
+	_add_ground_fog_slider(vbox, "Deck Density:", 0.0, 8.0, 2.5, 0.1, "cloud_density", "Opacity of the cloud banks")
 
 	weather_status_label = Label.new()
 	weather_status_label.name = "WeatherStatus"
@@ -521,18 +613,22 @@ func _build_distance_tab(vbox: VBoxContainer) -> void:
 	vbox.add_child(dist_label)
 
 	_add_section(vbox, "Streaming Tiers")
-	near_gameplay_toggle = _add_checkbox(vbox, "NEAR Gameplay", _initial_state.get("near_gameplay", true), _cb.get("near_gameplay_toggled", Callable()))
-	static_visuals_toggle = _add_checkbox(vbox, "MID Static Visuals", _initial_state.get("static_visuals", true), _cb.get("static_visuals_toggled", Callable()))
-	far_impostors_toggle = _add_checkbox(vbox, "FAR Impostors", _initial_state.get("far_impostors", true), _cb.get("far_impostors_toggled", Callable()))
-	hlod_toggle = _add_checkbox(vbox, "HLOD", _initial_state.get("hlod", false), _cb.get("hlod_toggled", Callable()))
+	near_gameplay_toggle = _add_checkbox(vbox, "Gameplay Objects", _initial_state.get("near_gameplay", true), _cb.get("near_gameplay_toggled", Callable()))
+	near_gameplay_toggle.tooltip_text = "NEAR Node3D cells: doors, containers, NPCs, activators. Not scenery."
+	static_visuals_toggle = _add_checkbox(vbox, "Static Scenery", _initial_state.get("static_visuals", true), _cb.get("static_visuals_toggled", Callable()))
+	static_visuals_toggle.tooltip_text = "All static scenery from 0m out (the static renderer owns the whole 0-400m visual world)."
+	far_impostors_toggle = _add_checkbox(vbox, "Impostors", _initial_state.get("far_impostors", true), _cb.get("far_impostors_toggled", Callable()))
+	far_impostors_toggle.tooltip_text = "FAR-tier billboards (1.2km+ with CHUNK on, else 400m+)."
+	chunk_toggle = _add_checkbox(vbox, "Merged Cells (CHUNK)", _initial_state.get("chunk", false), _cb.get("chunk_toggled", Callable()))
+	chunk_toggle.tooltip_text = "Offline-baked merged ring proxies (400-1200m). Requires a bake on disk (chunk_proxy_bake_runner.tscn)."
 	distant_lights_toggle = _add_checkbox(vbox, "Distant Lights", _initial_state.get("distant_lights", true), _cb.get("distant_lights_toggled", Callable()))
 
-	hlod_status_label = Label.new()
-	hlod_status_label.name = "HLODStatusLabel"
-	hlod_status_label.text = "HLOD: Off"
-	hlod_status_label.add_theme_font_size_override("font_size", 10)
-	hlod_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
-	vbox.add_child(hlod_status_label)
+	chunk_status_label = Label.new()
+	chunk_status_label.name = "ChunkStatusLabel"
+	chunk_status_label.text = "CHUNK: Off"
+	chunk_status_label.add_theme_font_size_override("font_size", 10)
+	chunk_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
+	vbox.add_child(chunk_status_label)
 
 	_add_section(vbox, "Terrain")
 	var terrain_label := Label.new()
@@ -594,226 +690,37 @@ func _add_teleport_row(parent: Control, entries: Array[Dictionary]) -> void:
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# TAB 1: ENVIRONMENT
+# TAB: LIGHTING (live LightTuning knobs)
 # ══════════════════════════════════════════════════════════════════════════════
 
-func _build_environment_tab(vbox: VBoxContainer) -> void:
-	# ── Sky & Time ──
-	_add_section(vbox, "Sky & Time")
+## Light-tuning slider helper: binds the "light_tuning_param" callback with the
+## LightTuning field name (mirrors _add_ground_fog_slider).
+func _add_light_slider(parent: VBoxContainer, label_text: String, min_val: float, max_val: float, default_val: float, step: float, param_name: String, tooltip: String) -> void:
+	var cbv: Callable = _cb.get("light_tuning_param", Callable())
+	var bound := cbv.bind(param_name) if cbv.is_valid() else Callable()
+	var slider := create_slider_row(parent, label_text, min_val, max_val, default_val, bound, step)
+	slider.tooltip_text = tooltip
 
-	show_sky_toggle = CheckBox.new()
-	show_sky_toggle.text = "Sky"
-	show_sky_toggle.button_pressed = _initial_state.get("show_sky", false)
-	show_sky_toggle.toggled.connect(_cb.get("show_sky_toggled", Callable()))
-	show_sky_toggle.tooltip_text = "Toggle sky/day-night cycle toggle in Environment tab"
-	vbox.add_child(show_sky_toggle)
 
-	cirrus_slider = create_slider_row(vbox, "Cirrus:", 0.0, 1.0, 0.55, _cb.get("cirrus_changed", Callable()) if _cb.has("cirrus_changed") else Callable())
-	cirrus_slider.step = 0.05
-	cirrus_slider.tooltip_text = "High-altitude cirrus cloud coverage (0 = clear, 1 = overcast wisps)"
+## Live lighting knobs (LightTuning). Aggregate + distant energy read live every
+## tick; size/reach/spread re-apply via DistantLightManager.refresh_tunables();
+## near lights pick up new values as cells restream.
+func _build_lighting_tab(vbox: VBoxContainer) -> void:
+	_add_section(vbox, "Near / Real Lights")
+	_add_light_slider(vbox, "Size", 1.0, 12.0, LightTuning.radius_multiplier, 0.1, "radius_multiplier",
+		"Multiplier on every real light's radius (near + distant). Bigger pools overlap into a warm town wash.")
+	_add_light_slider(vbox, "Near", 0.2, 8.0, LightTuning.near_energy_multiplier, 0.1, "near_energy_multiplier",
+		"Brightness of the close-up lanterns (0-60 m). Live.")
+	_add_light_slider(vbox, "Distant", 0.2, 8.0, LightTuning.distant_energy_multiplier, 0.1, "distant_energy_multiplier",
+		"Brightness of the individual distant lights (55-350 m). Live.")
 
-	cirrus_size_slider = create_slider_row(vbox, "Cirrus Size:", 0.3, 2.5, 0.7, _cb.get("cirrus_size_changed", Callable()) if _cb.has("cirrus_size_changed") else Callable())
-	cirrus_size_slider.step = 0.05
-	cirrus_size_slider.tooltip_text = "Cirrus noise scale — LOWER = bigger individual wisps, HIGHER = tighter streaks"
-
-	cirrus_thickness_slider = create_slider_row(vbox, "Cirrus Thick:", 0.0, 1.0, 0.6, _cb.get("cirrus_thickness_changed", Callable()) if _cb.has("cirrus_thickness_changed") else Callable())
-	cirrus_thickness_slider.step = 0.05
-	cirrus_thickness_slider.tooltip_text = "Cirrus layer thickness (higher = denser wisps)"
-
-	time_of_day_slider = create_slider_row(vbox, "Time:", 0.0, 24.0, 8.0, _cb.get("time_of_day_changed", Callable()))
-	time_of_day_slider.step = 0.1
-	time_of_day_slider.tooltip_text = "Game hour (0 = midnight, 12 = noon)"
-
-	var speed_pause_row := HBoxContainer.new()
-	speed_pause_row.add_theme_constant_override("separation", 4)
-
-	# Time speed as a compact slider
-	var speed_label := Label.new()
-	speed_label.text = "Speed:"
-	speed_label.add_theme_font_size_override("font_size", 11)
-	speed_label.custom_minimum_size.x = 40
-	speed_pause_row.add_child(speed_label)
-
-	time_scale_slider = HSlider.new()
-	time_scale_slider.min_value = 0.0
-	time_scale_slider.max_value = 300.0
-	time_scale_slider.value = 30.0
-	time_scale_slider.step = 5.0
-	time_scale_slider.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	time_scale_slider.custom_minimum_size.x = 80
-	time_scale_slider.value_changed.connect(_cb.get("time_scale_changed", Callable()))
-	time_scale_slider.tooltip_text = "Time scale: game-seconds per real-second"
-	speed_pause_row.add_child(time_scale_slider)
-
-	time_pause_toggle = CheckBox.new()
-	time_pause_toggle.text = "Pause"
-	time_pause_toggle.button_pressed = false
-	time_pause_toggle.toggled.connect(_cb.get("time_pause_toggled", Callable()))
-	speed_pause_row.add_child(time_pause_toggle)
-
-	vbox.add_child(speed_pause_row)
-
-	# ── Weather ──
-	_add_section(vbox, "Weather")
-
-	weather_enabled_toggle = CheckBox.new()
-	weather_enabled_toggle.text = "Enable Weather"
-	weather_enabled_toggle.button_pressed = false
-	weather_enabled_toggle.toggled.connect(_cb.get("weather_toggled", Callable()))
-	weather_enabled_toggle.tooltip_text = "Enable dynamic weather system (drives fog color + density from weather state)"
-	vbox.add_child(weather_enabled_toggle)
-
-	# Unified weather dropdown — single source of truth for the active weather.
-	# "Auto" lets the region-based auto-weather system pick; any other entry
-	# locks the weather to that type. Time-of-day / speed / pause live in the
-	# Sky & Time section above — no duplication here.
-	var weather_row := HBoxContainer.new()
-	var weather_label := Label.new()
-	weather_label.text = "Weather:"
-	weather_label.add_theme_font_size_override("font_size", 11)
-	weather_label.custom_minimum_size.x = 60
-	weather_row.add_child(weather_label)
-
-	weather_type_btn = OptionButton.new()
-	weather_type_btn.add_item("Auto", -1)
-	for i: int in WeatherTypes.TYPE_NAMES.size():
-		weather_type_btn.add_item(WeatherTypes.TYPE_NAMES[i], i)
-	weather_type_btn.selected = 0
-	weather_type_btn.item_selected.connect(_cb.get("weather_type_changed", Callable()))
-	weather_type_btn.tooltip_text = "Active weather (Auto = region-based, otherwise locks to the selected type)"
-	weather_type_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	weather_row.add_child(weather_type_btn)
-	vbox.add_child(weather_row)
-
-	# Fog density multiplier
-	fog_density_slider = create_slider_row(vbox, "Fog:", 0.1, 3.0, 1.0, _cb.get("fog_density_changed", Callable()))
-	fog_density_slider.step = 0.1
-	fog_density_slider.tooltip_text = "Fog density multiplier (1.0 = default, higher = thicker)"
-
-	# Fog & atmosphere toggles — grouped with weather because weather drives
-	# fog/godray parameters when active (authority model: Phase B refactor)
-	depth_fog_toggle = CheckBox.new()
-	depth_fog_toggle.text = "Depth Fog (aerial perspective)"
-	depth_fog_toggle.button_pressed = true
-	depth_fog_toggle.toggled.connect(_cb.get("depth_fog_toggled", Callable()))
-	depth_fog_toggle.tooltip_text = "Distance haze — makes far objects fade to sky color for depth"
-	vbox.add_child(depth_fog_toggle)
-
-	native_vfog_toggle = CheckBox.new()
-	native_vfog_toggle.text = "Volumetric Fog"
-	native_vfog_toggle.button_pressed = false
-	native_vfog_toggle.toggled.connect(_cb.get("native_vfog_toggled", Callable()))
-	native_vfog_toggle.tooltip_text = "Godot native volumetric fog — produces god rays via forward scattering"
-	vbox.add_child(native_vfog_toggle)
-
-	godrays_toggle = CheckBox.new()
-	godrays_toggle.text = "God Rays (compute)"
-	godrays_toggle.button_pressed = false
-	godrays_toggle.toggled.connect(_cb.get("godrays_toggled", Callable()))
-	godrays_toggle.tooltip_text = "Compute shader god rays — requires Sky to be enabled"
-	vbox.add_child(godrays_toggle)
-
-	# --- Volumetric cloud parameters (SunshineClouds2) --------------------
-	# Direct bindings onto the SunshineClouds2 resource. Weather presets
-	# call on_* handlers to push their values here — there is NO per-frame
-	# override, the slider is the single source of truth.
-	cloud_coverage_slider = create_slider_row(vbox, "Clouds:", 0.0, 1.0, 0.45, _cb.get("cloud_coverage_changed", Callable()))
-	cloud_coverage_slider.step = 0.02
-	cloud_coverage_slider.tooltip_text = "SunshineClouds2 clouds_coverage (0 = clear, 1 = overcast)"
-
-	cloud_density_slider = create_slider_row(vbox, "Cloud Density:", 0.02, 1.0, 0.14, _cb.get("cloud_density_changed", Callable()) if _cb.has("cloud_density_changed") else Callable())
-	cloud_density_slider.step = 0.01
-	cloud_density_slider.tooltip_text = "SunshineClouds2 clouds_density — safe range 0.02-1.0 (plugin default 0.14)"
-
-	cloud_sharpness_slider = create_slider_row(vbox, "Cloud Sharpness:", 0.0, 2.0, 0.75, _cb.get("cloud_sharpness_changed", Callable()) if _cb.has("cloud_sharpness_changed") else Callable())
-	cloud_sharpness_slider.step = 0.02
-	cloud_sharpness_slider.tooltip_text = "SunshineClouds2 clouds_sharpness — edge definition"
-
-	cloud_size_slider = create_slider_row(vbox, "Cloud Size:", 0.3, 3.0, 1.0, _cb.get("cloud_size_changed", Callable()) if _cb.has("cloud_size_changed") else Callable())
-	cloud_size_slider.step = 0.05
-	cloud_size_slider.tooltip_text = "Coarse multiplier applied to SunshineClouds2 noise scales (larger = bigger clumps)"
-
-	wind_strength_slider = create_slider_row(vbox, "Wind:", 0.0, 1.0, 0.25, _cb.get("wind_strength_changed", Callable()) if _cb.has("wind_strength_changed") else Callable())
-	wind_strength_slider.step = 0.02
-	wind_strength_slider.tooltip_text = "Wind strength — drives cloud wind sweep + ocean wave chaos"
-
-	# Weather status
-	weather_status_label = Label.new()
-	weather_status_label.name = "WeatherStatus"
-	weather_status_label.text = "Weather: Clear | Hour: 8.0"
-	weather_status_label.add_theme_font_size_override("font_size", 10)
-	weather_status_label.autowrap_mode = TextServer.AUTOWRAP_WORD
-	vbox.add_child(weather_status_label)
-
-	# ── Ocean ──
-	_add_section(vbox, "Ocean")
-
-	show_ocean_toggle = CheckBox.new()
-	show_ocean_toggle.text = "Ocean"
-	show_ocean_toggle.button_pressed = _initial_state.get("show_ocean", false)
-	show_ocean_toggle.toggled.connect(_cb.get("show_ocean_toggled", Callable()))
-	show_ocean_toggle.tooltip_text = "Toggle ocean toggle in Environment tab"
-	vbox.add_child(show_ocean_toggle)
-
-	# Quality dropdown
-	var quality_row := HBoxContainer.new()
-	var quality_label := Label.new()
-	quality_label.text = "Quality:"
-	quality_label.add_theme_font_size_override("font_size", 11)
-	quality_label.custom_minimum_size.x = 50
-	quality_row.add_child(quality_label)
-
-	water_quality_btn = OptionButton.new()
-	water_quality_btn.add_item("Auto", -1)
-	water_quality_btn.add_item("Flat", 0)
-	water_quality_btn.add_item("High (FFT)", 1)
-	water_quality_btn.selected = 0
-	water_quality_btn.item_selected.connect(_cb.get("water_quality_changed", Callable()))
-	water_quality_btn.tooltip_text = "Water quality:\n- Flat: Simple plane (fallback)\n- High: FFT compute ocean (JONSWAP spectrum)"
-	water_quality_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	quality_row.add_child(water_quality_btn)
-	vbox.add_child(quality_row)
-
-	# Ocean controls container (shown when ocean is enabled)
-	ocean_controls_container = VBoxContainer.new()
-	ocean_controls_container.name = "OceanControls"
-	ocean_controls_container.visible = false
-
-	wave_scale_slider = create_slider_row(ocean_controls_container, "Wave Height:", 0.0, 3.0, 1.0, _cb.get("wave_scale_changed", Callable()))
-	wave_scale_slider.step = 0.05
-	wave_scale_slider.tooltip_text = "Wave height multiplier — scales vertical displacement on all cascades"
-
-	choppiness_slider = create_slider_row(ocean_controls_container, "Choppiness:", 0.0, 1.0, 0.3, _cb.get("choppiness_changed", Callable()) if _cb.has("choppiness_changed") else Callable())
-	choppiness_slider.step = 0.02
-	choppiness_slider.tooltip_text = "Wave directionality — 0 = smooth aligned swell, 1 = chaotic omnidirectional chop"
-
-	debug_shore_toggle = CheckBox.new()
-	debug_shore_toggle.text = "Debug Shore Mask"
-	debug_shore_toggle.button_pressed = false
-	debug_shore_toggle.toggled.connect(_cb.get("debug_shore_toggled", Callable()))
-	debug_shore_toggle.tooltip_text = "Visualize shore damping"
-	ocean_controls_container.add_child(debug_shore_toggle)
-
-	vbox.add_child(ocean_controls_container)
-
-	# ── Terrain ──
-	_add_section(vbox, "Terrain")
-
-	var terrain_label := Label.new()
-	terrain_label.name = "TerrainLabel"
-	terrain_label.add_theme_font_size_override("font_size", 11)
-	terrain_label.text = "Regions: --"
-	vbox.add_child(terrain_label)
-
-	# ── NPCs ──
-	_add_section(vbox, "Characters")
-
-	show_characters_toggle = CheckBox.new()
-	show_characters_toggle.text = "NPCs"
-	show_characters_toggle.button_pressed = _initial_state.get("show_characters", false)
-	show_characters_toggle.toggled.connect(_cb.get("show_characters_toggled", Callable()))
-	show_characters_toggle.tooltip_text = "Toggle NPCs and creatures toggle in Environment tab"
-	vbox.add_child(show_characters_toggle)
+	_add_section(vbox, "Town Glow (far)")
+	_add_light_slider(vbox, "Glow", 0.0, 8.0, LightTuning.aggregate_energy_base, 0.1, "aggregate_energy_base",
+		"Brightness of the aggregated warm town-glow seen from afar (250 m-1.2 km). Live.")
+	_add_light_slider(vbox, "Reach", 300.0, 900.0, LightTuning.aggregate_near_full_m, 25.0, "aggregate_near_full_m",
+		"Distance at which the town-glow fully takes over from the individual lights. Live.")
+	_add_light_slider(vbox, "Spread", 0.0, 300.0, LightTuning.aggregate_range_margin_m, 10.0, "aggregate_range_margin_m",
+		"How far each town-glow blob spreads beyond the town's lights.")
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -880,6 +787,20 @@ func _build_rendering_tab(vbox: VBoxContainer) -> void:
 	glow_toggle.toggled.connect(_cb.get("glow_toggled", Callable()))
 	glow_toggle.tooltip_text = "HDR bloom on bright surfaces (sun, torches, lava)"
 	vbox.add_child(glow_toggle)
+
+	# ── Global Illumination ──
+	_add_section(vbox, "Global Illumination")
+
+	sdfgi_toggle = CheckBox.new()
+	sdfgi_toggle.text = "SDFGI"
+	# Defaults OFF — matches EnvironmentControls._visual_state["sdfgi"] and the
+	# environment SkyManager builds. Camera-centered cascades produce a bright
+	# GI bubble around the camera at night; when enabled, SkyManager dims its
+	# energy with the day/night cycle so the halo doesn't return.
+	sdfgi_toggle.button_pressed = false
+	sdfgi_toggle.toggled.connect(_cb.get("sdfgi_toggled", Callable()))
+	sdfgi_toggle.tooltip_text = "Signed-Distance-Field Global Illumination — camera-centered indirect bounce/ambient. Off by default (frame cost + night halo); energy tracks the day/night cycle when on."
+	vbox.add_child(sdfgi_toggle)
 
 	# ── Shadows ──
 	_add_section(vbox, "Shadows")
@@ -971,75 +892,6 @@ func _build_rendering_tab(vbox: VBoxContainer) -> void:
 
 	vbox.add_child(res_row)
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# TAB 3: NAVIGATION
-# ══════════════════════════════════════════════════════════════════════════════
-
-func _build_navigation_tab(vbox: VBoxContainer) -> void:
-	# Camera info (updated dynamically)
-	var camera_label := Label.new()
-	camera_label.name = "CameraLabel"
-	camera_label.add_theme_font_size_override("font_size", 11)
-	camera_label.text = "Cell: (0, 0) | Mode: Fly"
-	vbox.add_child(camera_label)
-
-	# View distance is startup/config-only. Live range edits cause expensive
-	# MID/HLOD/FAR reconfiguration and make tier debugging ambiguous.
-	_add_section(vbox, "View Distance")
-
-	var view_row := HBoxContainer.new()
-	var view_distance: int = _initial_state.get("view_distance", StreamingConfig.DEFAULT_VIEW_DISTANCE_METERS)
-
-	var dist_label := Label.new()
-	dist_label.name = "DistLabel"
-	dist_label.text = StreamingConfig.format_view_distance(view_distance)
-	dist_label.add_theme_font_size_override("font_size", 11)
-	dist_label.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	view_distance_label = dist_label
-	view_row.add_child(dist_label)
-	vbox.add_child(view_row)
-
-	# Quick teleport buttons
-	_add_section(vbox, "Quick Teleport")
-
-	var teleport_cb: Callable = _cb.get("teleport_to_cell", Callable())
-
-	var btn_row1 := HBoxContainer.new()
-	btn_row1.add_theme_constant_override("separation", 4)
-
-	var seyda_btn := Button.new()
-	seyda_btn.text = "Seyda Neen"
-	seyda_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	seyda_btn.pressed.connect(func() -> void: teleport_cb.call(-2, -9))
-	btn_row1.add_child(seyda_btn)
-
-	var balmora_btn := Button.new()
-	balmora_btn.text = "Balmora"
-	balmora_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	balmora_btn.pressed.connect(func() -> void: teleport_cb.call(-3, -2))
-	btn_row1.add_child(balmora_btn)
-
-	vbox.add_child(btn_row1)
-
-	var btn_row2 := HBoxContainer.new()
-	btn_row2.add_theme_constant_override("separation", 4)
-
-	var vivec_btn := Button.new()
-	vivec_btn.text = "Vivec"
-	vivec_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	vivec_btn.pressed.connect(func() -> void: teleport_cb.call(5, -6))
-	btn_row2.add_child(vivec_btn)
-
-	var origin_btn := Button.new()
-	origin_btn.text = "Origin"
-	origin_btn.size_flags_horizontal = Control.SIZE_EXPAND_FILL
-	origin_btn.pressed.connect(func() -> void: teleport_cb.call(0, 0))
-	btn_row2.add_child(origin_btn)
-
-	vbox.add_child(btn_row2)
-
-
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 4: DEBUG
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1061,12 +913,12 @@ func _build_debug_tab(vbox: VBoxContainer) -> void:
 	# ── LOD Overlays (foldable) ──
 	var lod_panel := FoldablePanelScript.new("LOD Overlays", true)
 
-	var chunk_toggle := CheckBox.new()
-	chunk_toggle.text = "Show HLOD Chunks"
-	chunk_toggle.button_pressed = _initial_state.get("show_chunk_debug", false)
-	chunk_toggle.toggled.connect(_cb.get("show_chunks_toggled", Callable()))
-	chunk_toggle.tooltip_text = "Visualize HLOD chunk state: active, queued, pending, or rejected"
-	lod_panel.add_content(chunk_toggle)
+	var chunk_debug_toggle := CheckBox.new()
+	chunk_debug_toggle.text = "Show HLOD Chunks"
+	chunk_debug_toggle.button_pressed = _initial_state.get("show_chunk_debug", false)
+	chunk_debug_toggle.toggled.connect(_cb.get("show_chunks_toggled", Callable()))
+	chunk_debug_toggle.tooltip_text = "Visualize HLOD chunk state: active, queued, pending, or rejected"
+	lod_panel.add_content(chunk_debug_toggle)
 
 	var tier_toggle := CheckBox.new()
 	tier_toggle.text = "Show Distance Tiers"

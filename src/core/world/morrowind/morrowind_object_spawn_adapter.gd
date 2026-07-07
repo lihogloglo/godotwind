@@ -24,6 +24,8 @@ const INTERACTIVE_PROXIMITY_RADIUS_M: float = 25.0
 const ACTOR_PROXIMITY_RADIUS_M: float = 150.0
 
 var _source_reference_payload_cache: Dictionary[StringName, Dictionary] = {}
+## One-shot breadcrumb for the 2026-07-06 missing-lantern hunt.
+var _light_defer_logged: bool = false
 
 func instantiate_world_object(
 	record: RefCounted,
@@ -233,12 +235,30 @@ func _spawn_light(record: RefCounted, payload: Dictionary, instantiator: RefCoun
 	if is_source_record_carryable("light", light_record):
 		return _spawn_node(record, payload, instantiator, _record_cell_grid(record), str(record.get("cache_item_id")))
 	if _is_light_proximity_deferred(record, light_record, instantiator):
+		# Mesh is a scene fixture (OpenMW convention: only the light EMITTER is
+		# distance-gated) — publish the static visual proxy so lanterns/sconces
+		# stay visible in the 60-150 m band while the gameplay node is deferred.
+		if not _light_defer_logged:
+			_light_defer_logged = true
+			Log.info("streaming", "First light proximity-deferred (model='%s') — proxy publish follows" % str(record.get("model_path")))
+		if instantiator.has_method("ensure_source_visual_proxy_for_record"):
+			instantiator.call(
+				"ensure_source_visual_proxy_for_record",
+				record,
+				"light",
+				str(record.get("cache_item_id")),
+			)
 		_mark_deferred(instantiator, "light")
 		return null
 	if not instantiator.has_method("instantiate_source_light_record"):
 		_mark_skipped(instantiator, "light")
 		return null
-	return instantiator.call("instantiate_source_light_record", record, light_record) as Node3D
+	var light_node := instantiator.call("instantiate_source_light_record", record, light_record) as Node3D
+	if light_node != null and instantiator.has_method("apply_source_visual_proxy_runtime_for_record"):
+		# Suppress the mesh proxy while the full node (model + light + animation)
+		# is live; restored automatically on node exit.
+		instantiator.call("apply_source_visual_proxy_runtime_for_record", light_node, record, "light")
+	return light_node
 
 
 func _spawn_actor(record: RefCounted, payload: Dictionary, instantiator: RefCounted) -> Node3D:

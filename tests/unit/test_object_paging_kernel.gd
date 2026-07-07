@@ -394,7 +394,7 @@ func test_size_worthy_zero_distance_kept() -> void:
 		.is_true()
 
 
-## PAGING_MIN_SIZE keeps OpenMW's projected-size pattern but uses Godotwind's
+## PAGING_MIN_SIZE keeps the projected-size pattern but uses Godotwind's
 ## meter-scale tuned default so buildings and vegetation survive HLOD range.
 func test_paging_min_size_matches_godotwind_tuned_default() -> void:
 	assert_float(DU.PAGING_MIN_SIZE).is_equal_approx(0.003, 0.001)
@@ -629,7 +629,7 @@ func test_type_eligible_door_and_activator_always_paged() -> void:
 
 
 ## container is size-aware: paged at size_level=0, dropped at higher.
-## Matches OpenMW `typeFilter(REC_CONT, far)` → `!far` (keep for near chunks only).
+## Matches `typeFilter(REC_CONT, far)` → `!far` (keep for near chunks only).
 func test_type_eligible_container_size_aware() -> void:
 	assert_bool(Merger._type_eligible("container", 0)) \
 		.override_failure_message("container must be paged at near (size_level=0)") \
@@ -733,7 +733,7 @@ func test_analyze_two_types_shared_material_both_merged() -> void:
 		.is_true()
 
 
-## Distinct materials no longer block merging. Current analyze uses OpenMW's
+## Distinct materials no longer block merging. Current analyze uses the
 ## intra-NIF state-reuse shape: each low-cost triangle type independently
 ## clears benefit > cost even when materials are not shared across mesh types.
 func test_analyze_two_types_distinct_materials_can_merge_when_low_cost() -> void:
@@ -802,8 +802,8 @@ func test_analyze_zero_vert_degenerate() -> void:
 	assert_that(result).is_empty()
 
 
-## PAGING_MERGE_FACTOR = 256 matches OpenMW canonical default (plan §8).
-func test_paging_merge_factor_matches_openmw_default() -> void:
+## PAGING_MERGE_FACTOR = 256 matches the canonical default (plan §8).
+func test_paging_merge_factor_matches_canonical_default() -> void:
 	assert_float(DU.PAGING_MERGE_FACTOR).is_equal_approx(256.0, 0.001)
 
 #endregion
@@ -1199,10 +1199,10 @@ func test_teleport_threshold_matches_plan() -> void:
 #endregion
 
 
-#region Phase 5 — minSizeMergeFactor second-pass (OpenMW §2.5)
+#region Phase 5 — minSizeMergeFactor second-pass (§2.5)
 
-## Constant parity — matches OpenMW canonical defaults (plan §8).
-func test_paging_min_size_merge_factor_matches_openmw() -> void:
+## Constant parity — matches the canonical defaults (plan §8).
+func test_paging_min_size_merge_factor_matches_canonical() -> void:
 	assert_float(DU.PAGING_MIN_SIZE_MERGE_FACTOR).is_equal_approx(0.5, 0.001)
 	assert_float(DU.PAGING_MIN_SIZE_COST_MULTIPLIER).is_equal_approx(1.0, 0.001)
 

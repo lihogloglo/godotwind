@@ -1,21 +1,25 @@
-## VolumetricFogEffect - Ray-marched volumetric fog post-processing
+## VolumetricFogEffect - Analytic height fog + ray-marched detail
 ##
-## Inspired by Rafael's VAIO shader for OpenMW, adapted for Godot 4.5.
-## Uses compute shaders to ray-march through a 3D noise volume,
-## creating realistic, animated fog with height-based density variation.
+## Atmospheric height fog, adapted for Godot 4.6.
 ##
 ## Features:
-## - Ray-marched volumetric fog with 3D noise
-## - Height-based density (valleys get foggier)
+## - Analytic exponential height fog (closed-form optical depth — the UE
+##   Exponential Height Fog pattern; world-anchored, fog pools in valleys)
+## - Ray-marched noise detail + altitude-band cloud deck
 ## - Animated noise for movement
-## - Sun scattering (Mie phase function)
-## - Stamp texturing for organic look
+## - Sun scattering (Mie phase function), tinted by the sky transmittance LUT
+## - Master strength shared with the weather panel's Fog slider
 @tool
 class_name VolumetricFogEffect
 extends PostProcessEffect
 
 ## Path to compute shader
 const SHADER_PATH := "res://src/core/shaders/compute/volumetric_fog.glsl"
+
+## Optical depth that reads as a near-solid fog "curtain" (~95% opacity). The
+## user-facing "Fog Distance" control is the distance at which the layer reaches
+## this opacity; it is converted to shader extinction via d0 = FOG_FULL_OD / dist.
+const FOG_FULL_OD := 3.0
 
 ## Noise textures
 var _noise_3d_texture: Texture3D
@@ -69,7 +73,7 @@ func _init() -> void:
 
 	effect_name = "volumetric_fog"
 	display_name = "Volumetric Fog"
-	description = "Ray-marched volumetric fog with 3D noise, height falloff, and sun scattering. Inspired by OpenMW's VAIO shader."
+	description = "Ray-marched volumetric fog with 3D noise, height falloff, and sun scattering."
 	category = "Atmosphere"
 	render_priority = 10
 
@@ -86,36 +90,37 @@ func _define_parameters() -> void:
 	register_parameter("fog_color", Color(0.7, 0.75, 0.8, 1.0), null, null, 0.01,
 		"Fog Color", "Base color of the fog")
 
-	register_parameter("fog_intensity", 0.5, 0.0, 2.0, 0.01,
-		"Intensity", "Overall fog intensity (0 = no fog, 1 = normal, 2 = dense)")
+	register_parameter("fog_intensity", 1.0, 0.0, 3.0, 0.05,
+		"Strength", "Master fog strength — scales the layer's optical depth (shared with the weather panel's Fog slider)")
 
-	register_parameter("fog_density", 0.0007, 0.0001, 0.01, 0.0001,
-		"Density", "Fog density coefficient (exponential falloff)")
+	# The "curtain" distance: how far the layer builds into a near-solid wall of
+	# fog. Converted to shader extinction (d0 = FOG_FULL_OD / distance) at push
+	# time. Replaces the old raw "Density" 1/m knob — same layer, intuitive units.
+	register_parameter("fog_distance", 1000.0, 200.0, 8000.0, 50.0,
+		"Fog Distance", "Distance (m) at which the ground fog becomes a near-solid misty wall. Higher = the curtain sits further out; lower brings it in close")
 
-	# Distance parameters
-	register_parameter("fog_start", 50.0, 0.0, 500.0, 10.0,
-		"Start Distance", "Distance where fog begins to appear")
+	# World-anchored exponential height layer
+	register_parameter("fog_base_height", 0.0, -100.0, 400.0, 5.0,
+		"Base Altitude", "World altitude (m) at/below which fog is full density; 0 = sea level")
 
-	register_parameter("fog_end", 5000.0, 500.0, 20000.0, 100.0,
-		"End Distance", "Maximum fog distance (also affects sky)")
+	register_parameter("fog_layer_height", 60.0, 10.0, 500.0, 5.0,
+		"Layer Height", "Scale height (m) — fog thins with altitude over roughly this many meters above the base")
 
-	# Height-based fog
-	register_parameter("height_falloff", 0.003, 0.0, 0.01, 0.0005,
-		"Height Falloff", "How quickly fog density decreases with height")
+	# Detail
+	register_parameter("fog_detail", 0.6, 0.0, 1.0, 0.05,
+		"Detail", "Animated noise modulation of the fog (0 = smooth analytic layer)")
 
-	register_parameter("height_multiplier", 5.0, 1.0, 20.0, 0.5,
-		"Valley Multiplier", "Extra fog density in valleys (below camera)")
-
-	# Animation
 	register_parameter("fog_speed", 8.0, 0.0, 25.0, 0.5,
-		"Animation Speed", "How fast the fog moves/animates")
+		"Animation Speed", "How fast the fog detail drifts")
 
-	# Stamping (detail texturing)
-	register_parameter("stamp_intensity", 0.6, 0.0, 1.0, 0.05,
-		"Stamp Intensity", "Adds texture detail to fog (0 = smooth, 1 = textured)")
+	# Detail reach + quality (view-distance march + ray-steps multiplier). The
+	# noise and cloud deck are ray-marched over this distance and fade out at its
+	# far edge; longer distances need more steps to stay smooth.
+	register_parameter("detail_distance", 2000.0, 500.0, 12000.0, 100.0,
+		"Detail Distance", "How far the animated noise + cloud deck reach before dissolving into the smooth fog (meters)")
 
-	register_parameter("stamp_contrast", 1.6, 1.0, 2.0, 0.1,
-		"Stamp Contrast", "Contrast of the stamp texture effect")
+	register_parameter("ray_steps", 24.0, 12.0, 96.0, 4.0,
+		"Ray Steps", "Ray-march samples for the noise/deck detail. Higher = smoother at long Detail Distance, at a performance cost")
 
 	# Sun scattering
 	register_parameter("sun_intensity", 1.0, 0.0, 3.0, 0.1,
@@ -123,6 +128,20 @@ func _define_parameters() -> void:
 
 	register_parameter("sun_direction", Vector3(-0.5, -0.5, -0.707).normalized(), null, null, 0.01,
 		"Sun Direction", "Direction of the sun for scattering calculation")
+
+	# Cloud deck (2026-07-06) — altitude band of dense, coverage-gated noise so
+	# cloud banks cling to relief; peaks poke through. Coverage 0 disables.
+	register_parameter("cloud_height", 140.0, 0.0, 600.0, 5.0,
+		"Cloud Deck Height", "Altitude of the cloud band center (meters)")
+
+	register_parameter("cloud_thickness", 90.0, 0.0, 400.0, 5.0,
+		"Cloud Deck Thickness", "Vertical extent of the cloud band (meters)")
+
+	register_parameter("cloud_coverage", 0.0, 0.0, 1.0, 0.02,
+		"Cloud Coverage", "How much of the deck is filled (0 = off)")
+
+	register_parameter("cloud_density", 2.5, 0.0, 8.0, 0.1,
+		"Cloud Bank Density", "Opacity multiplier of the cloud banks")
 
 
 func on_effect_added() -> void:
@@ -144,9 +163,9 @@ func on_effect_added() -> void:
 
 
 func _load_noise_textures() -> void:
-	# Try to load Rafael's noise textures if available
-	var noise_3d_path := "res://inspos/RafaelsShaderPack/Textures/noise3d.dds"
-	var noise_2d_path := "res://inspos/RafaelsShaderPack/Textures/perlin2d.png"
+	# Load authored noise textures if present, else generate procedurally
+	var noise_3d_path := "res://assets/shaders/noise/noise3d.dds"
+	var noise_2d_path := "res://assets/shaders/noise/perlin2d.png"
 
 	if ResourceLoader.exists(noise_3d_path):
 		_noise_3d_texture = load(noise_3d_path)
@@ -266,17 +285,23 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	var cam_position := cam_transform.origin
 
 	# Build camera matrix buffer (binding 5) — two mat4s exceed 128-byte push constant limit
+	# COLUMN-major packing (col outer, row inner) — GLSL mat4 layout. The
+	# original port iterated rows outer, shipping TRANSPOSED matrices: the
+	# mostly-diagonal perspective inverse then produced a pitch-dependent
+	# vertical mirror of the ray field ("foreground misty when looking up",
+	# user-diagnosed 2026-07-06). Matches underwater_compositor_effect.gd.
 	var matrix_data := PackedFloat32Array()
 	var inv_proj := projection.inverse()
-	for row in 4:
-		for col in 4:
+	for col in 4:
+		for row in 4:
 			matrix_data.append(inv_proj[col][row])
 	var inv_view := Projection(cam_transform)
-	for row in 4:
-		for col in 4:
+	for col in 4:
+		for row in 4:
 			matrix_data.append(inv_view[col][row])
 
-	# Build push constants (112 bytes — within 128-byte Vulkan limit)
+	# Build push constants (128 bytes — exactly the guaranteed Vulkan minimum;
+	# fog_params2.yzw are the only spare slots)
 	var push_constants := PackedFloat32Array()
 
 	# camera_position (vec4)
@@ -285,27 +310,31 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	push_constants.append(cam_position.z)
 	push_constants.append(Time.get_ticks_msec() / 1000.0)  # time
 
-	# fog_color (vec4) — use cached weather fog color when weather is active
+	# fog_color (vec4) — rgb = color (weather-driven when active), a = master strength
 	var fog_color: Color = get_param("fog_color")
-	var intensity: float = get_param("fog_intensity")
+	var strength: float = get_param("fog_intensity")
 	if _cached_weather_active:
 		fog_color = _cached_fog_color
 	push_constants.append(fog_color.r)
 	push_constants.append(fog_color.g)
 	push_constants.append(fog_color.b)
-	push_constants.append(intensity)
+	push_constants.append(strength)
 
-	# fog_params (vec4)
-	push_constants.append(get_param("fog_density"))
-	push_constants.append(get_param("height_falloff"))
-	push_constants.append(get_param("fog_start"))
-	push_constants.append(get_param("fog_end"))
+	# fog_params (vec4) — density, height falloff (1 / layer height), base altitude, detail.
+	# Density is derived from the "Fog Distance" curtain control: the distance at
+	# which a horizontal ray at the fog base reaches ~95% opacity (optical depth 3).
+	var layer_height: float = get_param("fog_layer_height")
+	var fog_distance: float = maxf(get_param("fog_distance"), 1.0)
+	push_constants.append(FOG_FULL_OD / fog_distance)
+	push_constants.append(1.0 / maxf(layer_height, 1.0))
+	push_constants.append(get_param("fog_base_height"))
+	push_constants.append(get_param("fog_detail"))
 
-	# fog_params2 (vec4)
+	# fog_params2 (vec4) — animation speed, detail-march distance (m), ray-step count, reserved
 	push_constants.append(get_param("fog_speed"))
-	push_constants.append(get_param("height_multiplier"))
-	push_constants.append(get_param("stamp_intensity"))
-	push_constants.append(get_param("stamp_contrast"))
+	push_constants.append(get_param("detail_distance"))
+	push_constants.append(get_param("ray_steps"))
+	push_constants.append(0.0)
 
 	# sun_direction (vec4) — try to find active sun, fall back to parameter.
 	# The sun node leaves the tree when the sky is toggled off; reading
@@ -319,12 +348,18 @@ func _render_view(view: int, size: Vector2i, buffers: RenderSceneBuffersRD, scen
 	push_constants.append(sun_dir.z)
 	push_constants.append(get_param("sun_intensity"))
 
-	# weather_params (vec4) — OpenMW compat: weather_id, next_weather_id, transition, game_hour
+	# weather_params (vec4) — weather_id, next_weather_id, transition, game_hour
 	# Uses cached values written on main thread (see update_weather_cache)
 	push_constants.append(_cached_weather_id)
 	push_constants.append(_cached_next_weather_id)
 	push_constants.append(_cached_weather_transition)
 	push_constants.append(_cached_game_hour)
+
+	# cloud_params (vec4) — deck base, HALF-thickness, coverage, density
+	push_constants.append(get_param("cloud_height"))
+	push_constants.append(float(get_param("cloud_thickness")) * 0.5)
+	push_constants.append(get_param("cloud_coverage"))
+	push_constants.append(get_param("cloud_density"))
 
 	# resolution (vec2)
 	push_constants.append(float(size.x))

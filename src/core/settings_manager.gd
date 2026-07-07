@@ -257,10 +257,10 @@ func get_terrain_path() -> String:
 
 
 # =============================================================================
-# External Texture Directory Management (OpenMW-style mod support)
+# External Texture Directory Management (mod support)
 # =============================================================================
 # External texture directories allow loading textures from mod folders outside BSA.
-# Priority: Later directories override earlier ones (like OpenMW mod order).
+# Priority: Later directories override earlier ones (mod load order).
 # External textures override BSA textures when found.
 
 ## Gets external texture directories (for mod texture packs)

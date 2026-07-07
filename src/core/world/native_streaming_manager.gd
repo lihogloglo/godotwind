@@ -41,6 +41,7 @@ const BackgroundProcessorScript := preload("res://src/core/streaming/background_
 const StaticObjectRendererScript := preload("res://src/core/world/static_object_renderer.gd")
 const DistantLightManagerScript := preload("res://src/core/world/distant_light_manager.gd")
 const CellPreloaderScript := preload("res://src/core/world/cell_preloader.gd")
+const LightTuning := preload("res://src/core/world/light_tuning.gd")
 const PipelineCompileMonitorScript := preload("res://src/core/diagnostics/pipeline_compile_monitor.gd")
 const StreamingPublicationBudgetScript := preload("res://src/core/world/streaming_publication_budget.gd")
 const HLOD_MODEL_WARMUP_BUDGET_USEC: int = 2000
@@ -102,7 +103,7 @@ signal teleport_happened(from_position: Vector3, to_position: Vector3, distance:
 #region Configuration
 
 ## Radius (in cells) to keep loaded around camera.
-## 1 = 3×3 grid = 9 cells (OpenMW `exterior cell load distance=1` default,
+## 1 = 3×3 grid = 9 cells (`exterior cell load distance=1` default,
 ## matches NEAR-tier visible footprint of ~150 m at CELL=117 m).
 ## See docs/plans/distant_rendering_2026_04/near_tier_refactor.md §8.1 #1.
 @export var view_distance_meters: int = SC.DEFAULT_VIEW_DISTANCE_METERS:
@@ -246,7 +247,7 @@ var debug_unload_destructive_hold_frames: int = 0
 var _unloading_destructive_holds: Dictionary[Vector2i, int] = {}
 
 ## Request IDs of cells currently in unload-container limbo. Canonical
-## state-reversal pattern (UE5 World Partition, OpenMW UnrefQueue): keep the
+## state-reversal pattern (UE5 World Partition, deferred unref queue): keep the
 ## async request alive while the cell sits in limbo so reclaim can reverse
 ## the transition without losing in-flight instantiation work. Moved out of
 ## `_async_requests` at `_unload_cell` time; moved BACK to `_async_requests`
@@ -3330,6 +3331,12 @@ func set_chunk_tier_enabled(enabled: bool) -> bool:
 	return bool(_chunk_renderer.call("is_enabled"))
 
 
+## Effective CHUNK-tier state — false when no renderer/bake exists. Lets the UI
+## reflect reality after a no-bake refusal or a console chunks_enable/disable.
+func is_chunk_tier_enabled() -> bool:
+	return _chunk_renderer != null and bool(_chunk_renderer.call("is_enabled"))
+
+
 ## Route per-cell static-bucket presence to the chunk-proxy swap.
 func _on_cell_static_presence_changed(cell_grid: Vector2i, present: bool) -> void:
 	if _chunk_renderer != null:
@@ -3656,6 +3663,59 @@ func set_distant_lights_visible(visible: bool) -> void:
 		_distant_light_manager.set_enabled(visible)
 		if visible:
 			_distant_light_manager.scan_cells_around(_camera_cell, _distant_stream_radius_cells())
+
+
+## Re-apply live LightTuning values to ALL light tiers (Lighting UI tab). NEAR
+## lights are re-tuned in place via the gw_tunable_lights group walk; the distant
+## real lights + aggregate proxies via the manager's refresh_tunables.
+func refresh_light_tuning() -> void:
+	var near_count := reapply_near_lights()
+	var distant_count := 0
+	var agg_count := 0
+	if _distant_light_manager:
+		_distant_light_manager.refresh_tunables()
+		var s: Dictionary = _distant_light_manager.get_stats()
+		distant_count = int(s.get("distant_real_light_count", 0))
+		agg_count = int(s.get("distant_light_aggregates", 0))
+	Log.info("streaming", "Light tuning: NEAR=%d DISTANT=%d AGG=%d | Size %.2f Near %.2f Dist %.2f Glow %.2f Reach %.0f" % [
+		near_count, distant_count, agg_count,
+		LightTuning.radius_multiplier, LightTuning.near_energy_multiplier,
+		LightTuning.distant_energy_multiplier, LightTuning.aggregate_energy_base,
+		LightTuning.aggregate_near_full_m])
+
+
+## Walk the gw_tunable_lights group and re-apply the current LightTuning radius /
+## energy multipliers to every loaded NEAR light — both OmniLight3D nodes
+## (animated) and server-direct RID lights (static). Runs synchronously on a
+## slider change, so the change is instant and independent of the streaming tick.
+## Cost is bounded by the loaded NEAR-light count (a few hundred at most).
+func reapply_near_lights() -> int:
+	var tree := get_tree()
+	if tree == null:
+		return 0
+	var mult_r := LightTuning.radius_multiplier
+	var mult_e := LightTuning.near_energy_multiplier
+	var count := 0
+	for node: Node in tree.get_nodes_in_group("gw_tunable_lights"):
+		if not is_instance_valid(node):
+			continue
+		var base_range: float = float(node.get_meta("gw_base_range", 0.0))
+		var base_energy: float = float(node.get_meta("gw_base_energy", 0.8))
+		var new_range: float = maxf(base_range * mult_r, 0.125)
+		var new_energy: float = base_energy * mult_e
+		if node.has_meta("gw_light_rid"):
+			var rid: RID = node.get_meta("gw_light_rid")
+			if rid.is_valid():
+				RenderingServer.light_set_param(rid, RenderingServer.LIGHT_PARAM_RANGE, new_range)
+				RenderingServer.light_set_param(rid, RenderingServer.LIGHT_PARAM_ENERGY, new_energy)
+		else:
+			var omni := node.get_node_or_null("Light") as OmniLight3D
+			if omni != null:
+				omni.omni_range = new_range
+				omni.light_energy = new_energy
+				omni.set_meta("base_energy", new_energy)  # LightAnimator's per-frame base
+		count += 1
+	return count
 
 
 # ----------------------------------------------------------------------------

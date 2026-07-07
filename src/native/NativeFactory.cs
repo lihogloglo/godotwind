@@ -315,7 +315,7 @@ public partial class NativeFactory : RefCounted
     /// <summary>
     /// Create a new object-paging merge kernel instance.
     /// Hot merge math (vertex transform, material grouping, PackedArray concat)
-    /// for OpenMW-style chunk merging. Stateless — one instance may be reused
+    /// for chunk-level geometry merging. Stateless — one instance may be reused
     /// across concurrent worker-thread calls.
     /// </summary>
     public NativeObjectPagingKernel CreateObjectPagingKernel()

@@ -1,12 +1,12 @@
 ## SkyTransmittanceEffect - Precomputed atmospheric transmittance LUT
 ##
-## Ported from VAIO's skyTransmittance pass (Bruneton & Neyret 2008).
+## Precomputed sky-transmittance pass (Bruneton & Neyret 2008).
 ## Generates a 2D lookup table of atmospheric transmittance (RGB extinction)
 ## indexed by (cos_zenith_angle, normalized_altitude).
 ##
 ## The LUT is stored as a shared texture via ShaderManager so that downstream
 ## effects (volumetric fog, godrays, sky inscattering) can look up atmospheric
-## extinction without re-integrating. This matches VAIO's multi-pass architecture
+## extinction without re-integrating. This matches the multi-pass architecture
 ## where RT_SkyTransmittance feeds into RT_Sky and RT_Fog.
 ##
 ## The LUT is regenerated when weather changes (aerosol density varies per weather
@@ -21,7 +21,7 @@ extends PostProcessEffect
 const SHADER_PATH := "res://src/core/shaders/compute/sky_transmittance.glsl"
 const SHARED_TEXTURE_NAME := "sky_transmittance"
 
-## LUT dimensions. 256x64 matches VAIO's resolution for the transmittance table.
+## LUT dimensions. 256x64 transmittance-table resolution.
 ## U = cos(zenith) needs higher resolution (256) for horizon precision.
 ## V = altitude needs less (64) — exponential density change is smooth.
 const LUT_WIDTH: int = 256

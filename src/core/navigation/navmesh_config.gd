@@ -1,7 +1,7 @@
 ## NavMeshConfig - Centralized configuration for navigation mesh baking
 ##
 ## Provides consistent parameters for NavigationMesh generation across the codebase.
-## Based on OpenMW's recastnavigation configuration and tuned for Morrowind-scale NPCs.
+## Based on a recastnavigation configuration and tuned for Morrowind-scale NPCs.
 ##
 ## Usage:
 ##   var nav_mesh := NavigationMesh.new()

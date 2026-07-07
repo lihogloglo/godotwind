@@ -11,7 +11,7 @@ extends Resource
 ## Preset configurations (quick setup)
 enum Preset {
 	CUSTOM,           ## User-defined
-	MORROWIND,        ## Morrowind/OpenMW style
+	MORROWIND,        ## Morrowind style
 	SKYRIM,           ## Skyrim style
 	OBLIVION,         ## Oblivion style
 	SNOW_WORLD,       ## Heavy snow environment
@@ -61,7 +61,7 @@ func set_height(texture_id: int, height: float, name: String = "") -> void:
 	new_entry.texture_name = name if name != "" else "Texture %d" % texture_id
 	texture_heights.append(new_entry)
 
-## Preset: Morrowind/OpenMW
+## Preset: Morrowind
 func _apply_morrowind_preset() -> void:
 	# Adjust texture IDs to match YOUR Terrain3D setup!
 	set_height(0, 0.15, "Ash (Gray)")

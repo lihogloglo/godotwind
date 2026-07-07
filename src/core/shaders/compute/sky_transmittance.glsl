@@ -2,7 +2,7 @@
 #version 450
 
 // Sky Transmittance LUT Compute Shader
-// Ported from VAIO (Rafael's Shader Pack) — Bruneton & Neyret 2008.
+// Precomputed transmittance LUT — Bruneton & Neyret 2008.
 // Generates a 2D transmittance lookup table for atmospheric scattering.
 //
 // LUT axes:
@@ -12,8 +12,8 @@
 // Output: RGB transmittance (fraction of light surviving the path).
 // Consumed by: volumetric fog, godrays, sky inscattering.
 //
-// Adapted from VAIO's 4-wavelength spectral approach to 3-channel RGB.
-// Coordinate system: Godot Y-up (VAIO uses Z-up — all height refs converted).
+// Adapted from a 4-wavelength spectral approach to 3-channel RGB.
+// Coordinate system: Godot Y-up (source is Z-up — all height refs converted).
 
 layout(local_size_x = 8, local_size_y = 8, local_size_z = 1) in;
 
@@ -52,7 +52,7 @@ const float MIE_SCALE_HEIGHT = 1.2;         // km
 // Peak absorption at ~600nm (R channel), less at shorter wavelengths
 const vec3 OZONE_ABSORB = vec3(0.650e-3, 1.881e-3, 0.085e-3);
 
-// ─── Per-Weather Aerosol Density Tables (from VAIO) ───
+// ─── Per-Weather Aerosol Density Tables ───
 // Index: 0=Clear, 1=Cloudy, 2=Foggy, 3=Overcast, 4=Rain,
 //        5=Thunderstorm, 6=Ashstorm, 7=Blight, 8=Snow, 9=Blizzard
 

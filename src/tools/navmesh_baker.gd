@@ -1,6 +1,6 @@
 ## NavMeshBaker - Tool for pre-baking navigation meshes per cell
 ##
-## Creates pre-baked NavigationMesh resources for runtime loading (similar to OpenMW's approach)
+## Creates pre-baked NavigationMesh resources for runtime loading
 ##
 ## Process:
 ## 1. Parse cell geometry (terrain LAND/Terrain3D, static objects, buildings)
@@ -572,7 +572,7 @@ func _get_reference_transform(ref: CellReference, cell_origin: Vector3) -> Trans
 	# Position - use CoordinateSystem for proper conversion (always present in CellReference)
 	transform.origin = CS.vector_to_godot(ref.position) + cell_origin
 
-	# Rotation - use proper ESM rotation conversion matching OpenMW
+	# Rotation - use proper ESM rotation conversion
 	transform.basis = CS.esm_rotation_to_godot_basis(ref.rotation)
 
 	# Scale

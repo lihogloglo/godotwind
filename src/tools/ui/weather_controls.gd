@@ -34,7 +34,7 @@ enum CloudRenderer { OFF = 0, CHEAP = 1, VOLUMETRIC = 2 }
 var cloud_renderer: CloudRenderer = CloudRenderer.VOLUMETRIC
 
 ## True while the player is inside a classic (fade-to-black) interior pocket.
-## Weather is an exterior-worldspace system (OpenMW model: weather applies to
+## Weather is an exterior-worldspace system (weather applies to
 ## exterior/quasi-exterior cells only). While suspended, all per-frame visual
 ## writes stop — the WeatherRenderer would otherwise write exterior fog into
 ## whatever Environment is active, which during an interior visit is the
@@ -276,8 +276,10 @@ static func _remove_effect_from_compositor(effect: Resource, world_env: Node) ->
 		compositor.compositor_effects = effects
 
 
-## Fog density multiplier (user-adjustable, default 1.0)
-var fog_density_multiplier: float = 1.0
+## Independent per-fog strength multipliers (default 1.0). Each fog is tuned
+## separately — no single master slider ties them together anymore.
+var depth_fog_strength: float = 1.0
+var volumetric_fog_strength: float = 1.0
 
 
 ## Toggle weather system on/off
@@ -304,7 +306,8 @@ func on_weather_toggled(enabled: bool) -> void:
 			# no deferred — avoids one-frame stale emission/ambient.
 			_renderer.cleanup_on_deactivate()
 		_renderer.set_active(enabled)
-		_renderer.fog_density_multiplier = fog_density_multiplier
+		_renderer.depth_fog_strength = depth_fog_strength
+		_renderer.volumetric_fog_strength = volumetric_fog_strength
 
 	# After weather cleanup, re-assert environment defaults so fog
 	# returns to neutral colors (replaces the old manual albedo reset)
@@ -330,11 +333,25 @@ func on_weather_toggled(enabled: bool) -> void:
 	Log.info("weather", "Weather system %s" % ("enabled" if enabled else "disabled"))
 
 
-## Handle fog density slider change
-func on_fog_density_changed(value: float) -> void:
-	fog_density_multiplier = value
+## Handle the Depth Fog strength slider — scales the engine exponential distance
+## fog only (weather-driven density when weather is on, the fixed default when
+## off). Independent of the volumetric and ground fog.
+func on_depth_fog_strength_changed(value: float) -> void:
+	depth_fog_strength = value
 	if _renderer:
-		_renderer.fog_density_multiplier = value
+		_renderer.depth_fog_strength = value
+	if _env_controls:
+		_env_controls.set_depth_fog_strength(value)
+
+
+## Handle the Volumetric Fog strength slider — scales the engine froxel fog only.
+## Independent of the depth and ground fog.
+func on_volumetric_fog_strength_changed(value: float) -> void:
+	volumetric_fog_strength = value
+	if _renderer:
+		_renderer.volumetric_fog_strength = value
+	if _env_controls:
+		_env_controls.set_volumetric_fog_strength(value)
 
 
 ## Handle cloud coverage slider change. When weather is active, WeatherRenderer
@@ -597,7 +614,7 @@ func _sync_cloud_ambient() -> void:
 	var day_factor: float = clampf(sun_alt * 5.0 + 0.5, 0.0, 1.0)
 	# Day ambient: warm white tinted by sun color
 	var day_color: Color = sun_color.lerp(Color(0.8, 0.85, 0.9), 0.5)
-	# Night ambient: matches OpenMW night ambient (32,35,42)/255 ≈ (0.125,0.137,0.165).
+	# Night ambient: (32,35,42)/255 ≈ (0.125,0.137,0.165).
 	# Previous value (0.04,0.05,0.1) was ~3x too dark — Morrowind nights are dim, not black.
 	var night_color := Color(0.12, 0.13, 0.18)
 	# Sunset/sunrise boost: warm orange when sun is near horizon

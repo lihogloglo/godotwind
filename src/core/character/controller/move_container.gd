@@ -141,8 +141,8 @@ func is_ready() -> bool:
 # =============================================================================
 # MOVEMENT — Canonical pre-move step probe + unstuck recovery
 # =============================================================================
-# Pattern matches HL2 `CGameMovement::StepMove` / OpenMW `Stepper::step` +
-# `MovementSolver::unstuck` / UE `CharacterMovementComponent::StepUp`:
+# Pattern matches HL2 `CGameMovement::StepMove` / UE
+# `CharacterMovementComponent::StepUp`:
 # trace obstruction FIRST, try an up/forward/down probe BEFORE committing the
 # slide. This avoids the post-slide-rewind fragility of the earlier bespoke
 # implementation and eliminates the "horizontal_gain heuristic" that could
@@ -157,7 +157,7 @@ const _UNSTUCK_STEP: float = 0.02
 ## Maximum total upward displacement permitted during unstuck recovery.
 const _UNSTUCK_MAX: float = 0.5
 ## Safety margin used when consuming traced travel (prevents re-catching the
-## edge we just cleared). Matches OpenMW's `sCollisionMargin` role.
+## edge we just cleared). Fills the `sCollisionMargin` role.
 const _STEP_COLLISION_MARGIN: float = 0.001
 ## Minimum horizontal progress (meters) required at raised height to justify
 ## committing the step — below this, revert and slide normally.
@@ -263,8 +263,8 @@ func _move_with_step_up() -> void:
 		_push_rigid_bodies()
 		return
 
-	# Reject landing on slopes steeper than the character can walk — matches
-	# OpenMW's `canStepDown` + CharacterBody3D's own floor_max_angle gate.
+	# Reject landing on slopes steeper than the character can walk — a
+	# `canStepDown` check + CharacterBody3D's own floor_max_angle gate.
 	var down_normal: Vector3 = down_collision.get_normal()
 	var floor_cos: float = cos(player.floor_max_angle)
 	if down_normal.y < floor_cos:
@@ -278,8 +278,8 @@ func _move_with_step_up() -> void:
 	# Apply the downward travel, restore horizontal velocity, null vy so
 	# gravity doesn't immediately fight the new floor contact. A single
 	# move_and_slide then establishes floor state + consumes any remaining
-	# motion (slope slide, residual collision) — same idiom OpenMW uses
-	# between its step loop and the ground test.
+	# motion (slope slide, residual collision) — the same idiom used
+	# between a step loop and the ground test.
 	player.global_position += down_collision.get_travel()
 	player.velocity = original_velocity
 	player.velocity.y = 0.0
@@ -288,7 +288,7 @@ func _move_with_step_up() -> void:
 
 
 ## Push the player out of penetrating geometry. Runs every frame at the top
-## of `_move_with_step_up()`. Mirrors OpenMW `MovementSolver::unstuck`: if the
+## of `_move_with_step_up()`. Standard penetration-recovery unstuck: if the
 ## body is currently overlapping the world, raise it in small increments up
 ## to `_UNSTUCK_MAX` until clear. Beyond that cap we stop and warn — deeper
 ## penetration is a signal of bad geometry, not something to silently patch.

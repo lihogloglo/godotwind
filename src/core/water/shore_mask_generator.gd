@@ -8,7 +8,7 @@
 ## - 0.5..1.0 = water, where (alpha - 0.5) * 2 is raw distance / fade_distance
 ##
 ## Uses Jump Flooding Algorithm (JFA) for efficient Euclidean distance computation.
-## This is used for wave dampening near coastlines (OpenMW-style).
+## This is used for wave dampening near coastlines.
 class_name ShoreMaskGenerator
 extends Node
 
