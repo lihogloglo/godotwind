@@ -4,8 +4,10 @@ An open-world RPG framework for Godot 4.6, using Morrowind as an example (and ev
 
 The long-term goal: a general-purpose open-world RPG framework for Godot, where Morrowind is just one "mod" that implements abstract interfaces for terrain, NPCs, dialogue, inventory, and quests.
 
-**Current state:** World streaming and rendering are okay I guess. Character animations are still WIP, there's a character controller. 
-Gameplay systems (combat, dialogue, quests) are not started. See [STATUS.md](docs/STATUS.md).
+The current goal : a nice laboratory to do many fun experiments and learn how games are made under the hood. Learning by doing and all that.
+
+**Current state:** World streaming and rendering are okay I guess. Character animations are still WIP, there's a character controller with IK and animation blending.
+Some gameplay systems (dialogs, books, grabbing objects Oblivion-style) have barely been started, while others (combat, quests) are not started.
 
 ## Quick Start
 
@@ -31,20 +33,19 @@ Gameplay systems (combat, dialogue, quests) are not started. See [STATUS.md](doc
 
 ## What Works
 
-- **World streaming** — async cell loading, 2ms/frame budget, priority queues
-- **3-tier LOD** — NEAR (0-150m full 3D), MID (150-500m instanced), FAR (500-5km impostors)
+- **World streaming** — async cell loading, priority queues
+- **LODs and all that** — We use pre-merged chunks for distant objects, impostors for very far landmarks, separate the gameplay-relevant objects (like doors) from statics, use different LODs levels, multimeshes where that makes sense, etc.
 - **Terrain** — Terrain3D with multi-region support
+- **Water** - FFT Ocean with all the bells and whistles (like foam, SSS, particles, clipmap levels, refraction and reflection, etc), shore behavior (for these sweet wavelets lapping the beach), underwater effects, split camera above/underwater, wetness maps. Oh, and buoyancy too.
+- **Weather** - clouds from Sunshineclouds2 and Clayjohn's work, Sky, different types of fog, night/day cycle, godrays, weather presets with Rain, Ashstorm, etc.
 - **ESM/NIF/BSA parsing** — 47 record types, thread-safe, C# for performance
 - **NPC assembly** — body parts from race data, body part mirroring, animations
 - **Developer console** — object picking (still suuuuper buggy though), commands
-- **Deformation** — RTT-based ground deformation (snow, mud, ash)
+
 
 ## What Doesn't Work Yet
 
-- Combat, magic, AI, dialogue, quests, inventory, save/load
-- Ocean/water (framework exists, not wired into main scene)
-- Weather/sky (not started)
-- Interior transitions (door detection exists, no seamless loading)
+- Combat, magic, AI, quests, inventory, save/load
 - Everything else :)
 
 
@@ -61,9 +62,15 @@ Gameplay systems (combat, dialogue, quests) are not started. See [STATUS.md](doc
 
 https://github.com/SlashScreen/skelerealms/
 https://github.com/expressobits/character-controller
-https://github.com/zeux/meshoptimizer
 https://github.com/2Retr0/GodotOceanWaves
-OpenMW, of course
+https://github.com/Bonkahe/SunshineClouds2
+
+OpenMW, of course https://gitlab.com/OpenMW/openmw
+Rafael's Shaders for OpenMW https://www.nexusmods.com/morrowind/mods/53667 
+
+The code is (or should) be cleanly split into the general framework and the Morrowind translation layer. The Morrowind translation layer is still pretty mid but eventually should become its own project, for License purposes. 
+It would make sense to borrow a lot of good ideas from OpenMW as they already solved many things.
+
 
 ## Contributing
 
